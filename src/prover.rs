@@ -168,7 +168,7 @@ async fn compute_h_poly<G: GpuCurve>(
 
     // CPU Pointwise Division H(x) = (A(x)B(x) - C(x)) / Z(x)
     let mut h_evals = vec![G::Scalar::ZERO; n];
-    let z_inv = (coset_shift.pow(&[n as u64]) - G::Scalar::ONE)
+    let z_inv = (coset_shift.pow([n as u64]) - G::Scalar::ONE)
         .invert()
         .unwrap();
 
@@ -182,6 +182,7 @@ async fn compute_h_poly<G: GpuCurve>(
     let shift_inv = coset_shift.invert().unwrap();
     let mut current_shift = G::Scalar::ONE;
 
+    #[allow(clippy::needless_range_loop)]
     for i in 0..n {
         h_evals[i] *= n_inv * current_shift;
         current_shift *= shift_inv;

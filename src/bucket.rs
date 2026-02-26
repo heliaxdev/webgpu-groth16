@@ -16,7 +16,7 @@ pub fn compute_bucket_sorting<G: GpuCurve>(
 
     let c = G::bucket_width();
     let scalar_bits = G::Scalar::NUM_BITS as usize;
-    let num_windows = (scalar_bits + c - 1) / c;
+    let num_windows = scalar_bits.div_ceil(c);
 
     let mut window_buckets: Vec<Vec<usize>> = (0..num_windows).map(|_| Vec::new()).collect();
 
@@ -32,8 +32,9 @@ pub fn compute_bucket_sorting<G: GpuCurve>(
     let mut indices = Vec::with_capacity(n);
     let mut bucket_idx = 0u32;
 
+    #[allow(clippy::needless_range_loop)]
     for window_idx in 0..num_windows {
-        for &base_idx in &window_buckets[window_idx] {
+        for &_base_idx in &window_buckets[window_idx] {
             indices.push(bucket_idx);
             bucket_idx += 1;
         }
@@ -41,6 +42,7 @@ pub fn compute_bucket_sorting<G: GpuCurve>(
 
     let bucket_count = indices.len();
     let mut buckets = Vec::with_capacity(bucket_count);
+    #[allow(clippy::needless_range_loop)]
     for window_idx in 0..num_windows {
         for &base_idx in &window_buckets[window_idx] {
             buckets.push(bases[base_idx].clone());

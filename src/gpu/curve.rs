@@ -150,14 +150,14 @@ impl GpuCurve for Bls12 {
             }
         }
 
-        let num_windows = (256 + c - 1) / c;
+        let num_windows = 256_usize.div_ceil(c);
         let mut windows = Vec::with_capacity(num_windows);
 
         for i in 0..num_windows {
             let bit_offset = i * c;
             let mut window: u64 = 0;
 
-            for j in 0..((c + 7) / 8).min(4) {
+            for j in 0..c.div_ceil(8).min(4) {
                 let byte_idx = bit_offset / 8 + j;
                 if byte_idx < 32 {
                     window |= (bytes[byte_idx] as u64) << (j * 8);
@@ -184,7 +184,7 @@ impl GpuCurve for Bls12 {
     fn root_of_unity(n: usize) -> Self::Scalar {
         // blstrs::Scalar::ROOT_OF_UNITY is the 2^32 root of unity
         // To get a primitive n-th root where n divides 2^32, we square appropriately
-        let log_n = n.trailing_zeros() as u32;
+        let log_n = n.trailing_zeros();
         let mut root = blstrs::Scalar::ROOT_OF_UNITY;
 
         // Square 32 - log_n times to get 2^log_n root

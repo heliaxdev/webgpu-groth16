@@ -232,7 +232,7 @@ impl<C: GpuCurve> GpuContext<C> {
             });
             cpass.set_pipeline(&self.ntt_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            let workgroups = (num_elements + 511) / 512;
+            let workgroups = num_elements.div_ceil(512);
             cpass.dispatch_workgroups(workgroups, 1, 1);
         }
 
