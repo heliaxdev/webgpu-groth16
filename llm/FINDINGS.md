@@ -30,7 +30,7 @@ Generating a Groth16 proof requires computing a quotient polynomial $h(x)$ and e
     ├── lib.rs          # Module definitions
     ├── traits.rs       # Bellman-compatible Circuit/ConstraintSystem traits
     ├── qap.rs          # Host-side QAP reduction
-    ├── gpu.rs          # WebGPU initialization & pipeline orchestration (Pending)
+    ├── gpu.rs          # WebGPU initialization & pipeline orchestration
     ├── prover.rs       # Groth16 proof assembly (Pending)
     └── shader
         └── bls12_381
