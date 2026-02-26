@@ -1,0 +1,103 @@
+// src/shader/bls12_381/ntt.wgsl
+
+// ============================================================================
+// CONSTANTS & WORKGROUP SIZE
+// ============================================================================
+// We use a workgroup size of 256 threads.
+// Each thread processes 2 elements, so one workgroup handles a 512-element NTT tile.
+const THREADS_PER_WORKGROUP: u32 = 256u;
+const ELEMENTS_PER_TILE: u32 = 512u;
+
+// ============================================================================
+// GPU PIPELINE BUFFERS
+// ============================================================================
+
+@group(0) @binding(0)
+var<storage, read_write> data: array<U256>; // The polynomial coefficients / evaluations
+
+@group(0) @binding(1)
+var<storage, read> twiddles: array<U256>; // Precomputed powers of omega in Montgomery form
+
+// Fast workgroup-shared memory for the Cooley-Tukey butterflies
+var<workgroup> shared_data: array<U256, ELEMENTS_PER_TILE>;
+
+// ============================================================================
+// HELPER: BIT REVERSAL
+// ============================================================================
+
+// Reverses the `bit_len` lower bits of `n`.
+fn reverse_bits(n: u32, bit_len: u32) -> u32 {
+    var result: u32 = 0u;
+    var temp: u32 = n;
+    for (var i: u32 = 0u; i < bit_len; i = i + 1u) {
+        result = (result << 1u) | (temp & 1u);
+        temp = temp >> 1u;
+    }
+    return result;
+}
+
+// ============================================================================
+// NTT TILE EXECUTION (Cooley-Tukey Radix-2)
+// ============================================================================
+
+@compute @workgroup_size(THREADS_PER_WORKGROUP)
+fn ntt_tile(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) group_id: vec3<u32>
+) {
+    let tile_offset = group_id.x * ELEMENTS_PER_TILE;
+    
+    // 1. Bit-Reversed Load from Global VRAM to Workgroup Memory
+    // The Cooley-Tukey algorithm yields elements out of order, requiring bit-inversion.
+    // We apply the bit-reversal permutation while loading into shared memory.
+    let log2_elements = 9u; // log2(512) = 9
+    
+    let local_idx_1 = local_id.x;
+    let local_idx_2 = local_id.x + THREADS_PER_WORKGROUP;
+    
+    let rev_idx_1 = reverse_bits(local_idx_1, log2_elements);
+    let rev_idx_2 = reverse_bits(local_idx_2, log2_elements);
+    
+    shared_data[rev_idx_1] = data[tile_offset + local_idx_1];
+    shared_data[rev_idx_2] = data[tile_offset + local_idx_2];
+    
+    workgroupBarrier();
+    
+    // 2. Cooley-Tukey Radix-2 In-Place Butterfly Iterations
+    // Iterates through log2(N) stages.
+    var half_len: u32 = 1u;
+    for (var stage: u32 = 0u; stage < log2_elements; stage = stage + 1u) {
+        let len = half_len * 2u;
+        
+        // Each thread handles one butterfly operation.
+        // We map the linear thread ID to the corresponding butterfly indices.
+        let k = local_id.x % half_len;
+        let pos = (local_id.x / half_len) * len + k;
+        
+        // Fetch twiddle factor. 
+        // In a full hierarchical setup, the stride depends on the global pass.
+        // For this local tile, we scale the index.
+        let twiddle_stride = ELEMENTS_PER_TILE / len;
+        let twiddle = twiddles[k * twiddle_stride]; 
+        
+        let u = shared_data[pos];
+        let v = shared_data[pos + half_len];
+        
+        // Butterfly operation:
+        // temp = v * omega
+        let v_omega = mul_montgomery_u256(v, twiddle);
+        
+        // u_new = u + temp
+        // v_new = u - temp
+        shared_data[pos] = add_u256(u, v_omega);
+        shared_data[pos + half_len] = sub_u256(u, v_omega);
+        
+        half_len = len;
+        workgroupBarrier();
+    }
+    
+    // 3. Store the processed tile back to Global VRAM
+    data[tile_offset + local_idx_1] = shared_data[local_idx_1];
+    data[tile_offset + local_idx_2] = shared_data[local_idx_2];
+}
