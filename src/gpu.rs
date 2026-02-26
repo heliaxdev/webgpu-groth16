@@ -1,4 +1,4 @@
-mod curve;
+pub mod curve;
 
 use std::borrow::Cow;
 use std::marker::PhantomData;

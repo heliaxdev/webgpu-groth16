@@ -1,6 +1,7 @@
 use std::ops::{Add, Mul, Sub};
 
-use ff::{Field, PrimeField};
+use ff::{PrimeField, PrimeFieldBits};
+use group::Group;
 
 pub trait GpuCurve: 'static {
     type Scalar: PrimeField;
@@ -14,7 +15,21 @@ pub trait GpuCurve: 'static {
 
     // Serialization
     fn serialize_g1(point: &Self::G1Affine) -> Vec<u8>;
+    fn serialize_scalar(s: &Self::Scalar) -> Vec<u8>;
     fn deserialize_scalar(bytes: &[u8]) -> anyhow::Result<Self::Scalar>;
+    fn deserialize_g1(bytes: &[u8]) -> anyhow::Result<Self::G1Projective>;
+
+    // Scalar decomposition for bucket sorting
+    fn scalar_to_windows(s: &Self::Scalar, c: usize) -> Vec<u32>;
+
+    // Optimal bucket width for MSM (c such that 2^c buckets)
+    fn bucket_width() -> usize;
+
+    // NTT support
+    fn root_of_unity(n: usize) -> Self::Scalar;
+
+    // Identity element
+    fn g1_identity() -> Self::G1Projective;
 
     // CPU Fallbacks & Math
     fn msm_g2_cpu(bases: &[Self::G2Affine], scalars: &[Self::Scalar]) -> Self::G2Projective;
@@ -80,6 +95,17 @@ impl GpuCurve for Bls12 {
         wgsl_bytes
     }
 
+    fn serialize_scalar(s: &Self::Scalar) -> Vec<u8> {
+        let bits = s.to_le_bits();
+        let mut bytes = [0u8; 32];
+        for (i, bit) in bits.iter().enumerate() {
+            if *bit {
+                bytes[i / 8] |= 1 << (i % 8);
+            }
+        }
+        bytes.to_vec()
+    }
+
     fn deserialize_scalar(bytes: &[u8]) -> anyhow::Result<Self::Scalar> {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(bytes);
@@ -87,6 +113,86 @@ impl GpuCurve for Bls12 {
         // Option then Result. to prevent sidechannel attacks, we must preserve CtOption
         let scalar: Option<blstrs::Scalar> = blstrs::Scalar::from_bytes_le(&arr).into();
         scalar.ok_or_else(|| anyhow::anyhow!("Invalid scalar bytes from GPU"))
+    }
+
+    fn deserialize_g1(bytes: &[u8]) -> anyhow::Result<Self::G1Projective> {
+        let mut x = [0u8; 48];
+        let mut y = [0u8; 48];
+
+        x.copy_from_slice(&bytes[0..48]);
+        y.copy_from_slice(&bytes[48..96]);
+
+        let mut x_be = x;
+        x_be.reverse();
+        let mut y_be = y;
+        y_be.reverse();
+
+        let mut uncompressed = [0u8; 96];
+        uncompressed[..48].copy_from_slice(&x_be);
+        uncompressed[48..].copy_from_slice(&y_be);
+
+        let ct: subtle::CtOption<blstrs::G1Affine> =
+            blstrs::G1Affine::from_uncompressed(&uncompressed);
+        let affine: Option<blstrs::G1Affine> = Option::from(ct);
+        if let Some(affine) = affine {
+            return Ok(affine.into());
+        }
+
+        anyhow::bail!("Failed to deserialize G1 point from GPU")
+    }
+
+    fn scalar_to_windows(s: &Self::Scalar, c: usize) -> Vec<u32> {
+        let bits = s.to_le_bits();
+        let mut bytes = [0u8; 32];
+        for (i, bit) in bits.iter().enumerate() {
+            if *bit {
+                bytes[i / 8] |= 1 << (i % 8);
+            }
+        }
+
+        let num_windows = (256 + c - 1) / c;
+        let mut windows = Vec::with_capacity(num_windows);
+
+        for i in 0..num_windows {
+            let bit_offset = i * c;
+            let mut window: u64 = 0;
+
+            for j in 0..((c + 7) / 8).min(4) {
+                let byte_idx = bit_offset / 8 + j;
+                if byte_idx < 32 {
+                    window |= (bytes[byte_idx] as u64) << (j * 8);
+                }
+            }
+
+            let mask = (1u64 << c) - 1;
+            windows.push((window & mask) as u32);
+        }
+
+        windows
+    }
+
+    fn bucket_width() -> usize {
+        // For BLS12-381 scalar field (255 bits), c=15 is optimal
+        // This gives 2^15 = 32768 buckets
+        15
+    }
+
+    fn g1_identity() -> Self::G1Projective {
+        Self::G1Projective::identity()
+    }
+
+    fn root_of_unity(n: usize) -> Self::Scalar {
+        // blstrs::Scalar::ROOT_OF_UNITY is the 2^32 root of unity
+        // To get a primitive n-th root where n divides 2^32, we square appropriately
+        let log_n = n.trailing_zeros() as u32;
+        let mut root = blstrs::Scalar::ROOT_OF_UNITY;
+
+        // Square 32 - log_n times to get 2^log_n root
+        for _ in 0..(32 - log_n) {
+            root = root * root;
+        }
+
+        root
     }
 
     fn msm_g2_cpu(bases: &[Self::G2Affine], scalars: &[Self::Scalar]) -> Self::G2Projective {

@@ -6,15 +6,16 @@ use anyhow::{Context, Result};
 use ff::{Field, PrimeField};
 use rand_core::RngCore;
 
+use crate::bucket::{BucketData, compute_bucket_sorting};
 use crate::gpu::{GpuContext, curve::GpuCurve};
 use crate::qap::ProvingCS;
-use crate::traits::{Circuit, ConstraintSystem, Index, LinearCombination};
+use crate::traits::{Circuit, Index, LinearCombination};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Proof<C: GpuCurve> {
-    pub a: C::G1Affine,
-    pub b: C::G2Affine,
-    pub c: C::G1Affine,
+pub struct Proof<G: GpuCurve> {
+    pub a: G::G1Affine,
+    pub b: G::G2Affine,
+    pub c: G::G1Affine,
 }
 
 pub struct ProvingKey<C: GpuCurve> {
@@ -71,25 +72,31 @@ async fn gpu_fft<G: GpuCurve>(
 async fn gpu_msm_g1<G: GpuCurve>(
     gpu: &GpuContext<G>,
     bases: &[G::G1Affine],
-    // TODO: this is unused
-    _scalars: &[G::Scalar],
+    scalars: &[G::Scalar],
 ) -> Result<G::G1Projective> {
-    // 1. Host-Side Bucket Sorting
+    let bucket_data: BucketData<G> = compute_bucket_sorting(bases, scalars);
+
+    if bucket_data.bucket_count == 0 {
+        return Ok(G::g1_identity());
+    }
+
     let mut bucket_bytes = Vec::new();
-    for base in bases {
+    for base in &bucket_data.buckets {
         bucket_bytes.extend_from_slice(&G::serialize_g1(base));
     }
 
-    // (Indices calculation based on scalars mapped here. For structure we zero-alloc)
-    let indices_bytes = vec![0u8; bases.len() * 4];
-    let count_bytes = (bases.len() as u32).to_le_bytes();
+    let mut indices_bytes = Vec::new();
+    for idx in &bucket_data.indices {
+        indices_bytes.extend_from_slice(&idx.to_le_bytes());
+    }
+
+    let count_bytes = (bucket_data.bucket_count as u32).to_le_bytes();
 
     let buckets_buf = gpu.create_storage_buffer("MSM Buckets", &bucket_bytes);
     let indices_buf = gpu.create_storage_buffer("MSM Indices", &indices_bytes);
     let count_buf = gpu.create_storage_buffer("MSM Count", &count_bytes);
     let result_buf = gpu.create_empty_buffer("MSM Result", 144);
 
-    // Dispatch WebGPU Compute Shader
     gpu.execute_msm(&buckets_buf, &indices_buf, &count_buf, &result_buf);
 
     let result_bytes = gpu.read_buffer(&result_buf, 144).await?;
@@ -127,7 +134,7 @@ async fn compute_h_poly<G: GpuCurve>(
     }
 
     // Generate twiddles for size N
-    let omega = G::Scalar::multiplicative_generator(); // Assumed highly composite root
+    let omega = G::root_of_unity(n);
     let omega_inv = omega.invert().unwrap();
 
     let mut fwd_twiddles = vec![G::Scalar::ONE; n];
@@ -143,7 +150,7 @@ async fn compute_h_poly<G: GpuCurve>(
     gpu_fft(gpu, &mut c_evals, &inv_twiddles).await?;
 
     let n_inv = G::Scalar::from(n as u64).invert().unwrap();
-    let coset_shift = G::Scalar::multiplicative_generator();
+    let coset_shift = G::root_of_unity(n);
     let mut shift = G::Scalar::ONE;
 
     // CPU Domain Coset Shift (O(N) operation)
