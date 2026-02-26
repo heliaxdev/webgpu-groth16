@@ -16,3 +16,7 @@ subtle = "2.5"
 futures = "0.3.32"
 anyhow = "1.0.102"
 rand_core = "0.6.4"
+bellman = "0.14"
+
+[dev-dependencies]
+rand = "0.8"

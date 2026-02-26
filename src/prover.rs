@@ -1,16 +1,20 @@
-// TODO: this implementation still seems incomplete, and it
-// is submitting many singular operations to the GPU, which
-// is highly inefficient. we should batch GPU operations
+// TODO: replace msm_g2_cpu with GPU compute shaders (need to write
+// `async fn gpu_msm_g2`, and new shaders). in another stage, implement
+// a form of efficient batching of GPU operations. loading data in and out
+// of the GPU is slow. we want to batch as many ops as possible,
+// without using a stupid amount of VRAM (perhaps we need to check
+// how much VRAM the host has). if we're constantly calling `gpu_msm_g1`,
+// `gpu_msm_g2`, and `gpu_fft` with small batches, we pay the cost
+// of GPU data transfer, and won't gain much in terms of proving speed.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use ff::{Field, PrimeField};
 use rand_core::RngCore;
 
 use crate::bucket::{BucketData, compute_bucket_sorting};
 use crate::gpu::{GpuContext, curve::GpuCurve};
-use crate::qap::ProvingCS;
-use crate::traits::{Circuit, Index, LinearCombination};
 
+// TODO: replace with [`bellman::groth16::Proof`]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof<G: GpuCurve> {
     pub a: G::G1Affine,
@@ -18,21 +22,129 @@ pub struct Proof<G: GpuCurve> {
     pub c: G::G1Affine,
 }
 
-pub struct ProvingKey<C: GpuCurve> {
-    pub alpha_g1: C::G1Affine,
-    pub beta_g1: C::G1Affine,
-    pub beta_g2: C::G2Affine,
-    pub delta_g1: C::G1Affine,
-    pub delta_g2: C::G2Affine,
+// TODO: in `create_proof`, replace this type with a generic
+// type that implements the trait [`bellman::groth16::ParameterSource`]
+pub struct ProvingKey<G: GpuCurve> {
+    pub alpha_g1: G::G1Affine,
+    pub beta_g1: G::G1Affine,
+    pub beta_g2: G::G2Affine,
+    pub delta_g1: G::G1Affine,
+    pub delta_g2: G::G2Affine,
 
-    pub a_query: Vec<C::G1Affine>,
-    pub b_query_g1: Vec<C::G1Affine>,
-    pub b_query_g2: Vec<C::G2Affine>,
-    pub h_query: Vec<C::G1Affine>,
-    pub l_query: Vec<C::G1Affine>,
+    pub a_query: Vec<G::G1Affine>,
+    pub b_query_g1: Vec<G::G1Affine>,
+    pub b_query_g2: Vec<G::G2Affine>,
+    pub h_query: Vec<G::G1Affine>,
+    pub l_query: Vec<G::G1Affine>,
 }
 
-/// Serializes a vector of scalars into a flat byte buffer for the GPU.
+struct GpuConstraintSystem<G: GpuCurve> {
+    inputs: Vec<G::Scalar>,
+    aux: Vec<G::Scalar>,
+    a_lcs: Vec<Vec<(usize, G::Scalar)>>,
+    b_lcs: Vec<Vec<(usize, G::Scalar)>>,
+    c_lcs: Vec<Vec<(usize, G::Scalar)>>,
+    _marker: std::marker::PhantomData<G>,
+}
+
+impl<G: GpuCurve> Default for GpuConstraintSystem<G> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<G: GpuCurve> GpuConstraintSystem<G> {
+    fn new() -> Self {
+        GpuConstraintSystem {
+            inputs: vec![G::Scalar::ONE],
+            aux: Vec::new(),
+            a_lcs: Vec::new(),
+            b_lcs: Vec::new(),
+            c_lcs: Vec::new(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<G: GpuCurve> bellman::ConstraintSystem<G::Scalar> for GpuConstraintSystem<G> {
+    type Root = Self;
+
+    fn alloc<F, A, AR>(
+        &mut self,
+        _annotation: A,
+        f: F,
+    ) -> Result<bellman::Variable, bellman::SynthesisError>
+    where
+        F: FnOnce() -> Result<G::Scalar, bellman::SynthesisError>,
+        A: FnOnce() -> AR,
+        AR: Into<String>,
+    {
+        let value = f()?;
+        self.aux.push(value);
+        Ok(bellman::Variable::new_unchecked(bellman::Index::Aux(
+            self.aux.len() - 1,
+        )))
+    }
+
+    fn alloc_input<F, A, AR>(
+        &mut self,
+        _annotation: A,
+        f: F,
+    ) -> Result<bellman::Variable, bellman::SynthesisError>
+    where
+        F: FnOnce() -> Result<G::Scalar, bellman::SynthesisError>,
+        A: FnOnce() -> AR,
+        AR: Into<String>,
+    {
+        let value = f()?;
+        self.inputs.push(value);
+        Ok(bellman::Variable::new_unchecked(bellman::Index::Input(
+            self.inputs.len() - 1,
+        )))
+    }
+
+    fn enforce<A, AR, LA, LB, LC>(&mut self, _annotation: A, a: LA, b: LB, c: LC)
+    where
+        A: FnOnce() -> AR,
+        AR: Into<String>,
+        LA: FnOnce(bellman::LinearCombination<G::Scalar>) -> bellman::LinearCombination<G::Scalar>,
+        LB: FnOnce(bellman::LinearCombination<G::Scalar>) -> bellman::LinearCombination<G::Scalar>,
+        LC: FnOnce(bellman::LinearCombination<G::Scalar>) -> bellman::LinearCombination<G::Scalar>,
+    {
+        let a_lc = a(bellman::LinearCombination::zero());
+        let b_lc = b(bellman::LinearCombination::zero());
+        let c_lc = c(bellman::LinearCombination::zero());
+
+        self.a_lcs.push(lc_to_vec(a_lc));
+        self.b_lcs.push(lc_to_vec(b_lc));
+        self.c_lcs.push(lc_to_vec(c_lc));
+    }
+
+    fn push_namespace<NR, N>(&mut self, _name_fn: N)
+    where
+        NR: Into<String>,
+        N: FnOnce() -> NR,
+    {
+    }
+    fn pop_namespace(&mut self) {}
+    fn get_root(&mut self) -> &mut Self::Root {
+        self
+    }
+}
+
+fn lc_to_vec<S: PrimeField>(lc: bellman::LinearCombination<S>) -> Vec<(usize, S)> {
+    lc.as_ref()
+        .iter()
+        .map(|(var, coeff)| {
+            let idx = match var.get_unchecked() {
+                bellman::Index::Input(i) => i,
+                bellman::Index::Aux(i) => i,
+            };
+            (idx, *coeff)
+        })
+        .collect()
+}
+
 fn marshal_scalars<G: GpuCurve>(scalars: &[G::Scalar]) -> Vec<u8> {
     let mut buffer = Vec::with_capacity(scalars.len() * 32);
     for s in scalars {
@@ -41,7 +153,6 @@ fn marshal_scalars<G: GpuCurve>(scalars: &[G::Scalar]) -> Vec<u8> {
     buffer
 }
 
-/// Dispatches a WebGPU NTT pass and deserializes the result back into the mutable slice.
 async fn gpu_fft<G: GpuCurve>(
     gpu: &GpuContext<G>,
     data: &mut [G::Scalar],
@@ -53,22 +164,18 @@ async fn gpu_fft<G: GpuCurve>(
     let data_buf = gpu.create_storage_buffer("NTT Data", &data_bytes);
     let twiddles_buf = gpu.create_storage_buffer("NTT Twiddles", &twiddles_bytes);
 
-    // Dispatch the WebGPU Compute Shader
     gpu.execute_ntt(&data_buf, &twiddles_buf, data.len() as u32);
 
-    // Await the mapped memory from the GPU
     let result_bytes = gpu
         .read_buffer(&data_buf, (data.len() * 32) as wgpu::BufferAddress)
         .await?;
 
-    // Deserialize back to the host memory
     for (i, chunk) in result_bytes.chunks_exact(32).enumerate() {
         data[i] = G::deserialize_scalar(chunk)?;
     }
     Ok(())
 }
 
-/// Dispatches a WebGPU MSM pass for G1 points using Luo-Fu-Gong Bucket Reduction.
 async fn gpu_msm_g1<G: GpuCurve>(
     gpu: &GpuContext<G>,
     bases: &[G::G1Affine],
@@ -103,37 +210,29 @@ async fn gpu_msm_g1<G: GpuCurve>(
     G::deserialize_g1(&result_bytes)
 }
 
-fn eval_lc<S: PrimeField>(lc: &LinearCombination<S>, inputs: &[S], aux: &[S]) -> S {
+fn eval_lc<S: PrimeField>(lc: &[(usize, S)], inputs: &[S], aux: &[S]) -> S {
     let mut res = S::ZERO;
-    for &(var, coeff) in lc.as_ref() {
-        let mut val = match var.get_unchecked() {
-            Index::Input(i) => inputs[i],
-            Index::Aux(i) => aux[i],
+    for &(idx, coeff) in lc {
+        let val = if idx < inputs.len() {
+            inputs[idx]
+        } else {
+            aux[idx - inputs.len()]
         };
-        val.mul_assign(&coeff);
-        res.add_assign(&val);
+        let mut term = val;
+        term.mul_assign(&coeff);
+        res.add_assign(&term);
     }
     res
 }
 
-/// Computes the QAP quotient polynomial h(x) using the WebGPU NTT pipeline.
 async fn compute_h_poly<G: GpuCurve>(
     gpu: &GpuContext<G>,
-    cs: &ProvingCS<G::Scalar>,
+    a_values: &[G::Scalar],
+    b_values: &[G::Scalar],
+    c_values: &[G::Scalar],
 ) -> Result<Vec<G::Scalar>> {
-    let n = cs.constraints.len().next_power_of_two();
+    let n = a_values.len().next_power_of_two();
 
-    let mut a_evals = vec![G::Scalar::ZERO; n];
-    let mut b_evals = vec![G::Scalar::ZERO; n];
-    let mut c_evals = vec![G::Scalar::ZERO; n];
-
-    for (i, constraint) in cs.constraints.iter().enumerate() {
-        a_evals[i] = eval_lc(&constraint.a, &cs.inputs, &cs.aux);
-        b_evals[i] = eval_lc(&constraint.b, &cs.inputs, &cs.aux);
-        c_evals[i] = eval_lc(&constraint.c, &cs.inputs, &cs.aux);
-    }
-
-    // Generate twiddles for size N
     let omega = G::root_of_unity(n);
     let omega_inv = omega.invert().unwrap();
 
@@ -144,7 +243,14 @@ async fn compute_h_poly<G: GpuCurve>(
         inv_twiddles[i] = inv_twiddles[i - 1] * omega_inv;
     }
 
-    // --- GPU PASSES 1, 2, 3: Inverse NTT to get coefficients ---
+    let mut a_evals = a_values.to_vec();
+    let mut b_evals = b_values.to_vec();
+    let mut c_evals = c_values.to_vec();
+
+    a_evals.resize(n, G::Scalar::ZERO);
+    b_evals.resize(n, G::Scalar::ZERO);
+    c_evals.resize(n, G::Scalar::ZERO);
+
     gpu_fft(gpu, &mut a_evals, &inv_twiddles).await?;
     gpu_fft(gpu, &mut b_evals, &inv_twiddles).await?;
     gpu_fft(gpu, &mut c_evals, &inv_twiddles).await?;
@@ -153,7 +259,6 @@ async fn compute_h_poly<G: GpuCurve>(
     let coset_shift = G::root_of_unity(n);
     let mut shift = G::Scalar::ONE;
 
-    // CPU Domain Coset Shift (O(N) operation)
     for i in 0..n {
         a_evals[i] *= n_inv * shift;
         b_evals[i] *= n_inv * shift;
@@ -161,12 +266,10 @@ async fn compute_h_poly<G: GpuCurve>(
         shift *= coset_shift;
     }
 
-    // --- GPU PASSES 4, 5, 6: Forward NTT on the Coset ---
     gpu_fft(gpu, &mut a_evals, &fwd_twiddles).await?;
     gpu_fft(gpu, &mut b_evals, &fwd_twiddles).await?;
     gpu_fft(gpu, &mut c_evals, &fwd_twiddles).await?;
 
-    // CPU Pointwise Division H(x) = (A(x)B(x) - C(x)) / Z(x)
     let mut h_evals = vec![G::Scalar::ZERO; n];
     let z_inv = (coset_shift.pow([n as u64]) - G::Scalar::ONE)
         .invert()
@@ -176,63 +279,78 @@ async fn compute_h_poly<G: GpuCurve>(
         h_evals[i] = ((a_evals[i] * b_evals[i]) - c_evals[i]) * z_inv;
     }
 
-    // --- GPU PASS 7: Inverse NTT to bring H(x) back to coefficients ---
     gpu_fft(gpu, &mut h_evals, &inv_twiddles).await?;
 
     let shift_inv = coset_shift.invert().unwrap();
     let mut current_shift = G::Scalar::ONE;
 
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..n {
-        h_evals[i] *= n_inv * current_shift;
+    for h_eval in h_evals.iter_mut().take(n) {
+        *h_eval *= n_inv * current_shift;
         current_shift *= shift_inv;
     }
 
     Ok(h_evals)
 }
 
-/// Generates a perfectly valid, randomized Groth16 proof using WebGPU.
-pub async fn create_proof<C: Circuit<G::Scalar>, G: GpuCurve, R: RngCore>(
+pub async fn create_proof<C, G, R>(
     circuit: C,
     pk: &ProvingKey<G>,
     gpu: &GpuContext<G>,
     rng: &mut R,
-) -> Result<Proof<G>> {
-    let mut cs = ProvingCS::new();
+) -> Result<Proof<G>>
+where
+    C: bellman::Circuit<G::Scalar>,
+    G: GpuCurve,
+    R: RngCore,
+{
+    let mut cs = GpuConstraintSystem::<G>::new();
     circuit
         .synthesize(&mut cs)
-        .context("Circuit synthesis failed")?;
+        .map_err(|e| anyhow::anyhow!("circuit synthesis failed: {:?}", e))?;
 
-    let mut full_assignment = cs.inputs.clone();
-    full_assignment.extend(cs.aux.clone());
+    let GpuConstraintSystem {
+        inputs,
+        aux,
+        a_lcs,
+        b_lcs,
+        c_lcs,
+        ..
+    } = cs;
 
-    // 1. QAP Quotient Polynomial h(x) Evaluation (Uses 7 WGPU NTT passes)
-    let h_coeffs = compute_h_poly(gpu, &cs).await?;
+    let num_constraints = a_lcs.len();
+    let n = num_constraints.next_power_of_two();
 
-    // 2. WGPU Multi-Scalar Multiplications (Evaluating the QAP over G1)
+    let mut a_values = vec![G::Scalar::ZERO; n];
+    let mut b_values = vec![G::Scalar::ZERO; n];
+    let mut c_values = vec![G::Scalar::ZERO; n];
+
+    for i in 0..num_constraints {
+        a_values[i] = eval_lc(&a_lcs[i], &inputs, &aux);
+        b_values[i] = eval_lc(&b_lcs[i], &inputs, &aux);
+        c_values[i] = eval_lc(&c_lcs[i], &inputs, &aux);
+    }
+
+    let h_coeffs = compute_h_poly(gpu, &a_values, &b_values, &c_values).await?;
+
+    let mut full_assignment = inputs.clone();
+    full_assignment.extend(aux.clone());
+
     let a_msm = gpu_msm_g1(gpu, &pk.a_query, &full_assignment).await?;
     let b_g1_msm = gpu_msm_g1(gpu, &pk.b_query_g1, &full_assignment).await?;
-    let l_msm = gpu_msm_g1(gpu, &pk.l_query, &cs.aux).await?;
+    let l_msm = gpu_msm_g1(gpu, &pk.l_query, &aux).await?;
     let h_msm = gpu_msm_g1(gpu, &pk.h_query, &h_coeffs).await?;
 
-    // Note: G2 MSM uses the CPU fallback because the WGSL shader pipeline is currently
-    // bound exclusively to PointG1 structs. A separate G2 wgpu compute pipeline is needed
-    // to map F_q^2 arithmetic directly onto the device.
     let b_g2_msm = G::msm_g2_cpu(&pk.b_query_g2, &full_assignment);
 
-    // 3. Cryptographic Zero-Knowledge Randomization
     let r = G::Scalar::random(&mut *rng);
     let s = G::Scalar::random(&mut *rng);
 
-    // Proof Element A: A = alpha + A_msm + r * delta
     let mut proof_a = G::add_g1_proj(&G::affine_to_proj_g1(&pk.alpha_g1), &a_msm);
     proof_a = G::add_g1_proj(&proof_a, &G::mul_g1_scalar(&pk.delta_g1, &r));
 
-    // Proof Element B: B = beta + B_msm + s * delta
     let mut proof_b = G::add_g2_proj(&G::affine_to_proj_g2(&pk.beta_g2), &b_g2_msm);
     proof_b = G::add_g2_proj(&proof_b, &G::mul_g2_scalar(&pk.delta_g2, &s));
 
-    // Proof Element C: C = L_msm + H_msm + s * A + r * B_g1 - (r * s) * delta_g1
     let mut proof_c = G::add_g1_proj(&l_msm, &h_msm);
 
     let mut b_g1 = G::add_g1_proj(&G::affine_to_proj_g1(&pk.beta_g1), &b_g1_msm);

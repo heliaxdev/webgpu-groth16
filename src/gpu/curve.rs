@@ -1,6 +1,6 @@
 use std::ops::{Add, Mul, Sub};
 
-use ff::{PrimeField, PrimeFieldBits};
+use ff::{Field, PrimeField, PrimeFieldBits};
 use group::Group;
 
 pub trait GpuCurve: 'static {
@@ -183,16 +183,9 @@ impl GpuCurve for Bls12 {
 
     fn root_of_unity(n: usize) -> Self::Scalar {
         // blstrs::Scalar::ROOT_OF_UNITY is the 2^32 root of unity
-        // To get a primitive n-th root where n divides 2^32, we square appropriately
-        let log_n = n.trailing_zeros();
-        let mut root = blstrs::Scalar::ROOT_OF_UNITY;
-
-        // Square 32 - log_n times to get 2^log_n root
-        for _ in 0..(32 - log_n) {
-            root = root * root;
-        }
-
-        root
+        // To get a primitive n-th root where n divides 2^32: ω^((2^32)/n)
+        let exponent = 0x100000000u64 >> n.trailing_zeros();
+        blstrs::Scalar::ROOT_OF_UNITY.pow_vartime([exponent])
     }
 
     fn msm_g2_cpu(bases: &[Self::G2Affine], scalars: &[Self::Scalar]) -> Self::G2Projective {

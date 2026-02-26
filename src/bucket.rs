@@ -1,5 +1,4 @@
 use crate::gpu::curve::GpuCurve;
-use ff::PrimeField;
 
 pub struct BucketData<G: GpuCurve> {
     pub buckets: Vec<G::G1Affine>,
@@ -7,6 +6,7 @@ pub struct BucketData<G: GpuCurve> {
     pub bucket_count: usize,
 }
 
+// TODO: optimize this
 pub fn compute_bucket_sorting<G: GpuCurve>(
     bases: &[G::G1Affine],
     scalars: &[G::Scalar],
@@ -15,7 +15,7 @@ pub fn compute_bucket_sorting<G: GpuCurve>(
     assert_eq!(n, scalars.len());
 
     let c = G::bucket_width();
-    let scalar_bits = G::Scalar::NUM_BITS as usize;
+    let scalar_bits = <G::Scalar as ff::PrimeField>::NUM_BITS as usize;
     let num_windows = scalar_bits.div_ceil(c);
 
     let mut window_buckets: Vec<Vec<usize>> = (0..num_windows).map(|_| Vec::new()).collect();
@@ -32,9 +32,8 @@ pub fn compute_bucket_sorting<G: GpuCurve>(
     let mut indices = Vec::with_capacity(n);
     let mut bucket_idx = 0u32;
 
-    #[allow(clippy::needless_range_loop)]
-    for window_idx in 0..num_windows {
-        for &_base_idx in &window_buckets[window_idx] {
+    for window_bucket in window_buckets.iter().take(num_windows) {
+        for _ in 0..window_bucket.len() {
             indices.push(bucket_idx);
             bucket_idx += 1;
         }
@@ -42,9 +41,9 @@ pub fn compute_bucket_sorting<G: GpuCurve>(
 
     let bucket_count = indices.len();
     let mut buckets = Vec::with_capacity(bucket_count);
-    #[allow(clippy::needless_range_loop)]
-    for window_idx in 0..num_windows {
-        for &base_idx in &window_buckets[window_idx] {
+
+    for window_bucket in window_buckets.iter().take(num_windows) {
+        for &base_idx in window_bucket {
             buckets.push(bases[base_idx].clone());
         }
     }
