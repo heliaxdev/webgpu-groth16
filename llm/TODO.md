@@ -4,9 +4,7 @@ The file `src/gpu.rs` still seems incomplete, and it is not performing operation
 
 # Next Steps
 
-The final missing piece of the puzzle is the **Host-Side Bucket Sorting** required by the Luo-Fu-Gong MSM. Because WGSL doesn't support atomic operations on 384-bit memory (which prevents standard concurrent bucket aggregation on the GPU), the Rust host must group the points by their radix slice (the $b_{ij}$ values) into the `buckets_buf` before calling `gpu.execute_msm`.
-
-We must write the Rust algorithm that slices the 255-bit `blstrs::Scalar` variables into $c$-bit radix windows and sorts the corresponding $A_i$ and $B_i$ points into the WebGPU arrays.
+- ~~Host-Side Bucket Sorting~~ - DONE: Implemented in `src/bucket.rs`
 
 # Finally
 
