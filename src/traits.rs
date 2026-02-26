@@ -1,5 +1,4 @@
 use ff::PrimeField;
-use std::marker::PhantomData;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Index {
@@ -48,15 +47,15 @@ impl<Scalar: PrimeField> LinearCombination<Scalar> {
 pub trait ConstraintSystem<Scalar: PrimeField>: Sized {
     type Root: ConstraintSystem<Scalar>;
 
-    fn alloc<F, A, AR>(&mut self, annotation: A, f: F) -> Result<Variable, String>
+    fn alloc<F, A, AR>(&mut self, annotation: A, f: F) -> anyhow::Result<Variable>
     where
-        F: FnOnce() -> Result<Scalar, String>,
+        F: FnOnce() -> anyhow::Result<Scalar>,
         A: FnOnce() -> AR,
         AR: Into<String>;
 
-    fn alloc_input<F, A, AR>(&mut self, annotation: A, f: F) -> Result<Variable, String>
+    fn alloc_input<F, A, AR>(&mut self, annotation: A, f: F) -> anyhow::Result<Variable>
     where
-        F: FnOnce() -> Result<Scalar, String>,
+        F: FnOnce() -> anyhow::Result<Scalar>,
         A: FnOnce() -> AR,
         AR: Into<String>;
 
@@ -83,5 +82,5 @@ pub trait ConstraintSystem<Scalar: PrimeField>: Sized {
 }
 
 pub trait Circuit<Scalar: PrimeField> {
-    fn synthesize<CS: ConstraintSystem<Scalar>>(self, cs: &mut CS) -> Result<(), String>;
+    fn synthesize<CS: ConstraintSystem<Scalar>>(self, cs: &mut CS) -> anyhow::Result<()>;
 }

@@ -36,9 +36,9 @@ impl<Scalar: PrimeField> ProvingCS<Scalar> {
 impl<Scalar: PrimeField> ConstraintSystem<Scalar> for ProvingCS<Scalar> {
     type Root = Self;
 
-    fn alloc<F, A, AR>(&mut self, _annotation: A, f: F) -> Result<Variable, String>
+    fn alloc<F, A, AR>(&mut self, _annotation: A, f: F) -> anyhow::Result<Variable>
     where
-        F: FnOnce() -> Result<Scalar, String>,
+        F: FnOnce() -> anyhow::Result<Scalar>,
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
@@ -47,9 +47,9 @@ impl<Scalar: PrimeField> ConstraintSystem<Scalar> for ProvingCS<Scalar> {
         Ok(Variable::new_unchecked(Index::Aux(self.aux.len() - 1)))
     }
 
-    fn alloc_input<F, A, AR>(&mut self, _annotation: A, f: F) -> Result<Variable, String>
+    fn alloc_input<F, A, AR>(&mut self, _annotation: A, f: F) -> anyhow::Result<Variable>
     where
-        F: FnOnce() -> Result<Scalar, String>,
+        F: FnOnce() -> anyhow::Result<Scalar>,
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
