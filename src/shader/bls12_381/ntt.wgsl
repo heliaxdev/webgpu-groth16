@@ -18,6 +18,17 @@ var<storage, read_write> data: array<U256>; // The polynomial coefficients / eva
 @group(0) @binding(1)
 var<storage, read> twiddles: array<U256>; // Precomputed powers of omega in Montgomery form
 
+struct NttParams {
+    n: u32,
+    half_len: u32,
+    log_n: u32,
+    _pad: u32,
+}
+
+@group(0) @binding(2)
+var<uniform> params: NttParams;
+
+
 // Fast workgroup-shared memory for the Cooley-Tukey butterflies
 var<workgroup> shared_data: array<U256, ELEMENTS_PER_TILE>;
 
@@ -34,6 +45,7 @@ fn add_fr(a: U256, b: U256) -> U256 {
     }
     return sum;
 }
+
 
 fn sub_fr(a: U256, b: U256) -> U256 {
     var is_less = false;
@@ -63,6 +75,50 @@ fn reverse_bits(n: u32, bit_len: u32) -> u32 {
         temp = temp >> 1u;
     }
     return result;
+}
+
+@compute @workgroup_size(256)
+fn bitreverse_inplace(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    let n = params.n;
+    if i >= n {
+        return;
+    }
+
+    let j = reverse_bits(i, params.log_n);
+    if i < j {
+        let tmp = data[i];
+        data[i] = data[j];
+        data[j] = tmp;
+    }
+}
+
+@compute @workgroup_size(256)
+fn ntt_global_stage(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let tid = global_id.x;
+    let n = params.n;
+    let half_len = params.half_len;
+    if half_len == 0u {
+        return;
+    }
+
+    let butterflies = n / 2u;
+    if tid >= butterflies {
+        return;
+    }
+
+    let len = half_len * 2u;
+    let k = tid % half_len;
+    let pos = (tid / half_len) * len + k;
+    let twiddle_stride = n / len;
+    let twiddle = twiddles[k * twiddle_stride];
+
+    let u = data[pos];
+    let v = data[pos + half_len];
+    let v_omega = mul_montgomery_u256(v, twiddle);
+
+    data[pos] = add_fr(u, v_omega);
+    data[pos + half_len] = sub_fr(u, v_omega);
 }
 
 // ============================================================================

@@ -15,6 +15,8 @@ pub struct GpuContext<C> {
 
     // Polynomial Pipelines
     pub ntt_pipeline: wgpu::ComputePipeline,
+    pub ntt_global_stage_pipeline: wgpu::ComputePipeline,
+    pub ntt_bitreverse_pipeline: wgpu::ComputePipeline,
     pub coset_shift_pipeline: wgpu::ComputePipeline,
     pub pointwise_poly_pipeline: wgpu::ComputePipeline,
     pub to_montgomery_pipeline: wgpu::ComputePipeline,
@@ -25,17 +27,15 @@ pub struct GpuContext<C> {
     pub msm_sum_g1_pipeline: wgpu::ComputePipeline,
     pub msm_agg_g2_pipeline: wgpu::ComputePipeline,
     pub msm_sum_g2_pipeline: wgpu::ComputePipeline,
-    pub msm_reduce_g1_pipeline: wgpu::ComputePipeline,
-    pub msm_reduce_g2_pipeline: wgpu::ComputePipeline,
 
     // Bind Group Layouts
     pub ntt_bind_group_layout: wgpu::BindGroupLayout,
+    pub ntt_params_bind_group_layout: wgpu::BindGroupLayout,
     pub coset_shift_bind_group_layout: wgpu::BindGroupLayout,
     pub pointwise_poly_bind_group_layout: wgpu::BindGroupLayout,
     pub montgomery_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_agg_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_sum_bind_group_layout: wgpu::BindGroupLayout,
-    pub msm_reduce_bind_group_layout: wgpu::BindGroupLayout,
 
     _marker: PhantomData<C>,
 }
@@ -99,6 +99,43 @@ impl<C: GpuCurve> GpuContext<C> {
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let ntt_params_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("NTT Global Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -320,32 +357,6 @@ impl<C: GpuCurve> GpuContext<C> {
                 ],
             });
 
-        let msm_reduce_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("MSM Reduce Bind Group Layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
 
         // 3. Create Compute Pipelines
         let ntt_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -362,6 +373,32 @@ impl<C: GpuCurve> GpuContext<C> {
             compilation_options: Default::default(),
             cache: None,
         });
+
+        let ntt_global_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("NTT Global Pipeline Layout"),
+            bind_group_layouts: &[&ntt_params_bind_group_layout],
+            immediate_size: 0,
+        });
+
+        let ntt_global_stage_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("NTT Global Stage Pipeline"),
+                layout: Some(&ntt_global_layout),
+                module: &ntt_module,
+                entry_point: Some("ntt_global_stage"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        let ntt_bitreverse_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("NTT BitReverse Pipeline"),
+                layout: Some(&ntt_global_layout),
+                module: &ntt_module,
+                entry_point: Some("bitreverse_inplace"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
 
         let coset_shift_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -437,11 +474,6 @@ impl<C: GpuCurve> GpuContext<C> {
             bind_group_layouts: &[&msm_sum_bind_group_layout],
             immediate_size: 0,
         });
-        let msm_reduce_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[&msm_reduce_bind_group_layout],
-            immediate_size: 0,
-        });
 
         let msm_agg_g1_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -479,29 +511,13 @@ impl<C: GpuCurve> GpuContext<C> {
                 compilation_options: Default::default(),
                 cache: None,
             });
-        let msm_reduce_g1_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("MSM Reduce G1"),
-                layout: Some(&msm_reduce_layout),
-                module: &msm_module,
-                entry_point: Some("reduce_windows_g1"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-        let msm_reduce_g2_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("MSM Reduce G2"),
-                layout: Some(&msm_reduce_layout),
-                module: &msm_module,
-                entry_point: Some("reduce_windows_g2"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
 
         Ok(Self {
             device,
             queue,
             ntt_pipeline,
+            ntt_global_stage_pipeline,
+            ntt_bitreverse_pipeline,
             coset_shift_pipeline,
             pointwise_poly_pipeline,
             to_montgomery_pipeline,
@@ -510,15 +526,13 @@ impl<C: GpuCurve> GpuContext<C> {
             msm_sum_g1_pipeline,
             msm_agg_g2_pipeline,
             msm_sum_g2_pipeline,
-            msm_reduce_g1_pipeline,
-            msm_reduce_g2_pipeline,
             ntt_bind_group_layout,
+            ntt_params_bind_group_layout,
             coset_shift_bind_group_layout,
             pointwise_poly_bind_group_layout,
             montgomery_bind_group_layout,
             msm_agg_bind_group_layout,
             msm_sum_bind_group_layout,
-            msm_reduce_bind_group_layout,
             _marker: PhantomData,
         })
     }
@@ -599,6 +613,11 @@ impl<C: GpuCurve> GpuContext<C> {
         twiddles_buffer: &wgpu::Buffer,
         num_elements: u32,
     ) {
+        if num_elements > 512 {
+            self.execute_ntt_global(data_buffer, twiddles_buffer, num_elements);
+            return;
+        }
+
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("NTT Bind Group"),
             layout: &self.ntt_bind_group_layout,
@@ -627,6 +646,105 @@ impl<C: GpuCurve> GpuContext<C> {
             cpass.set_bind_group(0, &bind_group, &[]);
             cpass.dispatch_workgroups(num_elements.div_ceil(512), 1, 1);
         }
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    pub fn execute_ntt_global(
+        &self,
+        data_buffer: &wgpu::Buffer,
+        twiddles_buffer: &wgpu::Buffer,
+        num_elements: u32,
+    ) {
+        let mut log_n = 0u32;
+        let mut m = num_elements;
+        while m > 1 {
+            log_n += 1;
+            m >>= 1;
+        }
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("NTT Global Encoder"),
+            });
+
+        let mut stage_params = [0u32; 4];
+        stage_params[0] = num_elements;
+        stage_params[2] = log_n;
+        let params_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("NTT Params Buffer"),
+                contents: bytemuck::cast_slice(&stage_params),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let make_bind_group = |params_buf: &wgpu::Buffer| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("NTT Global Bind Group"),
+                layout: &self.ntt_params_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: data_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: twiddles_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: params_buf.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+
+        // Bit-reversal pass
+        {
+            let bg = make_bind_group(&params_buf);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("NTT BitReverse Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.ntt_bitreverse_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(num_elements.div_ceil(256), 1, 1);
+        }
+
+        // Butterfly stages
+        let mut half_len = 1u32;
+        let mut param_updates: Vec<wgpu::Buffer> = Vec::new();
+        while half_len < num_elements {
+            stage_params[1] = half_len;
+            let update_buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("NTT Params Update"),
+                    contents: bytemuck::cast_slice(&stage_params),
+                    usage: wgpu::BufferUsages::COPY_SRC,
+                });
+            encoder.copy_buffer_to_buffer(
+                &update_buf,
+                0,
+                &params_buf,
+                0,
+                16,
+            );
+            param_updates.push(update_buf);
+
+            let bg = make_bind_group(&params_buf);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("NTT Global Stage Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.ntt_global_stage_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups((num_elements / 2).div_ceil(256), 1, 1);
+
+            half_len <<= 1;
+        }
+
         self.queue.submit(Some(encoder.finish()));
     }
 
@@ -1021,143 +1139,6 @@ impl<C: GpuCurve> GpuContext<C> {
         self.queue.submit(Some(encoder.finish()));
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_msm_with_final_reduction(
-        &self,
-        is_g2: bool,
-        bases_buf: &wgpu::Buffer,
-        base_indices_buf: &wgpu::Buffer,
-        bucket_pointers_buf: &wgpu::Buffer,
-        bucket_sizes_buf: &wgpu::Buffer,
-        aggregated_buckets_buf: &wgpu::Buffer,
-        bucket_values_buf: &wgpu::Buffer,
-        window_starts_buf: &wgpu::Buffer,
-        window_counts_buf: &wgpu::Buffer,
-        window_sums_buf: &wgpu::Buffer,
-        final_result_buf: &wgpu::Buffer,
-        num_active_buckets: u32,
-        num_windows: u32,
-    ) {
-        let agg_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("MSM Agg Bind Group"),
-            layout: &self.msm_agg_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: bases_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: base_indices_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: bucket_pointers_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: bucket_sizes_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: aggregated_buckets_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let sum_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("MSM Sum Bind Group"),
-            layout: &self.msm_sum_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: aggregated_buckets_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: bucket_values_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: window_starts_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: window_counts_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: window_sums_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let reduce_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("MSM Reduce Bind Group"),
-            layout: &self.msm_reduce_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: window_sums_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: final_result_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("MSM+Reduce Encoder"),
-            });
-
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("MSM Pass 1"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(if is_g2 {
-                &self.msm_agg_g2_pipeline
-            } else {
-                &self.msm_agg_g1_pipeline
-            });
-            cpass.set_bind_group(0, &agg_bind_group, &[]);
-            cpass.dispatch_workgroups(num_active_buckets.div_ceil(64).max(1), 1, 1);
-        }
-
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("MSM Pass 2"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(if is_g2 {
-                &self.msm_sum_g2_pipeline
-            } else {
-                &self.msm_sum_g1_pipeline
-            });
-            cpass.set_bind_group(0, &sum_bind_group, &[]);
-            cpass.dispatch_workgroups(num_windows, 1, 1);
-        }
-
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("MSM Final Reduce Pass"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(if is_g2 {
-                &self.msm_reduce_g2_pipeline
-            } else {
-                &self.msm_reduce_g1_pipeline
-            });
-            cpass.set_bind_group(0, &reduce_bind_group, &[]);
-            cpass.dispatch_workgroups(1, 1, 1);
-        }
-
-        self.queue.submit(Some(encoder.finish()));
-    }
-
     pub async fn read_buffer(
         &self,
         buffer: &wgpu::Buffer,
@@ -1192,6 +1173,59 @@ impl<C: GpuCurve> GpuContext<C> {
             return Ok(data);
         }
         anyhow::bail!("Failed to read back from GPU buffer")
+    }
+
+    pub async fn read_buffers_batch(
+        &self,
+        entries: &[(&wgpu::Buffer, wgpu::BufferAddress)],
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
+        let mut staging = Vec::with_capacity(entries.len());
+        for (_, size) in entries {
+            staging.push(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Batch Staging Read Buffer"),
+                size: *size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Batch Read Encoder"),
+            });
+        for (i, (src, size)) in entries.iter().enumerate() {
+            encoder.copy_buffer_to_buffer(src, 0, &staging[i], 0, *size);
+        }
+        self.queue.submit(Some(encoder.finish()));
+
+        let mut receivers = Vec::with_capacity(staging.len());
+        for s in &staging {
+            let slice = s.slice(..);
+            let (sender, receiver) = oneshot::channel();
+            slice.map_async(wgpu::MapMode::Read, move |res| {
+                let _ = sender.send(res);
+            });
+            receivers.push(receiver);
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+
+        for r in receivers {
+            match r.await {
+                Ok(Ok(())) => {}
+                _ => anyhow::bail!("Failed to map one of batch read buffers"),
+            }
+        }
+
+        let mut out = Vec::with_capacity(staging.len());
+        for s in staging {
+            let bytes = s.slice(..).get_mapped_range().to_vec();
+            s.unmap();
+            out.push(bytes);
+        }
+        Ok(out)
     }
 }
 

@@ -287,54 +287,6 @@ fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
     window_sums_g2[window_id] = store_g2(S);
 }
 
-// ==== Final window reduction to a single MSM result ====
-
-const MSM_WINDOW_BITS: u32 = 15u;
-
-@group(0) @binding(0) var<storage, read> final_window_sums_g1: array<PointG1>;
-@group(0) @binding(1) var<storage, read_write> final_result_g1: array<PointG1>;
-
-@compute @workgroup_size(1)
-fn reduce_windows_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if global_id.x > 0u { return; }
-
-    let n = arrayLength(&final_window_sums_g1);
-    var acc = G1_INFINITY;
-
-    for (var k = n; k > 0u; k = k - 1u) {
-        if k != n {
-            for (var i = 0u; i < MSM_WINDOW_BITS; i = i + 1u) {
-                acc = add_g1_safe(acc, acc);
-            }
-        }
-        acc = add_g1_safe(acc, load_g1(final_window_sums_g1[k - 1u]));
-    }
-
-    final_result_g1[0] = store_g1(acc);
-}
-
-@group(0) @binding(0) var<storage, read> final_window_sums_g2: array<PointG2>;
-@group(0) @binding(1) var<storage, read_write> final_result_g2: array<PointG2>;
-
-@compute @workgroup_size(1)
-fn reduce_windows_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if global_id.x > 0u { return; }
-
-    let n = arrayLength(&final_window_sums_g2);
-    var acc = G2_INFINITY;
-
-    for (var k = n; k > 0u; k = k - 1u) {
-        if k != n {
-            for (var i = 0u; i < MSM_WINDOW_BITS; i = i + 1u) {
-                acc = add_g2_safe(acc, acc);
-            }
-        }
-        acc = add_g2_safe(acc, load_g2(final_window_sums_g2[k - 1u]));
-    }
-
-    final_result_g2[0] = store_g2(acc);
-}
-
 // ==== Debug round-trip kernels (test-only usage from Rust) ====
 
 @group(0) @binding(0) var<storage, read> rt_in_g1: array<PointG1>;
