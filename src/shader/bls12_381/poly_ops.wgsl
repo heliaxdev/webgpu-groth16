@@ -61,3 +61,39 @@ fn pointwise_poly(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     H[i] = mul_montgomery_u256(res, z_inv);
 }
+
+// ============================================================================
+// MONTGOMERY DOMAIN BRIDGES
+// ============================================================================
+
+// R^2 mod r for the BLS12-381 scalar field (F_r).
+// Required to convert Standard Form scalars into Montgomery Form.
+const R2_MOD_R = U256(array<u32, 8>(
+    0xc422c543u, 0x86dc10c2u, 0x4a1168bau, 0xb0e50a5du,
+    0x28981180u, 0x49d9f8e5u, 0xa060e40du, 0x099d2609u
+));
+
+fn to_montgomery_u256(a: U256) -> U256 {
+    return mul_montgomery_u256(a, R2_MOD_R);
+}
+
+fn from_montgomery_u256(a: U256) -> U256 {
+    let one = U256(array<u32, 8>(1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u));
+    return mul_montgomery_u256(a, one);
+}
+
+@group(0) @binding(0) var<storage, read_write> mont_buf: array<U256>;
+
+@compute @workgroup_size(256)
+fn to_montgomery_array(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    if i >= arrayLength(&mont_buf) { return; }
+    mont_buf[i] = to_montgomery_u256(mont_buf[i]);
+}
+
+@compute @workgroup_size(256)
+fn from_montgomery_array(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    if i >= arrayLength(&mont_buf) { return; }
+    mont_buf[i] = from_montgomery_u256(mont_buf[i]);
+}

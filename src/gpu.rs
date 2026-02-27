@@ -17,6 +17,8 @@ pub struct GpuContext<C> {
     pub ntt_pipeline: wgpu::ComputePipeline,
     pub coset_shift_pipeline: wgpu::ComputePipeline,
     pub pointwise_poly_pipeline: wgpu::ComputePipeline,
+    pub to_montgomery_pipeline: wgpu::ComputePipeline,
+    pub from_montgomery_pipeline: wgpu::ComputePipeline,
 
     // MSM 2-Stage Pipelines
     pub msm_agg_g1_pipeline: wgpu::ComputePipeline,
@@ -28,6 +30,7 @@ pub struct GpuContext<C> {
     pub ntt_bind_group_layout: wgpu::BindGroupLayout,
     pub coset_shift_bind_group_layout: wgpu::BindGroupLayout,
     pub pointwise_poly_bind_group_layout: wgpu::BindGroupLayout,
+    pub montgomery_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_agg_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_sum_bind_group_layout: wgpu::BindGroupLayout,
 
@@ -183,6 +186,21 @@ impl<C: GpuCurve> GpuContext<C> {
                         count: None,
                     },
                 ],
+            });
+
+        let montgomery_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Montgomery Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
             });
 
         let msm_agg_bind_group_layout =
@@ -347,6 +365,38 @@ impl<C: GpuCurve> GpuContext<C> {
                 cache: None,
             });
 
+        let to_montgomery_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("To Montgomery Pipeline"),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: None,
+                        bind_group_layouts: &[&montgomery_bind_group_layout],
+                        immediate_size: 0,
+                    }),
+                ),
+                module: &poly_ops_module,
+                entry_point: Some("to_montgomery_array"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        let from_montgomery_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("From Montgomery Pipeline"),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: None,
+                        bind_group_layouts: &[&montgomery_bind_group_layout],
+                        immediate_size: 0,
+                    }),
+                ),
+                module: &poly_ops_module,
+                entry_point: Some("from_montgomery_array"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
         let msm_agg_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[&msm_agg_bind_group_layout],
@@ -401,6 +451,8 @@ impl<C: GpuCurve> GpuContext<C> {
             ntt_pipeline,
             coset_shift_pipeline,
             pointwise_poly_pipeline,
+            to_montgomery_pipeline,
+            from_montgomery_pipeline,
             msm_agg_g1_pipeline,
             msm_sum_g1_pipeline,
             msm_agg_g2_pipeline,
@@ -408,6 +460,7 @@ impl<C: GpuCurve> GpuContext<C> {
             ntt_bind_group_layout,
             coset_shift_bind_group_layout,
             pointwise_poly_bind_group_layout,
+            montgomery_bind_group_layout,
             msm_agg_bind_group_layout,
             msm_sum_bind_group_layout,
             _marker: PhantomData,
@@ -434,6 +487,54 @@ impl<C: GpuCurve> GpuContext<C> {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
+    }
+
+    pub fn execute_to_montgomery(&self, buffer: &wgpu::Buffer, num_elements: u32) {
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("To Montgomery Bind Group"),
+            layout: &self.montgomery_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.to_montgomery_pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.dispatch_workgroups(num_elements.div_ceil(256), 1, 1);
+        }
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    pub fn execute_from_montgomery(&self, buffer: &wgpu::Buffer, num_elements: u32) {
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("From Montgomery Bind Group"),
+            layout: &self.montgomery_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.from_montgomery_pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.dispatch_workgroups(num_elements.div_ceil(256), 1, 1);
+        }
+        self.queue.submit(Some(encoder.finish()));
     }
 
     pub fn execute_ntt(

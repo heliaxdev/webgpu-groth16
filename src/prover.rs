@@ -269,12 +269,9 @@ async fn compute_h_poly<G: GpuCurve>(
     c_values: &[G::Scalar],
 ) -> Result<Vec<G::Scalar>> {
     let n = a_values.len().next_power_of_two();
-
-    // Padding domain size to 2N avoids cyclic wrap-around
-    // when multiplying two polynomials of degree (N-1) -> resulting degree 2N - 2
     let domain_size = n * 2;
 
-    // 1. CPU PRE-COMPUTES CONSTANT FACTORS (Takes < 1 ms)
+    // 1. CPU PRE-COMPUTES CONSTANT FACTORS
     let omega_n = G::root_of_unity(n);
     let omega_n_inv = omega_n.invert().unwrap();
     let omega_2n = G::root_of_unity(domain_size);
@@ -301,8 +298,6 @@ async fn compute_h_poly<G: GpuCurve>(
         inv_twiddles_2n[i] = inv_twiddles_2n[i - 1] * omega_2n_inv;
     }
 
-    // Embed `n_inv` and `domain_inv` directly into the shifts so the GPU avoids
-    // doing a separate scalar multiplication pass.
     for i in 0..n {
         shifts[i] *= n_inv;
         inv_shifts[i] *= domain_inv;
@@ -313,7 +308,7 @@ async fn compute_h_poly<G: GpuCurve>(
     let z_odd_inv = (-g_to_n - G::Scalar::ONE).invert().unwrap();
     let z_invs = vec![z_even_inv, z_odd_inv];
 
-    // 2. CPU ZERO-PADDING (Sizes up to 2N before sending)
+    // 2. CPU ZERO-PADDING
     let mut a_coeffs = a_values.to_vec();
     a_coeffs.resize(domain_size, G::Scalar::ZERO);
     let mut b_coeffs = b_values.to_vec();
@@ -321,7 +316,7 @@ async fn compute_h_poly<G: GpuCurve>(
     let mut c_coeffs = c_values.to_vec();
     c_coeffs.resize(domain_size, G::Scalar::ZERO);
 
-    // 3. UPLOAD ALL BUFFERS TO VRAM (One-way trip)
+    // 3. UPLOAD ALL BUFFERS TO VRAM
     let a_buf = gpu.create_storage_buffer("A", &marshal_scalars::<G>(&a_coeffs));
     let b_buf = gpu.create_storage_buffer("B", &marshal_scalars::<G>(&b_coeffs));
     let c_buf = gpu.create_storage_buffer("C", &marshal_scalars::<G>(&c_coeffs));
@@ -335,6 +330,17 @@ async fn compute_h_poly<G: GpuCurve>(
     let shifts_buf = gpu.create_storage_buffer("Shifts", &marshal_scalars::<G>(&shifts));
     let inv_shifts_buf = gpu.create_storage_buffer("InvShifts", &marshal_scalars::<G>(&inv_shifts));
     let z_invs_buf = gpu.create_storage_buffer("ZInvs", &marshal_scalars::<G>(&z_invs));
+
+    // Convert raw bits into Montgomery domain for WGSL math
+    gpu.execute_to_montgomery(&a_buf, domain_size as u32);
+    gpu.execute_to_montgomery(&b_buf, domain_size as u32);
+    gpu.execute_to_montgomery(&c_buf, domain_size as u32);
+    gpu.execute_to_montgomery(&tw_inv_n_buf, n as u32);
+    gpu.execute_to_montgomery(&tw_fwd_2n_buf, domain_size as u32);
+    gpu.execute_to_montgomery(&tw_inv_2n_buf, domain_size as u32);
+    gpu.execute_to_montgomery(&shifts_buf, n as u32);
+    gpu.execute_to_montgomery(&inv_shifts_buf, n as u32);
+    gpu.execute_to_montgomery(&z_invs_buf, 2);
 
     // 4. DISPATCH 100% VRAM-BOUND GPU COMPUTE CHAIN
     // Step A: iNTT(N) to get coefficients
@@ -367,6 +373,9 @@ async fn compute_h_poly<G: GpuCurve>(
 
     // Step F: Reverse the Coset Shift on the resulting N coefficients
     gpu.execute_coset_shift(&h_buf, &inv_shifts_buf, n as u32);
+
+    // Convert final coefficients back to standard form before reading
+    gpu.execute_from_montgomery(&h_buf, n as u32);
 
     // 5. FINALLY PULL THE RESULT OFF THE GPU
     // We only read back the first N elements (H drops the top half mathematically)
