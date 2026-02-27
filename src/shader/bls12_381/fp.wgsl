@@ -51,6 +51,37 @@ fn sub_u384(a: U384, b: U384) -> U384 {
     return result;
 }
 
+// F_q Modular Addition
+fn add_mod_q(a: U384, b: U384) -> U384 {
+    var sum = add_u384(a, b);
+    var is_gte = true;
+    for (var i = 11u; i < 12u; i = i - 1u) {
+        if sum.limbs[i] > Q_MODULUS[i] { break; }
+        if sum.limbs[i] < Q_MODULUS[i] { is_gte = false; break; }
+        if i == 0u { break; }
+    }
+    if is_gte {
+        sum = sub_u384(sum, U384(Q_MODULUS));
+    }
+    return sum;
+}
+
+// F_q Modular Subtraction
+fn sub_mod_q(a: U384, b: U384) -> U384 {
+    var is_less = false;
+    for (var i = 11u; i < 12u; i = i - 1u) {
+        if a.limbs[i] < b.limbs[i] { is_less = true; break; }
+        if a.limbs[i] > b.limbs[i] { break; }
+        if i == 0u { break; }
+    }
+    var diff = sub_u384(a, b);
+    if is_less {
+        // Underflow occurred, wrap around strictly modulo Q
+        diff = add_u384(diff, U384(Q_MODULUS));
+    }
+    return diff;
+}
+
 // ============================================================================
 // BLS12-381 CONSTANTS
 // ============================================================================
