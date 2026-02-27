@@ -42,8 +42,7 @@ impl<C: GpuCurve> GpuContext<C> {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Groth16 Prover Device"),
-                required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                    .using_resolution(adapter.limits()),
+                required_limits: adapter.limits(),
                 ..Default::default()
             })
             .await?;
@@ -469,7 +468,7 @@ impl<C: GpuCurve> GpuContext<C> {
             sender.send(res).unwrap();
         });
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(target_family = "wasm"))]
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 
         if let Ok(Ok(())) = receiver.await {
