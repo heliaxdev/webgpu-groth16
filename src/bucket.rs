@@ -1,57 +1,69 @@
+use ff::PrimeField;
+
 use crate::gpu::curve::GpuCurve;
 
-// Generalized over the Affine type (A)
-pub struct BucketData<A> {
-    pub buckets: Vec<A>,
-    pub indices: Vec<u32>,
-    pub bucket_count: usize,
+pub struct BucketData {
+    pub base_indices: Vec<u32>,
+    pub bucket_pointers: Vec<u32>,
+    pub bucket_sizes: Vec<u32>,
+    pub bucket_values: Vec<u32>,
+    pub window_starts: Vec<u32>,
+    pub window_counts: Vec<u32>,
+    pub num_windows: u32,
+    pub num_active_buckets: u32,
 }
 
-// TODO: optimize this
-pub fn compute_bucket_sorting<G: GpuCurve, A: Clone>(
-    bases: &[A],
-    scalars: &[G::Scalar],
-) -> BucketData<A> {
-    let n = bases.len();
-    assert_eq!(n, scalars.len());
-
+pub fn compute_bucket_sorting<G: GpuCurve>(scalars: &[G::Scalar]) -> BucketData {
     let c = G::bucket_width();
-    let scalar_bits = <G::Scalar as ff::PrimeField>::NUM_BITS as usize;
+    let scalar_bits = <G::Scalar as PrimeField>::NUM_BITS as usize;
     let num_windows = scalar_bits.div_ceil(c);
 
-    let mut window_buckets: Vec<Vec<usize>> = (0..num_windows).map(|_| Vec::new()).collect();
+    let mut base_indices = Vec::new();
+    let mut bucket_pointers = Vec::new();
+    let mut bucket_sizes = Vec::new();
+    let mut bucket_values = Vec::new();
+    let mut window_starts = Vec::new();
+    let mut window_counts = Vec::new();
 
-    for (i, scalar) in scalars.iter().enumerate() {
-        let windows = G::scalar_to_windows(scalar, c);
-        for (j, window) in windows.iter().enumerate() {
-            if *window != 0 {
-                window_buckets[j].push(i);
+    for w in 0..num_windows {
+        // Fast 2D array for sparse bucketing. c=15 means 32768 max value.
+        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); 1 << c];
+
+        for (i, scalar) in scalars.iter().enumerate() {
+            let windows = G::scalar_to_windows(scalar, c);
+            if w < windows.len() {
+                let val = windows[w] as usize;
+                if val != 0 {
+                    buckets[val].push(i as u32);
+                }
             }
         }
-    }
 
-    let mut indices = Vec::with_capacity(n);
-    let mut bucket_idx = 0u32;
+        window_starts.push(bucket_values.len() as u32);
+        let mut count = 0;
 
-    for window_bucket in window_buckets.iter().take(num_windows) {
-        for _ in 0..window_bucket.len() {
-            indices.push(bucket_idx);
-            bucket_idx += 1;
+        for (val, indices) in buckets.into_iter().enumerate() {
+            if !indices.is_empty() {
+                bucket_pointers.push(base_indices.len() as u32);
+                bucket_sizes.push(indices.len() as u32);
+                bucket_values.push(val as u32);
+                base_indices.extend(indices);
+                count += 1;
+            }
         }
+        window_counts.push(count);
     }
 
-    let bucket_count = indices.len();
-    let mut buckets = Vec::with_capacity(bucket_count);
-
-    for window_bucket in window_buckets.iter().take(num_windows) {
-        for &base_idx in window_bucket {
-            buckets.push(bases[base_idx].clone());
-        }
-    }
+    let num_active_buckets = bucket_sizes.len() as u32;
 
     BucketData {
-        buckets,
-        indices,
-        bucket_count,
+        base_indices,
+        bucket_pointers,
+        bucket_sizes,
+        bucket_values,
+        window_starts,
+        window_counts,
+        num_windows: num_windows as u32,
+        num_active_buckets,
     }
 }

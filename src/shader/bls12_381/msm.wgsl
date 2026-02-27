@@ -1,275 +1,277 @@
 // src/shader/bls12_381/msm.wgsl
 
 // ============================================================================
-// CONSTANTS & SAFE ARITHMETIC
+// CONSTANTS & MONTGOMERY CONVERSION
 // ============================================================================
-
-// The Point at Infinity in Jacobian Coordinates (Z = 0)
 const G1_INFINITY = PointG1(
     U384(array<u32, 12>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u)),
     U384(array<u32, 12>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u)),
     U384(array<u32, 12>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u))
 );
 
-fn is_inf_g1(p: PointG1) -> bool {
-    var is_zero = true;
-    for (var i: u32 = 0u; i < 12u; i = i + 1u) {
-        if p.z.limbs[i] != 0u {
-            is_zero = false;
-            break;
-        }
-    }
-    return is_zero;
-}
-
-// Safe addition that gracefully handles the point at infinity
-fn add_g1_safe(p1: PointG1, p2: PointG1) -> PointG1 {
-    let p1_inf = is_inf_g1(p1);
-    let p2_inf = is_inf_g1(p2);
-
-    if p1_inf && p2_inf { return G1_INFINITY; }
-    if p1_inf { return p2; }
-    if p2_inf { return p1; }
-
-    return add_g1(p1, p2);
-}
-
-// ============================================================================
-// GPU PIPELINE BUFFERS
-// ============================================================================
-
-@group(0) @binding(0)
-var<storage, read> buckets: array<PointG1>;
-
-@group(0) @binding(1)
-var<storage, read> bucket_indices: array<u32>; // The active b_i values
-
-@group(0) @binding(2)
-var<storage, read> bucket_count: u32; // The number of active buckets 'm'
-
-@group(0) @binding(3)
-var<storage, read_write> final_result: array<PointG1>;
-
-// ============================================================================
-// SUBSUM ACCUMULATION (Luo, Fu, Gong - Algorithm 3)
-// ============================================================================
-
-// Evaluates S = b_1*S_1 + b_2*S_2 + ... + b_m*S_m
-// Optimized for inconsecutive bucket indices where the max difference d=6.
-@compute @workgroup_size(1)
-fn subsum_accumulation_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if global_id.x != 0u { return; } // Executed by a single thread post-reduction
-
-    let m = bucket_count;
-    if m == 0u {
-        final_result[0] = G1_INFINITY;
-        return;
-    }
-
-    // d = 6 for BLS12-381 optimal radixes. tmp array needs length d + 1 = 7.
-    var tmp = array<PointG1, 7>(
-        G1_INFINITY, G1_INFINITY, G1_INFINITY, G1_INFINITY, 
-        G1_INFINITY, G1_INFINITY, G1_INFINITY
-    );
-
-    var prev_b: u32 = 0u;
-    if m > 0u {
-        prev_b = bucket_indices[m - 1u];
-    }
-
-    // for i = m to 1 do
-    for (var i: u32 = m; i > 0u; i = i - 1u) {
-        let current_bucket = buckets[i - 1u];
-
-        // tmp[0] = tmp[0] + S_i
-        tmp[0] = add_g1_safe(tmp[0], current_bucket);
-
-        let current_b = bucket_indices[i - 1u];
-        var next_b: u32 = 0u;
-        if i > 1u {
-            next_b = bucket_indices[i - 2u];
-        }
-
-        // k = b_i - b_{i-1}
-        let k = current_b - next_b;
-
-        // if k >= 1 then tmp[k] = tmp[k] + tmp[0]
-        if k >= 1u && k <= 6u {
-            tmp[k] = add_g1_safe(tmp[k], tmp[0]);
-        }
-    }
-
-    // Return 1*tmp[1] + 2*tmp[2] + ... + 6*tmp[6]
-    var S = G1_INFINITY;
-    
-    // Evaluate sequentially to avoid multiplication overheads in G1
-    // Using simple repeated additions for small coefficients (1 to 6)
-    
-    // tmp[6] * 6
-    var t6 = double_g1(tmp[6]);
-    t6 = add_g1_safe(t6, tmp[6]); // * 3
-    t6 = double_g1(t6);           // * 6
-    S = add_g1_safe(S, t6);
-    
-    // tmp[5] * 5
-    var t5 = double_g1(tmp[5]);
-    t5 = double_g1(t5);           // * 4
-    t5 = add_g1_safe(t5, tmp[5]); // * 5
-    S = add_g1_safe(S, t5);
-    
-    // tmp[4] * 4
-    var t4 = double_g1(tmp[4]);
-    t4 = double_g1(t4);
-    S = add_g1_safe(S, t4);
-    
-    // tmp[3] * 3
-    var t3 = double_g1(tmp[3]);
-    t3 = add_g1_safe(t3, tmp[3]);
-    S = add_g1_safe(S, t3);
-    
-    // tmp[2] * 2
-    let t2 = double_g1(tmp[2]);
-    S = add_g1_safe(S, t2);
-    
-    // tmp[1] * 1
-    S = add_g1_safe(S, tmp[1]);
-
-    final_result[0] = S;
-}
-
-// ============================================================================
-// G2 CONSTANTS & SAFE ARITHMETIC
-// ============================================================================
-
 const FQ2_ZERO = Fq2(
     U384(array<u32, 12>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u)),
     U384(array<u32, 12>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u))
 );
-
-// The Point at Infinity in Jacobian Coordinates for G2 (Z = 0)
 const G2_INFINITY = PointG2(FQ2_ZERO, FQ2_ZERO, FQ2_ZERO);
 
-fn is_inf_g2(p: PointG2) -> bool {
-    var is_zero = true;
-    for (var i: u32 = 0u; i < 12u; i = i + 1u) {
-        if p.z.c0.limbs[i] != 0u || p.z.c1.limbs[i] != 0u {
-            is_zero = false;
-            break;
-        }
+fn is_gte_q(a: U384) -> bool {
+    for (var i = 11u; i < 12u; i = i - 1u) {
+        if a.limbs[i] > Q_MODULUS[i] { return true; }
+        if a.limbs[i] < Q_MODULUS[i] { return false; }
+        if i == 0u { break; }
     }
-    return is_zero;
+    return true;
 }
 
-// Safe addition that gracefully handles the point at infinity for G2
+// Computes a * 2^384 mod q, putting standard input into Montgomery Form
+fn to_montgomery_u384(a: U384) -> U384 {
+    var res = a;
+    for (var i = 0u; i < 384u; i = i + 1u) {
+        var carry = 0u;
+        for (var j = 0u; j < 12u; j = j + 1u) {
+            let val = res.limbs[j];
+            res.limbs[j] = (val << 1u) | carry;
+            carry = val >> 31u;
+        }
+        if carry > 0u || is_gte_q(res) {
+            res = sub_u384(res, U384(Q_MODULUS));
+        }
+    }
+    return res;
+}
+
+// Converts Montgomery form back to standard form
+fn from_montgomery_u384(a: U384) -> U384 {
+    let one = U384(array<u32, 12>(1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u));
+    return mul_montgomery_u384(a, one);
+}
+
+// Inverts a Montgomery U384 via Fermat's Little Theorem (a^(q-2) mod q)
+fn invert_u384(a: U384) -> U384 {
+    let q_minus_2 = array<u32, 12>(
+        0xffffaaa9u, 0xb9feffffu, 0xb153ffffu, 0x1eabfffeu,
+        0xf6b0f624u, 0x6730d2a0u, 0xf38512bfu, 0x64774b84u,
+        0x434bacd7u, 0x4b1ba7b6u, 0x397fe69au, 0x1a0111eau
+    );
+    var res = to_montgomery_u384(U384(array<u32, 12>(1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u)));
+    var base = a;
+
+    for (var i = 0u; i < 12u; i = i + 1u) {
+        var limb = q_minus_2[i];
+        for (var j = 0u; j < 32u; j = j + 1u) {
+            if (limb & 1u) != 0u { res = mul_montgomery_u384(res, base); }
+            base = mul_montgomery_u384(base, base);
+            limb = limb >> 1u;
+        }
+    }
+    return res;
+}
+
+fn to_montgomery_fp2(a: Fq2) -> Fq2 { return Fq2(to_montgomery_u384(a.c0), to_montgomery_u384(a.c1)); }
+fn from_montgomery_fp2(a: Fq2) -> Fq2 { return Fq2(from_montgomery_u384(a.c0), from_montgomery_u384(a.c1)); }
+
+fn invert_fp2(a: Fq2) -> Fq2 {
+    let a_sq = mul_montgomery_u384(a.c0, a.c0);
+    let b_sq = mul_montgomery_u384(a.c1, a.c1);
+    var denom = add_u384(a_sq, b_sq);
+    if is_gte_q(denom) { denom = sub_u384(denom, U384(Q_MODULUS)); }
+
+    let inv_denom = invert_u384(denom);
+    let c0 = mul_montgomery_u384(a.c0, inv_denom);
+    let neg_c1 = sub_u384(U384(Q_MODULUS), a.c1);
+    let c1 = mul_montgomery_u384(neg_c1, inv_denom);
+    return Fq2(c0, c1);
+}
+
+// ============================================================================
+// DATA LOADERS & DOMAIN BRIDGES
+// ============================================================================
+
+fn is_inf_g1(p: PointG1) -> bool {
+    for (var i = 0u; i < 12u; i = i + 1u) {
+        if p.z.limbs[i] != 0u { return false; }
+    }
+    return true;
+}
+
+fn is_inf_g2(p: PointG2) -> bool {
+    for (var i = 0u; i < 12u; i = i + 1u) {
+        if p.z.c0.limbs[i] != 0u || p.z.c1.limbs[i] != 0u { return false; }
+    }
+    return true;
+}
+
+fn add_g1_safe(p1: PointG1, p2: PointG1) -> PointG1 {
+    let p1_inf = is_inf_g1(p1); let p2_inf = is_inf_g1(p2);
+    if p1_inf && p2_inf { return G1_INFINITY; }
+    if p1_inf { return p2; } if p2_inf { return p1; }
+    return add_g1(p1, p2);
+}
+
 fn add_g2_safe(p1: PointG2, p2: PointG2) -> PointG2 {
-    let p1_inf = is_inf_g2(p1);
-    let p2_inf = is_inf_g2(p2);
-
+    let p1_inf = is_inf_g2(p1); let p2_inf = is_inf_g2(p2);
     if p1_inf && p2_inf { return G2_INFINITY; }
-    if p1_inf { return p2; }
-    if p2_inf { return p1; }
-
+    if p1_inf { return p2; } if p2_inf { return p1; }
     return add_g2(p1, p2);
 }
 
+// Load Standard Affine -> Montgomery Jacobian
+fn load_g1(p: PointG1) -> PointG1 {
+    if p.x.limbs[0] == 0u && p.y.limbs[0] == 0u && p.z.limbs[0] == 0u { return G1_INFINITY; }
+    return PointG1(to_montgomery_u384(p.x), to_montgomery_u384(p.y), to_montgomery_u384(p.z));
+}
+
+// Convert Montgomery Jacobian -> Standard Affine (to return to CPU)
+fn store_g1(p: PointG1) -> PointG1 {
+    if is_inf_g1(p) { return G1_INFINITY; }
+    let z_inv = invert_u384(p.z);
+    let z_inv2 = mul_montgomery_u384(z_inv, z_inv);
+    let z_inv3 = mul_montgomery_u384(z_inv2, z_inv);
+
+    let x_aff = mul_montgomery_u384(p.x, z_inv2);
+    let y_aff = mul_montgomery_u384(p.y, z_inv3);
+
+    let z_std = U384(array<u32,12>(1u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u));
+    return PointG1(from_montgomery_u384(x_aff), from_montgomery_u384(y_aff), z_std);
+}
+
+fn load_g2(p: PointG2) -> PointG2 {
+    if p.x.c0.limbs[0] == 0u && p.x.c1.limbs[0] == 0u && p.z.c0.limbs[0] == 0u { return G2_INFINITY; }
+    return PointG2(to_montgomery_fp2(p.x), to_montgomery_fp2(p.y), to_montgomery_fp2(p.z));
+}
+
+fn store_g2(p: PointG2) -> PointG2 {
+    if is_inf_g2(p) { return G2_INFINITY; }
+    let z_inv = invert_fp2(p.z);
+    let z_inv2 = mul_fp2(z_inv, z_inv);
+    let z_inv3 = mul_fp2(z_inv2, z_inv);
+
+    let x_aff = mul_fp2(p.x, z_inv2);
+    let y_aff = mul_fp2(p.y, z_inv3);
+
+    let z_std = Fq2(U384(array<u32,12>(1u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)), U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)));
+    return PointG2(from_montgomery_fp2(x_aff), from_montgomery_fp2(y_aff), z_std);
+}
+
 // ============================================================================
-// G2 GPU PIPELINE BUFFERS
+// PIPPENGER ALGORITHM PIPELINES (G1 and G2)
 // ============================================================================
 
-@group(1) @binding(0) // Used Group 1 to avoid overlap with G1, adjust to preference
-var<storage, read> buckets_g2: array<PointG2>;
+@group(0) @binding(0) var<storage, read> bases_g1: array<PointG1>;
+@group(0) @binding(1) var<storage, read> base_indices: array<u32>;
+@group(0) @binding(2) var<storage, read> bucket_pointers: array<u32>;
+@group(0) @binding(3) var<storage, read> bucket_sizes: array<u32>;
+@group(0) @binding(4) var<storage, read_write> aggregated_buckets_g1: array<PointG1>;
 
-@group(1) @binding(1)
-var<storage, read> bucket_indices_g2: array<u32>; // The active b_i values
+@compute @workgroup_size(64)
+fn aggregate_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let bucket_idx = global_id.x;
+    if bucket_idx >= arrayLength(&bucket_pointers) { return; }
 
-@group(1) @binding(2)
-var<storage, read> bucket_count_g2: u32; // The number of active buckets 'm'
+    let start = bucket_pointers[bucket_idx];
+    let size = bucket_sizes[bucket_idx];
+    var sum = G1_INFINITY;
+    for (var i = 0u; i < size; i = i + 1u) {
+        sum = add_g1_safe(sum, load_g1(bases_g1[base_indices[start + i]]));
+    }
+    aggregated_buckets_g1[bucket_idx] = sum;
+}
 
-@group(1) @binding(3)
-var<storage, read_write> final_result_g2: array<PointG2>;
+@group(0) @binding(0) var<storage, read> aggregated_buckets_in_g1: array<PointG1>;
+@group(0) @binding(1) var<storage, read> bucket_values: array<u32>;
+@group(0) @binding(2) var<storage, read> window_starts: array<u32>;
+@group(0) @binding(3) var<storage, read> window_counts: array<u32>;
+@group(0) @binding(4) var<storage, read_write> window_sums_g1: array<PointG1>;
 
-// ============================================================================
-// G2 SUBSUM ACCUMULATION (Luo, Fu, Gong - Algorithm 3)
-// ============================================================================
-
-// Evaluates S = b_1*S_1 + b_2*S_2 + ... + b_m*S_m for G2 points
 @compute @workgroup_size(1)
-fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if global_id.x != 0u { return; } // Executed by a single thread post-reduction
+fn subsum_accumulation_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let window_id = global_id.x;
+    if window_id >= arrayLength(&window_starts) { return; }
 
-    let m = bucket_count_g2;
-    if m == 0u {
-        final_result_g2[0] = G2_INFINITY;
+    let start = window_starts[window_id];
+    let count = window_counts[window_id];
+    if count == 0u {
+        window_sums_g1[window_id] = G1_INFINITY;
         return;
     }
 
-    // d = 6 for BLS12-381 optimal radixes. tmp array needs length d + 1 = 7.
-    var tmp = array<PointG2, 7>(
-        G2_INFINITY, G2_INFINITY, G2_INFINITY, G2_INFINITY, 
-        G2_INFINITY, G2_INFINITY, G2_INFINITY
-    );
+    var S = G1_INFINITY;
+    var running_sum = G1_INFINITY;
+    var bucket_ptr = start + count - 1u;
+    var next_active_b = bucket_values[bucket_ptr];
 
-    var prev_b: u32 = 0u;
-    if m > 0u {
-        prev_b = bucket_indices_g2[m - 1u];
+    for (var b = next_active_b; b > 0u; b = b - 1u) {
+        if b == next_active_b {
+            running_sum = add_g1_safe(running_sum, aggregated_buckets_in_g1[bucket_ptr]);
+            if bucket_ptr > start {
+                bucket_ptr = bucket_ptr - 1u;
+                next_active_b = bucket_values[bucket_ptr];
+            } else {
+                next_active_b = 0u;
+            }
+        }
+        S = add_g1_safe(S, running_sum);
+    }
+    window_sums_g1[window_id] = store_g1(S);
+}
+
+// ==== G2 Pipelines ====
+
+@group(0) @binding(0) var<storage, read> bases_g2: array<PointG2>;
+@group(0) @binding(1) var<storage, read> base_indices_g2: array<u32>;
+@group(0) @binding(2) var<storage, read> bucket_pointers_g2: array<u32>;
+@group(0) @binding(3) var<storage, read> bucket_sizes_g2: array<u32>;
+@group(0) @binding(4) var<storage, read_write> aggregated_buckets_g2: array<PointG2>;
+
+@compute @workgroup_size(64)
+fn aggregate_buckets_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let bucket_idx = global_id.x;
+    if bucket_idx >= arrayLength(&bucket_pointers_g2) { return; }
+
+    let start = bucket_pointers_g2[bucket_idx];
+    let size = bucket_sizes_g2[bucket_idx];
+    var sum = G2_INFINITY;
+    for (var i = 0u; i < size; i = i + 1u) {
+        sum = add_g2_safe(sum, load_g2(bases_g2[base_indices_g2[start + i]]));
+    }
+    aggregated_buckets_g2[bucket_idx] = sum;
+}
+
+@group(0) @binding(0) var<storage, read> aggregated_buckets_in_g2: array<PointG2>;
+@group(0) @binding(1) var<storage, read> bucket_values_g2: array<u32>;
+@group(0) @binding(2) var<storage, read> window_starts_g2: array<u32>;
+@group(0) @binding(3) var<storage, read> window_counts_g2: array<u32>;
+@group(0) @binding(4) var<storage, read_write> window_sums_g2: array<PointG2>;
+
+@compute @workgroup_size(1)
+fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let window_id = global_id.x;
+    if window_id >= arrayLength(&window_starts_g2) { return; }
+
+    let start = window_starts_g2[window_id];
+    let count = window_counts_g2[window_id];
+    if count == 0u {
+        window_sums_g2[window_id] = G2_INFINITY;
+        return;
     }
 
-    // for i = m to 1 do
-    for (var i: u32 = m; i > 0u; i = i - 1u) {
-        let current_bucket = buckets_g2[i - 1u];
-
-        // tmp[0] = tmp[0] + S_i
-        tmp[0] = add_g2_safe(tmp[0], current_bucket);
-
-        let current_b = bucket_indices_g2[i - 1u];
-        var next_b: u32 = 0u;
-        if i > 1u {
-            next_b = bucket_indices_g2[i - 2u];
-        }
-
-        // k = b_i - b_{i-1}
-        let k = current_b - next_b;
-
-        // if k >= 1 then tmp[k] = tmp[k] + tmp[0]
-        if k >= 1u && k <= 6u {
-            tmp[k] = add_g2_safe(tmp[k], tmp[0]);
-        }
-    }
-
-    // Return 1*tmp[1] + 2*tmp[2] + ... + 6*tmp[6]
     var S = G2_INFINITY;
+    var running_sum = G2_INFINITY;
+    var bucket_ptr = start + count - 1u;
+    var next_active_b = bucket_values_g2[bucket_ptr];
 
-    // Evaluate sequentially to avoid multiplication overheads in G2 F_q^2
-    // Using simple repeated additions for small coefficients (1 to 6)
-
-    // tmp[6] * 6
-    var t6 = double_g2(tmp[6]);
-    t6 = add_g2_safe(t6, tmp[6]); // * 3
-    t6 = double_g2(t6);           // * 6
-    S = add_g2_safe(S, t6);
-
-    // tmp[5] * 5
-    var t5 = double_g2(tmp[5]);
-    t5 = double_g2(t5);           // * 4
-    t5 = add_g2_safe(t5, tmp[5]); // * 5
-    S = add_g2_safe(S, t5);
-
-    // tmp[4] * 4
-    var t4 = double_g2(tmp[4]);
-    t4 = double_g2(t4);
-    S = add_g2_safe(S, t4);
-
-    // tmp[3] * 3
-    var t3 = double_g2(tmp[3]);
-    t3 = add_g2_safe(t3, tmp[3]);
-    S = add_g2_safe(S, t3);
-
-    // tmp[2] * 2
-    let t2 = double_g2(tmp[2]);
-    S = add_g2_safe(S, t2);
-
-    // tmp[1] * 1
-    S = add_g2_safe(S, tmp[1]);
-
-    final_result_g2[0] = S;
+    for (var b = next_active_b; b > 0u; b = b - 1u) {
+        if b == next_active_b {
+            running_sum = add_g2_safe(running_sum, aggregated_buckets_in_g2[bucket_ptr]);
+            if bucket_ptr > start {
+                bucket_ptr = bucket_ptr - 1u;
+                next_active_b = bucket_values_g2[bucket_ptr];
+            } else {
+                next_active_b = 0u;
+            }
+        }
+        S = add_g2_safe(S, running_sum);
+    }
+    window_sums_g2[window_id] = store_g2(S);
 }

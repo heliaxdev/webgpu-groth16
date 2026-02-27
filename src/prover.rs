@@ -1,10 +1,3 @@
-// TODO: implement a form of efficient batching of GPU operations.
-// loading data in and out of the GPU is slow. we want to batch as many ops as possible,
-// without using a stupid amount of VRAM (perhaps we need to check
-// how much VRAM the host has). if we're constantly calling `gpu_msm_g1`,
-// `gpu_msm_g2`, and `gpu_fft` with small batches, we pay the cost
-// of GPU data transfer, and won't gain much in terms of proving speed.
-
 use anyhow::Result;
 use ff::{Field, PrimeField};
 use rand_core::RngCore;
@@ -66,7 +59,6 @@ impl<G: GpuCurve> GpuConstraintSystem<G> {
 
 impl<G: GpuCurve> bellman::ConstraintSystem<G::Scalar> for GpuConstraintSystem<G> {
     type Root = Self;
-
     fn alloc<F, A, AR>(
         &mut self,
         _annotation: A,
@@ -83,7 +75,6 @@ impl<G: GpuCurve> bellman::ConstraintSystem<G::Scalar> for GpuConstraintSystem<G
             self.aux.len() - 1,
         )))
     }
-
     fn alloc_input<F, A, AR>(
         &mut self,
         _annotation: A,
@@ -100,7 +91,6 @@ impl<G: GpuCurve> bellman::ConstraintSystem<G::Scalar> for GpuConstraintSystem<G
             self.inputs.len() - 1,
         )))
     }
-
     fn enforce<A, AR, LA, LB, LC>(&mut self, _annotation: A, a: LA, b: LB, c: LC)
     where
         A: FnOnce() -> AR,
@@ -112,12 +102,10 @@ impl<G: GpuCurve> bellman::ConstraintSystem<G::Scalar> for GpuConstraintSystem<G
         let a_lc = a(bellman::LinearCombination::zero());
         let b_lc = b(bellman::LinearCombination::zero());
         let c_lc = c(bellman::LinearCombination::zero());
-
         self.a_lcs.push(lc_to_vec(a_lc));
         self.b_lcs.push(lc_to_vec(b_lc));
         self.c_lcs.push(lc_to_vec(c_lc));
     }
-
     fn push_namespace<NR, N>(&mut self, _name_fn: N)
     where
         NR: Into<String>,
@@ -158,16 +146,12 @@ async fn gpu_fft<G: GpuCurve>(
 ) -> Result<()> {
     let data_bytes = marshal_scalars::<G>(data);
     let twiddles_bytes = marshal_scalars::<G>(twiddles);
-
     let data_buf = gpu.create_storage_buffer("NTT Data", &data_bytes);
     let twiddles_buf = gpu.create_storage_buffer("NTT Twiddles", &twiddles_bytes);
-
     gpu.execute_ntt(&data_buf, &twiddles_buf, data.len() as u32);
-
     let result_bytes = gpu
         .read_buffer(&data_buf, (data.len() * 32) as wgpu::BufferAddress)
         .await?;
-
     for (i, chunk) in result_bytes.chunks_exact(32).enumerate() {
         data[i] = G::deserialize_scalar(chunk)?;
     }
@@ -179,34 +163,60 @@ async fn gpu_msm_g1<G: GpuCurve>(
     bases: &[G::G1Affine],
     scalars: &[G::Scalar],
 ) -> Result<G::G1Projective> {
-    let bucket_data: BucketData<G::G1Affine> =
-        compute_bucket_sorting::<G, G::G1Affine>(bases, scalars);
-
-    if bucket_data.bucket_count == 0 {
+    let bd: BucketData = compute_bucket_sorting::<G>(scalars);
+    if bd.num_active_buckets == 0 {
         return Ok(G::g1_identity());
     }
 
-    let mut bucket_bytes = Vec::new();
-    for base in &bucket_data.buckets {
-        bucket_bytes.extend_from_slice(&G::serialize_g1(base));
+    let mut bases_bytes = Vec::with_capacity(bases.len() * 144);
+    for base in bases {
+        bases_bytes.extend_from_slice(&G::serialize_g1(base));
     }
 
-    let mut indices_bytes = Vec::new();
-    for idx in &bucket_data.indices {
-        indices_bytes.extend_from_slice(&idx.to_le_bytes());
+    let bases_buf = gpu.create_storage_buffer("Bases", &bases_bytes);
+    let indices_buf = gpu.create_storage_buffer("Indices", bytemuck::cast_slice(&bd.base_indices));
+    let ptrs_buf = gpu.create_storage_buffer("Ptrs", bytemuck::cast_slice(&bd.bucket_pointers));
+    let sizes_buf = gpu.create_storage_buffer("Sizes", bytemuck::cast_slice(&bd.bucket_sizes));
+    let vals_buf = gpu.create_storage_buffer("Vals", bytemuck::cast_slice(&bd.bucket_values));
+    let w_starts_buf =
+        gpu.create_storage_buffer("WStarts", bytemuck::cast_slice(&bd.window_starts));
+    let w_counts_buf =
+        gpu.create_storage_buffer("WCounts", bytemuck::cast_slice(&bd.window_counts));
+
+    let agg_buf = gpu.create_empty_buffer("Agg", (bd.num_active_buckets * 144) as u64);
+    let sums_buf = gpu.create_empty_buffer("Sums", (bd.num_windows * 144) as u64);
+
+    gpu.execute_msm(
+        false,
+        &bases_buf,
+        &indices_buf,
+        &ptrs_buf,
+        &sizes_buf,
+        &agg_buf,
+        &vals_buf,
+        &w_starts_buf,
+        &w_counts_buf,
+        &sums_buf,
+        bd.num_active_buckets,
+        bd.num_windows,
+    );
+
+    let result_bytes = gpu
+        .read_buffer(&sums_buf, (bd.num_windows * 144) as u64)
+        .await?;
+    let mut result = G::g1_identity();
+
+    // CPU Combination logic (standard Pippenger loop over window returns)
+    for (i, chunk) in result_bytes.chunks_exact(144).enumerate().rev() {
+        if i != (bd.num_windows - 1) as usize {
+            for _ in 0..G::bucket_width() {
+                result = G::add_g1_proj(&result, &result);
+            }
+        }
+        let w_sum = G::deserialize_g1(chunk)?;
+        result = G::add_g1_proj(&result, &w_sum);
     }
-
-    let count_bytes = (bucket_data.bucket_count as u32).to_le_bytes();
-
-    let buckets_buf = gpu.create_storage_buffer("MSM G1 Buckets", &bucket_bytes);
-    let indices_buf = gpu.create_storage_buffer("MSM G1 Indices", &indices_bytes);
-    let count_buf = gpu.create_storage_buffer("MSM G1 Count", &count_bytes);
-    let result_buf = gpu.create_empty_buffer("MSM G1 Result", 144);
-
-    gpu.execute_msm_g1(&buckets_buf, &indices_buf, &count_buf, &result_buf);
-
-    let result_bytes = gpu.read_buffer(&result_buf, 144).await?;
-    G::deserialize_g1(&result_bytes)
+    Ok(result)
 }
 
 async fn gpu_msm_g2<G: GpuCurve>(
@@ -214,34 +224,59 @@ async fn gpu_msm_g2<G: GpuCurve>(
     bases: &[G::G2Affine],
     scalars: &[G::Scalar],
 ) -> Result<G::G2Projective> {
-    let bucket_data: BucketData<G::G2Affine> =
-        compute_bucket_sorting::<G, G::G2Affine>(bases, scalars);
-
-    if bucket_data.bucket_count == 0 {
+    let bd: BucketData = compute_bucket_sorting::<G>(scalars);
+    if bd.num_active_buckets == 0 {
         return Ok(G::g2_identity());
     }
 
-    let mut bucket_bytes = Vec::new();
-    for base in &bucket_data.buckets {
-        bucket_bytes.extend_from_slice(&G::serialize_g2(base));
+    let mut bases_bytes = Vec::with_capacity(bases.len() * 288);
+    for base in bases {
+        bases_bytes.extend_from_slice(&G::serialize_g2(base));
     }
 
-    let mut indices_bytes = Vec::new();
-    for idx in &bucket_data.indices {
-        indices_bytes.extend_from_slice(&idx.to_le_bytes());
+    let bases_buf = gpu.create_storage_buffer("BasesG2", &bases_bytes);
+    let indices_buf = gpu.create_storage_buffer("Indices", bytemuck::cast_slice(&bd.base_indices));
+    let ptrs_buf = gpu.create_storage_buffer("Ptrs", bytemuck::cast_slice(&bd.bucket_pointers));
+    let sizes_buf = gpu.create_storage_buffer("Sizes", bytemuck::cast_slice(&bd.bucket_sizes));
+    let vals_buf = gpu.create_storage_buffer("Vals", bytemuck::cast_slice(&bd.bucket_values));
+    let w_starts_buf =
+        gpu.create_storage_buffer("WStarts", bytemuck::cast_slice(&bd.window_starts));
+    let w_counts_buf =
+        gpu.create_storage_buffer("WCounts", bytemuck::cast_slice(&bd.window_counts));
+
+    let agg_buf = gpu.create_empty_buffer("AggG2", (bd.num_active_buckets * 288) as u64);
+    let sums_buf = gpu.create_empty_buffer("SumsG2", (bd.num_windows * 288) as u64);
+
+    gpu.execute_msm(
+        true,
+        &bases_buf,
+        &indices_buf,
+        &ptrs_buf,
+        &sizes_buf,
+        &agg_buf,
+        &vals_buf,
+        &w_starts_buf,
+        &w_counts_buf,
+        &sums_buf,
+        bd.num_active_buckets,
+        bd.num_windows,
+    );
+
+    let result_bytes = gpu
+        .read_buffer(&sums_buf, (bd.num_windows * 288) as u64)
+        .await?;
+    let mut result = G::g2_identity();
+
+    for (i, chunk) in result_bytes.chunks_exact(288).enumerate().rev() {
+        if i != (bd.num_windows - 1) as usize {
+            for _ in 0..G::bucket_width() {
+                result = G::add_g2_proj(&result, &result);
+            }
+        }
+        let w_sum = G::deserialize_g2(chunk)?;
+        result = G::add_g2_proj(&result, &w_sum);
     }
-
-    let count_bytes = (bucket_data.bucket_count as u32).to_le_bytes();
-
-    let buckets_buf = gpu.create_storage_buffer("MSM G2 Buckets", &bucket_bytes);
-    let indices_buf = gpu.create_storage_buffer("MSM G2 Indices", &indices_bytes);
-    let count_buf = gpu.create_storage_buffer("MSM G2 Count", &count_bytes);
-    let result_buf = gpu.create_empty_buffer("MSM G2 Result", 288);
-
-    gpu.execute_msm_g2(&buckets_buf, &indices_buf, &count_buf, &result_buf);
-
-    let result_bytes = gpu.read_buffer(&result_buf, 288).await?;
-    G::deserialize_g2(&result_bytes)
+    Ok(result)
 }
 
 fn eval_lc<S: PrimeField>(lc: &[(usize, S)], inputs: &[S], aux: &[S]) -> S {
@@ -266,7 +301,6 @@ async fn compute_h_poly<G: GpuCurve>(
     c_values: &[G::Scalar],
 ) -> Result<Vec<G::Scalar>> {
     let n = a_values.len().next_power_of_two();
-
     let omega = G::root_of_unity(n);
     let omega_inv = omega.invert().unwrap();
 
@@ -278,11 +312,10 @@ async fn compute_h_poly<G: GpuCurve>(
     }
 
     let mut a_evals = a_values.to_vec();
-    let mut b_evals = b_values.to_vec();
-    let mut c_evals = c_values.to_vec();
-
     a_evals.resize(n, G::Scalar::ZERO);
+    let mut b_evals = b_values.to_vec();
     b_evals.resize(n, G::Scalar::ZERO);
+    let mut c_evals = c_values.to_vec();
     c_evals.resize(n, G::Scalar::ZERO);
 
     gpu_fft(gpu, &mut a_evals, &inv_twiddles).await?;
@@ -290,7 +323,8 @@ async fn compute_h_poly<G: GpuCurve>(
     gpu_fft(gpu, &mut c_evals, &inv_twiddles).await?;
 
     let n_inv = G::Scalar::from(n as u64).invert().unwrap();
-    let coset_shift = G::root_of_unity(n);
+
+    let coset_shift = G::Scalar::MULTIPLICATIVE_GENERATOR;
     let mut shift = G::Scalar::ONE;
 
     for i in 0..n {
@@ -342,16 +376,7 @@ where
         .synthesize(&mut cs)
         .map_err(|e| anyhow::anyhow!("circuit synthesis failed: {:?}", e))?;
 
-    let GpuConstraintSystem {
-        inputs,
-        aux,
-        a_lcs,
-        b_lcs,
-        c_lcs,
-        ..
-    } = cs;
-
-    let num_constraints = a_lcs.len();
+    let num_constraints = cs.a_lcs.len();
     let n = num_constraints.next_power_of_two();
 
     let mut a_values = vec![G::Scalar::ZERO; n];
@@ -359,19 +384,19 @@ where
     let mut c_values = vec![G::Scalar::ZERO; n];
 
     for i in 0..num_constraints {
-        a_values[i] = eval_lc(&a_lcs[i], &inputs, &aux);
-        b_values[i] = eval_lc(&b_lcs[i], &inputs, &aux);
-        c_values[i] = eval_lc(&c_lcs[i], &inputs, &aux);
+        a_values[i] = eval_lc(&cs.a_lcs[i], &cs.inputs, &cs.aux);
+        b_values[i] = eval_lc(&cs.b_lcs[i], &cs.inputs, &cs.aux);
+        c_values[i] = eval_lc(&cs.c_lcs[i], &cs.inputs, &cs.aux);
     }
 
     let h_coeffs = compute_h_poly(gpu, &a_values, &b_values, &c_values).await?;
 
-    let mut full_assignment = inputs.clone();
-    full_assignment.extend(aux.clone());
+    let mut full_assignment = cs.inputs.clone();
+    full_assignment.extend(cs.aux.clone());
 
     let a_msm = gpu_msm_g1(gpu, &pk.a_query, &full_assignment).await?;
     let b_g1_msm = gpu_msm_g1(gpu, &pk.b_query_g1, &full_assignment).await?;
-    let l_msm = gpu_msm_g1(gpu, &pk.l_query, &aux).await?;
+    let l_msm = gpu_msm_g1(gpu, &pk.l_query, &cs.aux).await?;
     let h_msm = gpu_msm_g1(gpu, &pk.h_query, &h_coeffs).await?;
 
     let b_g2_msm = gpu_msm_g2(gpu, &pk.b_query_g2, &full_assignment).await?;
@@ -386,7 +411,6 @@ where
     proof_b = G::add_g2_proj(&proof_b, &G::mul_g2_scalar(&pk.delta_g2, &s));
 
     let mut proof_c = G::add_g1_proj(&l_msm, &h_msm);
-
     let mut b_g1 = G::add_g1_proj(&G::affine_to_proj_g1(&pk.beta_g1), &b_g1_msm);
     b_g1 = G::add_g1_proj(&b_g1, &G::mul_g1_scalar(&pk.delta_g1, &s));
 

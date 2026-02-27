@@ -13,14 +13,17 @@ pub struct GpuContext<C> {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
 
-    // Pipelines
     pub ntt_pipeline: wgpu::ComputePipeline,
-    pub msm_g1_pipeline: wgpu::ComputePipeline,
-    pub msm_g2_pipeline: wgpu::ComputePipeline,
 
-    // Bind Group Layouts
+    // MSM 2-Stage Pipelines
+    pub msm_agg_g1_pipeline: wgpu::ComputePipeline,
+    pub msm_sum_g1_pipeline: wgpu::ComputePipeline,
+    pub msm_agg_g2_pipeline: wgpu::ComputePipeline,
+    pub msm_sum_g2_pipeline: wgpu::ComputePipeline,
+
     pub ntt_bind_group_layout: wgpu::BindGroupLayout,
-    pub msm_bind_group_layout: wgpu::BindGroupLayout,
+    pub msm_agg_bind_group_layout: wgpu::BindGroupLayout,
+    pub msm_sum_bind_group_layout: wgpu::BindGroupLayout,
 
     _marker: PhantomData<C>,
 }
@@ -28,12 +31,10 @@ pub struct GpuContext<C> {
 impl<C: GpuCurve> GpuContext<C> {
     pub async fn new() -> anyhow::Result<Self> {
         let instance = wgpu::Instance::default();
-
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                compatible_surface: None,
+                ..Default::default()
             })
             .await
             .context("Failed to find a compatible WebGPU adapter")?;
@@ -41,26 +42,21 @@ impl<C: GpuCurve> GpuContext<C> {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Groth16 Prover Device"),
-                required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::downlevel_webgl2_defaults()
                     .using_resolution(adapter.limits()),
                 ..Default::default()
             })
-            .await
-            .context("Failed to request WebGPU device")?;
+            .await?;
 
-        // 1. Compile Shader Modules
         let ntt_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("NTT Shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::NTT_SOURCE)),
         });
-
         let msm_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("MSM Shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_SOURCE)),
         });
 
-        // 2. Define Bind Group Layouts
         let ntt_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("NTT Bind Group Layout"),
@@ -88,9 +84,10 @@ impl<C: GpuCurve> GpuContext<C> {
                 ],
             });
 
-        let msm_bind_group_layout =
+        // Stage 1: Aggregation
+        let msm_agg_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("MSM Bind Group Layout"),
+                label: Some("MSM Agg Bind Group Layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
@@ -126,6 +123,16 @@ impl<C: GpuCurve> GpuContext<C> {
                         binding: 3,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: false },
                             has_dynamic_offset: false,
                             min_binding_size: None,
@@ -135,54 +142,138 @@ impl<C: GpuCurve> GpuContext<C> {
                 ],
             });
 
-        // 3. Create Compute Pipelines
-        let ntt_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("NTT Pipeline Layout"),
-            bind_group_layouts: &[&ntt_bind_group_layout],
-            immediate_size: 0,
-        });
+        // Stage 2: Subsum Accumulation
+        let msm_sum_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("MSM Sum Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
         let ntt_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("NTT Compute Pipeline"),
-            layout: Some(&ntt_pipeline_layout),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[&ntt_bind_group_layout],
+                    immediate_size: 0,
+                }),
+            ),
             module: &ntt_module,
             entry_point: Some("ntt_tile"),
             compilation_options: Default::default(),
             cache: None,
         });
 
-        let msm_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("MSM Pipeline Layout"),
-            bind_group_layouts: &[&msm_bind_group_layout],
+        let msm_agg_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&msm_agg_bind_group_layout],
+            immediate_size: 0,
+        });
+        let msm_sum_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&msm_sum_bind_group_layout],
             immediate_size: 0,
         });
 
-        let msm_g1_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("MSM G1 Compute Pipeline"),
-            layout: Some(&msm_pipeline_layout),
-            module: &msm_module,
-            entry_point: Some("subsum_accumulation_g1"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let msm_g2_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("MSM G2 Compute Pipeline"),
-            layout: Some(&msm_pipeline_layout),
-            module: &msm_module,
-            entry_point: Some("subsum_accumulation_g2"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let msm_agg_g1_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("MSM Agg G1"),
+                layout: Some(&msm_agg_layout),
+                module: &msm_module,
+                entry_point: Some("aggregate_buckets_g1"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let msm_sum_g1_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("MSM Sum G1"),
+                layout: Some(&msm_sum_layout),
+                module: &msm_module,
+                entry_point: Some("subsum_accumulation_g1"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let msm_agg_g2_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("MSM Agg G2"),
+                layout: Some(&msm_agg_layout),
+                module: &msm_module,
+                entry_point: Some("aggregate_buckets_g2"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let msm_sum_g2_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("MSM Sum G2"),
+                layout: Some(&msm_sum_layout),
+                module: &msm_module,
+                entry_point: Some("subsum_accumulation_g2"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
 
         Ok(Self {
             device,
             queue,
             ntt_pipeline,
-            msm_g1_pipeline,
-            msm_g2_pipeline,
+            msm_agg_g1_pipeline,
+            msm_sum_g1_pipeline,
+            msm_agg_g2_pipeline,
+            msm_sum_g2_pipeline,
             ntt_bind_group_layout,
-            msm_bind_group_layout,
+            msm_agg_bind_group_layout,
+            msm_sum_bind_group_layout,
             _marker: PhantomData,
         })
     }
@@ -235,7 +326,6 @@ impl<C: GpuCurve> GpuContext<C> {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("NTT Encoder"),
             });
-
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("NTT Pass"),
@@ -243,39 +333,77 @@ impl<C: GpuCurve> GpuContext<C> {
             });
             cpass.set_pipeline(&self.ntt_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            let workgroups = num_elements.div_ceil(512);
-            cpass.dispatch_workgroups(workgroups, 1, 1);
+            cpass.dispatch_workgroups(num_elements.div_ceil(512), 1, 1);
         }
-
         self.queue.submit(Some(encoder.finish()));
     }
 
-    pub fn execute_msm_g1(
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_msm(
         &self,
-        buckets_buf: &wgpu::Buffer,
-        indices_buf: &wgpu::Buffer,
-        count_buf: &wgpu::Buffer,
-        result_buf: &wgpu::Buffer,
+        is_g2: bool,
+        bases_buf: &wgpu::Buffer,
+        base_indices_buf: &wgpu::Buffer,
+        bucket_pointers_buf: &wgpu::Buffer,
+        bucket_sizes_buf: &wgpu::Buffer,
+        aggregated_buckets_buf: &wgpu::Buffer,
+        bucket_values_buf: &wgpu::Buffer,
+        window_starts_buf: &wgpu::Buffer,
+        window_counts_buf: &wgpu::Buffer,
+        window_sums_buf: &wgpu::Buffer,
+        num_active_buckets: u32,
+        num_windows: u32,
     ) {
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("MSM G1 Bind Group"),
-            layout: &self.msm_bind_group_layout,
+        let agg_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("MSM Agg Bind Group"),
+            layout: &self.msm_agg_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: buckets_buf.as_entire_binding(),
+                    resource: bases_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: indices_buf.as_entire_binding(),
+                    resource: base_indices_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: count_buf.as_entire_binding(),
+                    resource: bucket_pointers_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: result_buf.as_entire_binding(),
+                    resource: bucket_sizes_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: aggregated_buckets_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let sum_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("MSM Sum Bind Group"),
+            layout: &self.msm_sum_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: aggregated_buckets_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bucket_values_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: window_starts_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: window_counts_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: window_sums_buf.as_entire_binding(),
                 },
             ],
         });
@@ -283,66 +411,35 @@ impl<C: GpuCurve> GpuContext<C> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("MSM G1 Encoder"),
+                label: Some("MSM Encoder"),
             });
 
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("MSM G1 Pass"),
+                label: Some("MSM Pass 1"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.msm_g1_pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.dispatch_workgroups(1, 1, 1);
+            cpass.set_pipeline(if is_g2 {
+                &self.msm_agg_g2_pipeline
+            } else {
+                &self.msm_agg_g1_pipeline
+            });
+            cpass.set_bind_group(0, &agg_bind_group, &[]);
+            cpass.dispatch_workgroups(num_active_buckets.div_ceil(64).max(1), 1, 1);
         }
 
-        self.queue.submit(Some(encoder.finish()));
-    }
-
-    pub fn execute_msm_g2(
-        &self,
-        buckets_buf: &wgpu::Buffer,
-        indices_buf: &wgpu::Buffer,
-        count_buf: &wgpu::Buffer,
-        result_buf: &wgpu::Buffer,
-    ) {
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("MSM G2 Bind Group"),
-            layout: &self.msm_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buckets_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: indices_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: count_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: result_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("MSM G2 Encoder"),
-            });
-
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("MSM G2 Pass"),
+                label: Some("MSM Pass 2"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.msm_g2_pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.dispatch_workgroups(1, 1, 1);
+            cpass.set_pipeline(if is_g2 {
+                &self.msm_sum_g2_pipeline
+            } else {
+                &self.msm_sum_g1_pipeline
+            });
+            cpass.set_bind_group(0, &sum_bind_group, &[]);
+            cpass.dispatch_workgroups(num_windows, 1, 1);
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -368,12 +465,10 @@ impl<C: GpuCurve> GpuContext<C> {
 
         let buffer_slice = staging_buffer.slice(..);
         let (sender, receiver) = oneshot::channel();
-
         buffer_slice.map_async(wgpu::MapMode::Read, move |res| {
             sender.send(res).unwrap();
         });
 
-        // Use the v28 async device polling mechanism
         #[cfg(not(target_arch = "wasm32"))]
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 
@@ -383,7 +478,6 @@ impl<C: GpuCurve> GpuContext<C> {
             staging_buffer.unmap();
             return Ok(data);
         }
-
         anyhow::bail!("Failed to read back from GPU buffer")
     }
 }
