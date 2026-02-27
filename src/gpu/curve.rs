@@ -1,8 +1,8 @@
 use std::ops::{Add, Mul, Sub};
 
 use ff::{Field, PrimeField, PrimeFieldBits};
-use group::Group;
 use group::prime::PrimeCurveAffine;
+use group::Group;
 
 pub trait GpuCurve: 'static {
     type Engine: pairing::Engine;
@@ -93,7 +93,7 @@ impl GpuCurve for blstrs::Bls12 {
     fn serialize_g1(point: &Self::G1Affine) -> Vec<u8> {
         let mut uncompressed = point.to_uncompressed();
 
-        // MASK OUT ZCASH FLAGS (compression, infinity, sort)
+        // Strip Zcash metadata bits from x before handing coordinates to WGSL.
         uncompressed[0] &= 0b0001_1111;
 
         // Reverse Big-Endian 48-byte chunks to Little-Endian for WGSL
@@ -121,7 +121,7 @@ impl GpuCurve for blstrs::Bls12 {
     fn serialize_g2(point: &Self::G2Affine) -> Vec<u8> {
         let mut uncompressed = point.to_uncompressed();
 
-        // MASK OUT ZCASH FLAGS
+        // Strip Zcash metadata bits from x.c1 before handing coordinates to WGSL.
         uncompressed[0] &= 0b0001_1111;
 
         // blstrs G2 uncompressed layout (192 bytes):
@@ -159,6 +159,9 @@ impl GpuCurve for blstrs::Bls12 {
     }
 
     fn deserialize_g1(bytes: &[u8]) -> anyhow::Result<Self::G1> {
+        if bytes.len() != 144 {
+            anyhow::bail!("Invalid G1 byte length from GPU: {}", bytes.len());
+        }
         // GPU outputs 144 bytes: X (48), Y (48), Z (48) in Little-Endian.
 
         // 1. Check if the point is at infinity by inspecting the Z coordinate
@@ -196,7 +199,15 @@ impl GpuCurve for blstrs::Bls12 {
         if let Some(affine) = affine {
             Ok(affine.into())
         } else {
-            anyhow::bail!("Failed to deserialize G1 point from GPU")
+            let x0 = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            let y0 = u32::from_le_bytes([bytes[48], bytes[49], bytes[50], bytes[51]]);
+            let z0 = u32::from_le_bytes([bytes[96], bytes[97], bytes[98], bytes[99]]);
+            anyhow::bail!(
+                "Failed to deserialize G1 point from GPU (x0={:#x}, y0={:#x}, z0={:#x})",
+                x0,
+                y0,
+                z0
+            )
         }
     }
 
@@ -280,8 +291,10 @@ impl GpuCurve for blstrs::Bls12 {
         for i in 0..num_windows {
             let bit_offset = i * c;
             let mut window: u64 = 0;
+            let bit_shift = bit_offset % 8;
+            let bytes_needed = (bit_shift + c).div_ceil(8).min(8);
 
-            for j in 0..c.div_ceil(8).min(4) {
+            for j in 0..bytes_needed {
                 let byte_idx = bit_offset / 8 + j;
                 if byte_idx < 32 {
                     window |= (bytes[byte_idx] as u64) << (j * 8);
@@ -289,7 +302,7 @@ impl GpuCurve for blstrs::Bls12 {
             }
 
             let mask = (1u64 << c) - 1;
-            windows.push((window & mask) as u32);
+            windows.push(((window >> bit_shift) & mask) as u32);
         }
 
         windows
@@ -343,5 +356,69 @@ impl GpuCurve for blstrs::Bls12 {
 
     fn g2_identity() -> Self::G2 {
         Self::G2::identity()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GpuCurve;
+    use blstrs::{Bls12, G1Affine, G2Affine, Scalar};
+    use ff::{PrimeField, PrimeFieldBits};
+    use group::prime::PrimeCurveAffine;
+
+    #[test]
+    fn g1_serialize_deserialize_round_trip() {
+        let point = G1Affine::generator();
+        let bytes = <Bls12 as GpuCurve>::serialize_g1(&point);
+        let parsed = <Bls12 as GpuCurve>::deserialize_g1(&bytes).expect("g1 deserialize failed");
+        let parsed_affine: G1Affine = parsed.into();
+        assert_eq!(parsed_affine, point);
+    }
+
+    #[test]
+    fn g2_serialize_deserialize_round_trip() {
+        let point = G2Affine::generator();
+        let bytes = <Bls12 as GpuCurve>::serialize_g2(&point);
+        let parsed = <Bls12 as GpuCurve>::deserialize_g2(&bytes).expect("g2 deserialize failed");
+        let parsed_affine: G2Affine = parsed.into();
+        assert_eq!(parsed_affine, point);
+    }
+
+    fn expected_windows(s: &Scalar, c: usize) -> Vec<u32> {
+        let bits = s.to_le_bits();
+        let num_windows = 256_usize.div_ceil(c);
+        let mut out = Vec::with_capacity(num_windows);
+        for i in 0..num_windows {
+            let bit_offset = i * c;
+            let mut w = 0u32;
+            for j in 0..c {
+                let idx = bit_offset + j;
+                if idx < 256 && bits[idx] {
+                    w |= 1u32 << j;
+                }
+            }
+            out.push(w);
+        }
+        out
+    }
+
+    #[test]
+    fn scalar_window_decomposition_matches_bit_extraction() {
+        let c = <Bls12 as GpuCurve>::bucket_width();
+        let samples = [
+            Scalar::from(0u64),
+            Scalar::from(1u64),
+            Scalar::from(2u64),
+            Scalar::from(3u64),
+            Scalar::from(0x1234_5678_9abc_def0u64),
+            -Scalar::from(5u64),
+            Scalar::ROOT_OF_UNITY,
+        ];
+
+        for s in samples {
+            let got = <Bls12 as GpuCurve>::scalar_to_windows(&s, c);
+            let exp = expected_windows(&s, c);
+            assert_eq!(got, exp);
+        }
     }
 }

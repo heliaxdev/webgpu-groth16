@@ -53,14 +53,29 @@ fn sub_u384(a: U384, b: U384) -> U384 {
 
 // F_q Modular Addition
 fn add_mod_q(a: U384, b: U384) -> U384 {
-    var sum = add_u384(a, b);
+    var sum: U384;
+    var carry: u32 = 0u;
+    for (var i: u32 = 0u; i < 12u; i = i + 1u) {
+        let a_val = a.limbs[i];
+        let b_val = b.limbs[i];
+
+        let sum1 = a_val + b_val;
+        let carry1 = u32(sum1 < a_val);
+
+        let sum2 = sum1 + carry;
+        let carry2 = u32(sum2 < sum1);
+
+        sum.limbs[i] = sum2;
+        carry = carry1 + carry2;
+    }
+
     var is_gte = true;
     for (var i = 11u; i < 12u; i = i - 1u) {
         if sum.limbs[i] > Q_MODULUS[i] { break; }
         if sum.limbs[i] < Q_MODULUS[i] { is_gte = false; break; }
         if i == 0u { break; }
     }
-    if is_gte {
+    if carry > 0u || is_gte {
         sum = sub_u384(sum, U384(Q_MODULUS));
     }
     return sum;
@@ -101,7 +116,7 @@ const Q_MODULUS = array<u32, 12>(
 
 // Montgomery constants: -r^{-1} mod 2^32 and -q^{-1} mod 2^32
 const INV_R: u32 = 0xffffffffu;
-const INV_Q: u32 = 0x89f3fffdu;
+const INV_Q: u32 = 0xfffcfffdu;
 
 // ============================================================================
 // 64-BIT MULTIPLICATION UTILITY

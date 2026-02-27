@@ -24,27 +24,29 @@ fn is_gte_q(a: U384) -> bool {
     return true;
 }
 
-// Computes a * 2^384 mod q, putting standard input into Montgomery Form
+// R^2 mod q for BLS12-381 base field F_q (12 little-endian u32 limbs).
+const R2_MOD_Q = U384(array<u32, 12>(
+    0x1c341746u, 0xf4df1f34u, 0x09d104f1u, 0x0a76e6a6u,
+    0x4c95b6d5u, 0x8de5476cu, 0x939d83c0u, 0x67eb88a9u,
+    0xb519952du, 0x9a793e85u, 0x92cae3aau, 0x11988fe5u
+));
+
+// Computes a * R mod q, putting standard input into Montgomery form.
 fn to_montgomery_u384(a: U384) -> U384 {
-    var res = a;
-    for (var i = 0u; i < 384u; i = i + 1u) {
-        var carry = 0u;
-        for (var j = 0u; j < 12u; j = j + 1u) {
-            let val = res.limbs[j];
-            res.limbs[j] = (val << 1u) | carry;
-            carry = val >> 31u;
-        }
-        if carry > 0u || is_gte_q(res) {
-            res = sub_u384(res, U384(Q_MODULUS));
-        }
-    }
-    return res;
+    return mul_montgomery_u384(a, R2_MOD_Q);
 }
 
 // Converts Montgomery form back to standard form
 fn from_montgomery_u384(a: U384) -> U384 {
     let one = U384(array<u32, 12>(1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u));
     return mul_montgomery_u384(a, one);
+}
+
+fn normalize_u384(a: U384) -> U384 {
+    if is_gte_q(a) {
+        return sub_u384(a, U384(Q_MODULUS));
+    }
+    return a;
 }
 
 // Inverts a Montgomery U384 via Fermat's Little Theorem (a^(q-2) mod q)
@@ -70,6 +72,7 @@ fn invert_u384(a: U384) -> U384 {
 
 fn to_montgomery_fp2(a: Fq2) -> Fq2 { return Fq2(to_montgomery_u384(a.c0), to_montgomery_u384(a.c1)); }
 fn from_montgomery_fp2(a: Fq2) -> Fq2 { return Fq2(from_montgomery_u384(a.c0), from_montgomery_u384(a.c1)); }
+fn normalize_fp2(a: Fq2) -> Fq2 { return Fq2(normalize_u384(a.c0), normalize_u384(a.c1)); }
 
 fn invert_fp2(a: Fq2) -> Fq2 {
     let a_sq = mul_montgomery_u384(a.c0, a.c0);
@@ -133,7 +136,11 @@ fn store_g1(p: PointG1) -> PointG1 {
     let y_aff = mul_montgomery_u384(p.y, z_inv3);
 
     let z_std = U384(array<u32,12>(1u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u));
-    return PointG1(from_montgomery_u384(x_aff), from_montgomery_u384(y_aff), z_std);
+    return PointG1(
+        normalize_u384(from_montgomery_u384(x_aff)),
+        normalize_u384(from_montgomery_u384(y_aff)),
+        z_std
+    );
 }
 
 fn load_g2(p: PointG2) -> PointG2 {
@@ -151,7 +158,11 @@ fn store_g2(p: PointG2) -> PointG2 {
     let y_aff = mul_fp2(p.y, z_inv3);
 
     let z_std = Fq2(U384(array<u32,12>(1u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)), U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)));
-    return PointG2(from_montgomery_fp2(x_aff), from_montgomery_fp2(y_aff), z_std);
+    return PointG2(
+        normalize_fp2(from_montgomery_fp2(x_aff)),
+        normalize_fp2(from_montgomery_fp2(y_aff)),
+        z_std
+    );
 }
 
 // ============================================================================
@@ -274,4 +285,40 @@ fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
         S = add_g2_safe(S, running_sum);
     }
     window_sums_g2[window_id] = store_g2(S);
+}
+
+// ==== Debug round-trip kernels (test-only usage from Rust) ====
+
+@group(0) @binding(0) var<storage, read> rt_in_g1: array<PointG1>;
+@group(0) @binding(1) var<storage, read_write> rt_out_g1: array<PointG1>;
+
+@compute @workgroup_size(64)
+fn roundtrip_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    if i >= arrayLength(&rt_in_g1) { return; }
+    rt_out_g1[i] = store_g1(load_g1(rt_in_g1[i]));
+}
+
+@group(0) @binding(0) var<storage, read> rt_in_g2: array<PointG2>;
+@group(0) @binding(1) var<storage, read_write> rt_out_g2: array<PointG2>;
+
+@compute @workgroup_size(64)
+fn roundtrip_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    if i >= arrayLength(&rt_in_g2) { return; }
+    rt_out_g2[i] = store_g2(load_g2(rt_in_g2[i]));
+}
+
+@group(0) @binding(0) var<storage, read> rt_in_coords_g1: array<PointG1>;
+@group(0) @binding(1) var<storage, read_write> rt_out_coords_g1: array<PointG1>;
+
+@compute @workgroup_size(64)
+fn roundtrip_coords_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    if i >= arrayLength(&rt_in_coords_g1) { return; }
+
+    let p = rt_in_coords_g1[i];
+    let x = normalize_u384(from_montgomery_u384(to_montgomery_u384(p.x)));
+    let y = normalize_u384(from_montgomery_u384(to_montgomery_u384(p.y)));
+    rt_out_coords_g1[i] = PointG1(x, y, p.z);
 }

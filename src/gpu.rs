@@ -802,3 +802,244 @@ impl<C: GpuCurve> GpuContext<C> {
         anyhow::bail!("Failed to read back from GPU buffer")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu::curve::GpuCurve;
+    use blstrs::{Bls12, G1Affine};
+    use group::prime::PrimeCurveAffine;
+    use std::borrow::Cow;
+
+    #[tokio::test]
+    async fn test_g1_cpu_gpu_cpu_roundtrip_bytes_and_deserialize() {
+        let gpu = GpuContext::<Bls12>::new()
+            .await
+            .expect("failed to init gpu context");
+
+        let point = G1Affine::generator();
+        let bytes = <Bls12 as GpuCurve>::serialize_g1(&point);
+        let buf = gpu.create_storage_buffer("g1_roundtrip", &bytes);
+        let read_back = gpu
+            .read_buffer(&buf, bytes.len() as u64)
+            .await
+            .expect("failed to read back g1 bytes");
+
+        assert_eq!(bytes, read_back, "raw gpu roundtrip bytes differ");
+
+        let parsed = <Bls12 as GpuCurve>::deserialize_g1(&read_back)
+            .expect("deserializing round-tripped g1 bytes failed");
+        let parsed_affine: G1Affine = parsed.into();
+        assert_eq!(parsed_affine, point, "g1 roundtrip point mismatch");
+    }
+
+    #[tokio::test]
+    async fn test_g1_shader_load_store_roundtrip() {
+        let gpu = GpuContext::<Bls12>::new()
+            .await
+            .expect("failed to init gpu context");
+
+        let point = G1Affine::generator();
+        let in_bytes = <Bls12 as GpuCurve>::serialize_g1(&point);
+
+        let in_buf = gpu.create_storage_buffer("rt_in_g1", &in_bytes);
+        let out_buf = gpu.create_empty_buffer("rt_out_g1", in_bytes.len() as u64);
+
+        let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("MSM Shader Roundtrip"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(<Bls12 as GpuCurve>::MSM_SOURCE)),
+        });
+
+        let bgl = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("RT G1 BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("RT G1 Pipeline Layout"),
+            bind_group_layouts: &[&bgl],
+            immediate_size: 0,
+        });
+
+        let pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("RT G1 Pipeline"),
+            layout: Some(&layout),
+            module: &shader,
+            entry_point: Some("roundtrip_g1"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("RT G1 BG"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: in_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: out_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("RT G1 Encoder") });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("RT G1 Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        gpu.queue.submit(Some(encoder.finish()));
+
+        let out_bytes = gpu
+            .read_buffer(&out_buf, in_bytes.len() as u64)
+            .await
+            .expect("failed to read rt g1 bytes");
+
+        let parsed = <Bls12 as GpuCurve>::deserialize_g1(&out_bytes)
+            .expect("deserializing shader round-tripped g1 bytes failed");
+        let parsed_affine: G1Affine = parsed.into();
+        assert_eq!(parsed_affine, point, "g1 shader roundtrip point mismatch");
+    }
+
+    #[tokio::test]
+    async fn test_g1_shader_coord_only_montgomery_roundtrip() {
+        let gpu = GpuContext::<Bls12>::new()
+            .await
+            .expect("failed to init gpu context");
+
+        let point = G1Affine::generator();
+        let in_bytes = <Bls12 as GpuCurve>::serialize_g1(&point);
+
+        let in_buf = gpu.create_storage_buffer("rt_in_coords_g1", &in_bytes);
+        let out_buf = gpu.create_empty_buffer("rt_out_coords_g1", in_bytes.len() as u64);
+
+        let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("MSM Shader Coord Roundtrip"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(<Bls12 as GpuCurve>::MSM_SOURCE)),
+        });
+
+        let bgl = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("RT Coords G1 BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("RT Coords G1 Pipeline Layout"),
+            bind_group_layouts: &[&bgl],
+            immediate_size: 0,
+        });
+
+        let pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("RT Coords G1 Pipeline"),
+            layout: Some(&layout),
+            module: &shader,
+            entry_point: Some("roundtrip_coords_g1"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("RT Coords G1 BG"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: in_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: out_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("RT Coords G1 Encoder") });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("RT Coords G1 Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        gpu.queue.submit(Some(encoder.finish()));
+
+        let out_bytes = gpu
+            .read_buffer(&out_buf, in_bytes.len() as u64)
+            .await
+            .expect("failed to read rt coords g1 bytes");
+
+        if in_bytes != out_bytes {
+            let mut mismatches = 0usize;
+            for i in 0..in_bytes.len() {
+                if in_bytes[i] != out_bytes[i] {
+                    mismatches += 1;
+                }
+            }
+            println!("coord rt mismatches: {}", mismatches);
+            println!("in[0..16]={:02x?}", &in_bytes[0..16]);
+            println!("out[0..16]={:02x?}", &out_bytes[0..16]);
+            println!("in[48..64]={:02x?}", &in_bytes[48..64]);
+            println!("out[48..64]={:02x?}", &out_bytes[48..64]);
+        }
+
+        let parsed = <Bls12 as GpuCurve>::deserialize_g1(&out_bytes)
+            .expect("deserializing coord round-tripped g1 bytes failed");
+        let parsed_affine: G1Affine = parsed.into();
+        assert_eq!(parsed_affine, point, "g1 coord roundtrip point mismatch");
+    }
+}

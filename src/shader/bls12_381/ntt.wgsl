@@ -21,6 +21,35 @@ var<storage, read> twiddles: array<U256>; // Precomputed powers of omega in Mont
 // Fast workgroup-shared memory for the Cooley-Tukey butterflies
 var<workgroup> shared_data: array<U256, ELEMENTS_PER_TILE>;
 
+fn add_fr(a: U256, b: U256) -> U256 {
+    var sum = add_u256(a, b);
+    var is_gte = true;
+    for (var i: u32 = 7u; i < 8u; i = i - 1u) {
+        if sum.limbs[i] > R_MODULUS[i] { break; }
+        if sum.limbs[i] < R_MODULUS[i] { is_gte = false; break; }
+        if i == 0u { break; }
+    }
+    if is_gte {
+        sum = sub_u256(sum, U256(R_MODULUS));
+    }
+    return sum;
+}
+
+fn sub_fr(a: U256, b: U256) -> U256 {
+    var is_less = false;
+    for (var i: u32 = 7u; i < 8u; i = i - 1u) {
+        if a.limbs[i] < b.limbs[i] { is_less = true; break; }
+        if a.limbs[i] > b.limbs[i] { break; }
+        if i == 0u { break; }
+    }
+
+    var diff = sub_u256(a, b);
+    if is_less {
+        diff = add_u256(diff, U256(R_MODULUS));
+    }
+    return diff;
+}
+
 // ============================================================================
 // HELPER: BIT REVERSAL
 // ============================================================================
@@ -90,8 +119,8 @@ fn ntt_tile(
         
         // u_new = u + temp
         // v_new = u - temp
-        shared_data[pos] = add_u256(u, v_omega);
-        shared_data[pos + half_len] = sub_u256(u, v_omega);
+        shared_data[pos] = add_fr(u, v_omega);
+        shared_data[pos + half_len] = sub_fr(u, v_omega);
 
         half_len = len;
         workgroupBarrier();

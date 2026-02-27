@@ -14,9 +14,9 @@ use crate::gpu::{GpuContext, curve::GpuCurve};
 struct GpuConstraintSystem<G: GpuCurve> {
     inputs: Vec<G::Scalar>,
     aux: Vec<G::Scalar>,
-    a_lcs: Vec<Vec<(usize, G::Scalar)>>,
-    b_lcs: Vec<Vec<(usize, G::Scalar)>>,
-    c_lcs: Vec<Vec<(usize, G::Scalar)>>,
+    a_lcs: Vec<Vec<(bellman::Variable, G::Scalar)>>,
+    b_lcs: Vec<Vec<(bellman::Variable, G::Scalar)>>,
+    c_lcs: Vec<Vec<(bellman::Variable, G::Scalar)>>,
     _marker: std::marker::PhantomData<G>,
 }
 
@@ -100,7 +100,7 @@ impl<G: GpuCurve + Send> bellman::ConstraintSystem<G::Scalar> for GpuConstraintS
     }
 }
 
-fn lc_to_vec<S: PrimeField>(lc: bellman::LinearCombination<S>) -> Vec<(usize, S)> {
+fn lc_to_vec<S: PrimeField>(lc: bellman::LinearCombination<S>) -> Vec<(bellman::Variable, S)> {
     #[cfg(feature = "bellman-provider-bellman")]
     let lc_iter = lc.as_ref().iter();
 
@@ -108,13 +108,7 @@ fn lc_to_vec<S: PrimeField>(lc: bellman::LinearCombination<S>) -> Vec<(usize, S)
     let lc_iter = lc.iter();
 
     lc_iter
-        .map(|(var, coeff)| {
-            let idx = match var.get_unchecked() {
-                bellman::Index::Input(i) => i,
-                bellman::Index::Aux(i) => i,
-            };
-            (idx, *coeff)
-        })
+        .map(|(var, coeff)| (var, *coeff))
         .collect()
 }
 
@@ -247,13 +241,12 @@ async fn gpu_msm_g2<G: GpuCurve>(
     Ok(result)
 }
 
-fn eval_lc<S: PrimeField>(lc: &[(usize, S)], inputs: &[S], aux: &[S]) -> S {
+fn eval_lc<S: PrimeField>(lc: &[(bellman::Variable, S)], inputs: &[S], aux: &[S]) -> S {
     let mut res = S::ZERO;
-    for &(idx, coeff) in lc {
-        let val = if idx < inputs.len() {
-            inputs[idx]
-        } else {
-            aux[idx - inputs.len()]
+    for &(var, coeff) in lc {
+        let val = match var.get_unchecked() {
+            bellman::Index::Input(i) => inputs[i],
+            bellman::Index::Aux(i) => aux[i],
         };
         let mut term = val;
         term.mul_assign(&coeff);
@@ -416,7 +409,8 @@ where
         .map_err(|e| anyhow::anyhow!("circuit synthesis failed: {:?}", e))?;
 
     let num_constraints = cs.a_lcs.len();
-    let n = num_constraints.next_power_of_two();
+    // Match Bellman evaluation domain sizing: include constraints and public inputs.
+    let n = (num_constraints + cs.inputs.len()).next_power_of_two();
 
     let mut a_values = vec![G::Scalar::ZERO; n];
     let mut b_values = vec![G::Scalar::ZERO; n];
@@ -435,7 +429,7 @@ where
 
     let a_msm = gpu_msm_g1(gpu, &pk.a, &full_assignment).await?;
     let b_g1_msm = gpu_msm_g1(gpu, &pk.b_g1, &full_assignment).await?;
-    let l_msm = gpu_msm_g1(gpu, &pk.vk.ic, &cs.aux).await?;
+    let l_msm = gpu_msm_g1(gpu, &pk.l, &cs.aux).await?;
 
     // Groth16 naturally drops the highest degree component, meaning pk.h_query.len() = n - 1.
     let h_msm = gpu_msm_g1(gpu, &pk.h, &h_coeffs[..pk.h.len()]).await?;
@@ -585,5 +579,47 @@ mod tests {
             !is_valid_wrong,
             "The verifier should reject a proof with tampered public inputs"
         );
+    }
+
+    #[tokio::test]
+    async fn test_gpu_msm_single_point_matches_cpu_g1() {
+        let mut rng = OsRng;
+        let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
+        let params =
+            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+                .expect("failed to generate parameters");
+        let gpu_ctx = GpuContext::<Bls12>::new()
+            .await
+            .expect("failed to initialize gpu");
+
+        let base = params.a[0];
+        let scalar = Scalar::from(1u64);
+
+        let gpu = gpu_msm_g1::<Bls12>(&gpu_ctx, &[base], &[scalar])
+            .await
+            .expect("gpu msm failed");
+        let gpu_affine = Bls12::proj_to_affine_g1(&gpu);
+        assert_eq!(gpu_affine, base);
+    }
+
+    #[tokio::test]
+    async fn test_gpu_msm_single_point_matches_cpu_g2() {
+        let mut rng = OsRng;
+        let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
+        let params =
+            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+                .expect("failed to generate parameters");
+        let gpu_ctx = GpuContext::<Bls12>::new()
+            .await
+            .expect("failed to initialize gpu");
+
+        let base = params.b_g2[0];
+        let scalar = Scalar::from(1u64);
+
+        let gpu = gpu_msm_g2::<Bls12>(&gpu_ctx, &[base], &[scalar])
+            .await
+            .expect("gpu msm failed");
+        let gpu_affine = Bls12::proj_to_affine_g2(&gpu);
+        assert_eq!(gpu_affine, base);
     }
 }
