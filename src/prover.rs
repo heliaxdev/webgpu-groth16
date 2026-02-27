@@ -1,9 +1,7 @@
 // TODO: implement a form of efficient batching of GPU operations.
 // loading data in and out of the GPU is slow. we want to batch as many ops as possible,
 // without using a stupid amount of VRAM (perhaps we need to check
-// how much VRAM the host has). if we're constantly calling `gpu_msm_g1`,
-// `gpu_msm_g2`, and `gpu_fft` with small batches, we pay the cost
-// of GPU data transfer, and won't gain much in terms of proving speed.
+// how much VRAM the host has).
 
 use anyhow::Result;
 use ff::{Field, PrimeField};
@@ -146,25 +144,6 @@ fn marshal_scalars<G: GpuCurve>(scalars: &[G::Scalar]) -> Vec<u8> {
     buffer
 }
 
-async fn gpu_fft<G: GpuCurve>(
-    gpu: &GpuContext<G>,
-    data: &mut [G::Scalar],
-    twiddles: &[G::Scalar],
-) -> Result<()> {
-    let data_bytes = marshal_scalars::<G>(data);
-    let twiddles_bytes = marshal_scalars::<G>(twiddles);
-    let data_buf = gpu.create_storage_buffer("NTT Data", &data_bytes);
-    let twiddles_buf = gpu.create_storage_buffer("NTT Twiddles", &twiddles_bytes);
-    gpu.execute_ntt(&data_buf, &twiddles_buf, data.len() as u32);
-    let result_bytes = gpu
-        .read_buffer(&data_buf, (data.len() * 32) as wgpu::BufferAddress)
-        .await?;
-    for (i, chunk) in result_bytes.chunks_exact(32).enumerate() {
-        data[i] = G::deserialize_scalar(chunk)?;
-    }
-    Ok(())
-}
-
 async fn gpu_msm_g1<G: GpuCurve>(
     gpu: &GpuContext<G>,
     bases: &[G::G1Affine],
@@ -213,6 +192,7 @@ async fn gpu_msm_g1<G: GpuCurve>(
         .await?;
     let mut result = G::g1_identity();
 
+    // CPU Combination logic (standard Pippenger loop over window returns)
     for (i, chunk) in result_bytes.chunks_exact(144).enumerate().rev() {
         if i != (bd.num_windows - 1) as usize {
             for _ in 0..G::bucket_width() {
@@ -308,92 +288,113 @@ async fn compute_h_poly<G: GpuCurve>(
 ) -> Result<Vec<G::Scalar>> {
     let n = a_values.len().next_power_of_two();
 
+    // Padding domain size to 2N avoids cyclic wrap-around
+    // when multiplying two polynomials of degree (N-1) -> resulting degree 2N - 2
     let domain_size = n * 2;
 
-    // Step 1: Interpolate A, B, C back to standard coefficients using iNTT(N)
+    // 1. CPU PRE-COMPUTES CONSTANT FACTORS (Takes < 1 ms)
     let omega_n = G::root_of_unity(n);
     let omega_n_inv = omega_n.invert().unwrap();
+    let omega_2n = G::root_of_unity(domain_size);
+    let omega_2n_inv = omega_2n.invert().unwrap();
+
+    let n_inv = G::Scalar::from(n as u64).invert().unwrap();
+    let coset_generator = G::Scalar::MULTIPLICATIVE_GENERATOR;
+    let coset_inv = coset_generator.invert().unwrap();
+    let domain_inv = G::Scalar::from(domain_size as u64).invert().unwrap();
 
     let mut inv_twiddles_n = vec![G::Scalar::ONE; n];
-    for i in 1..n {
-        inv_twiddles_n[i] = inv_twiddles_n[i - 1] * omega_n_inv;
-    }
-
-    let mut a_coeffs = a_values.to_vec();
-    a_coeffs.resize(n, G::Scalar::ZERO);
-    let mut b_coeffs = b_values.to_vec();
-    b_coeffs.resize(n, G::Scalar::ZERO);
-    let mut c_coeffs = c_values.to_vec();
-    c_coeffs.resize(n, G::Scalar::ZERO);
-
-    gpu_fft(gpu, &mut a_coeffs, &inv_twiddles_n).await?;
-    gpu_fft(gpu, &mut b_coeffs, &inv_twiddles_n).await?;
-    gpu_fft(gpu, &mut c_coeffs, &inv_twiddles_n).await?;
-
-    // Step 2: Apply coset shift to evaluate Z_H safely without Division-by-Zero panic
-    let n_inv = G::Scalar::from(n as u64).invert().unwrap();
-
-    let coset_generator = G::Scalar::MULTIPLICATIVE_GENERATOR;
-    let mut shift = G::Scalar::ONE;
-
-    for i in 0..n {
-        let mult = n_inv * shift;
-        a_coeffs[i] *= mult;
-        b_coeffs[i] *= mult;
-        c_coeffs[i] *= mult;
-        shift *= coset_generator;
-    }
-
-    // Step 3: Pad the shifted coefficients to evaluate on the 2N domain
-    a_coeffs.resize(domain_size, G::Scalar::ZERO);
-    b_coeffs.resize(domain_size, G::Scalar::ZERO);
-    c_coeffs.resize(domain_size, G::Scalar::ZERO);
-
-    let omega_2n = G::root_of_unity(domain_size);
     let mut fwd_twiddles_2n = vec![G::Scalar::ONE; domain_size];
-    for i in 1..domain_size {
-        fwd_twiddles_2n[i] = fwd_twiddles_2n[i - 1] * omega_2n;
-    }
-
-    gpu_fft(gpu, &mut a_coeffs, &fwd_twiddles_2n).await?;
-    gpu_fft(gpu, &mut b_coeffs, &fwd_twiddles_2n).await?;
-    gpu_fft(gpu, &mut c_coeffs, &fwd_twiddles_2n).await?;
-
-    // Step 4: Pointwise Polynomial Equation H(X) = (A(X) * B(X) - C(X)) / Z_H(X)
-    let mut h_evals = vec![G::Scalar::ZERO; domain_size];
-    let g_to_n = coset_generator.pow([n as u64]);
-
-    // Mathematical Optimization: Precompute the vanishing evaluations
-    // Z_H(X) = X^N - 1, substituting shifted roots -> Z_H = g^N * (-1)^i - 1
-    let z_even = g_to_n - G::Scalar::ONE;
-    let z_odd = -g_to_n - G::Scalar::ONE;
-
-    let z_even_inv = z_even.invert().unwrap();
-    let z_odd_inv = z_odd.invert().unwrap();
-
-    for i in 0..domain_size {
-        let z_inv = if i % 2 == 0 { z_even_inv } else { z_odd_inv };
-        h_evals[i] = ((a_coeffs[i] * b_coeffs[i]) - c_coeffs[i]) * z_inv;
-    }
-
-    // Step 5: Convert the H(X) evaluations back to standard coefficients using iNTT(2N)
-    let omega_2n_inv = omega_2n.invert().unwrap();
     let mut inv_twiddles_2n = vec![G::Scalar::ONE; domain_size];
+    let mut shifts = vec![G::Scalar::ONE; n];
+    let mut inv_shifts = vec![G::Scalar::ONE; n];
+
     for i in 1..domain_size {
+        if i < n {
+            inv_twiddles_n[i] = inv_twiddles_n[i - 1] * omega_n_inv;
+            shifts[i] = shifts[i - 1] * coset_generator;
+            inv_shifts[i] = inv_shifts[i - 1] * coset_inv;
+        }
+        fwd_twiddles_2n[i] = fwd_twiddles_2n[i - 1] * omega_2n;
         inv_twiddles_2n[i] = inv_twiddles_2n[i - 1] * omega_2n_inv;
     }
 
-    gpu_fft(gpu, &mut h_evals, &inv_twiddles_2n).await?;
+    // Embed `n_inv` and `domain_inv` directly into the shifts so the GPU avoids
+    // doing a separate scalar multiplication pass.
+    for i in 0..n {
+        shifts[i] *= n_inv;
+        inv_shifts[i] *= domain_inv;
+    }
 
-    // Step 6: Remove the coset shift to get standard H coefficients (We only need the first N)
-    let domain_size_inv = G::Scalar::from(domain_size as u64).invert().unwrap();
-    let shift_inv = coset_generator.invert().unwrap();
-    let mut current_shift = G::Scalar::ONE;
+    let g_to_n = coset_generator.pow([n as u64]);
+    let z_even_inv = (g_to_n - G::Scalar::ONE).invert().unwrap();
+    let z_odd_inv = (-g_to_n - G::Scalar::ONE).invert().unwrap();
+    let z_invs = vec![z_even_inv, z_odd_inv];
+
+    // 2. CPU ZERO-PADDING (Sizes up to 2N before sending)
+    let mut a_coeffs = a_values.to_vec();
+    a_coeffs.resize(domain_size, G::Scalar::ZERO);
+    let mut b_coeffs = b_values.to_vec();
+    b_coeffs.resize(domain_size, G::Scalar::ZERO);
+    let mut c_coeffs = c_values.to_vec();
+    c_coeffs.resize(domain_size, G::Scalar::ZERO);
+
+    // 3. UPLOAD ALL BUFFERS TO VRAM (One-way trip)
+    let a_buf = gpu.create_storage_buffer("A", &marshal_scalars::<G>(&a_coeffs));
+    let b_buf = gpu.create_storage_buffer("B", &marshal_scalars::<G>(&b_coeffs));
+    let c_buf = gpu.create_storage_buffer("C", &marshal_scalars::<G>(&c_coeffs));
+    let h_buf = gpu.create_empty_buffer("H", (domain_size * 32) as u64);
+
+    let tw_inv_n_buf = gpu.create_storage_buffer("TwInvN", &marshal_scalars::<G>(&inv_twiddles_n));
+    let tw_fwd_2n_buf =
+        gpu.create_storage_buffer("TwFwd2N", &marshal_scalars::<G>(&fwd_twiddles_2n));
+    let tw_inv_2n_buf =
+        gpu.create_storage_buffer("TwInv2N", &marshal_scalars::<G>(&inv_twiddles_2n));
+    let shifts_buf = gpu.create_storage_buffer("Shifts", &marshal_scalars::<G>(&shifts));
+    let inv_shifts_buf = gpu.create_storage_buffer("InvShifts", &marshal_scalars::<G>(&inv_shifts));
+    let z_invs_buf = gpu.create_storage_buffer("ZInvs", &marshal_scalars::<G>(&z_invs));
+
+    // 4. DISPATCH 100% VRAM-BOUND GPU COMPUTE CHAIN
+    // Step A: iNTT(N) to get coefficients
+    gpu.execute_ntt(&a_buf, &tw_inv_n_buf, n as u32);
+    gpu.execute_ntt(&b_buf, &tw_inv_n_buf, n as u32);
+    gpu.execute_ntt(&c_buf, &tw_inv_n_buf, n as u32);
+
+    // Step B: Shift evaluations by Coset Generator
+    gpu.execute_coset_shift(&a_buf, &shifts_buf, n as u32);
+    gpu.execute_coset_shift(&b_buf, &shifts_buf, n as u32);
+    gpu.execute_coset_shift(&c_buf, &shifts_buf, n as u32);
+
+    // Step C: NTT(2N) to get shifted evaluations over padded domain
+    gpu.execute_ntt(&a_buf, &tw_fwd_2n_buf, domain_size as u32);
+    gpu.execute_ntt(&b_buf, &tw_fwd_2n_buf, domain_size as u32);
+    gpu.execute_ntt(&c_buf, &tw_fwd_2n_buf, domain_size as u32);
+
+    // Step D: Evaluate H(X) pointwise
+    gpu.execute_pointwise_poly(
+        &a_buf,
+        &b_buf,
+        &c_buf,
+        &h_buf,
+        &z_invs_buf,
+        domain_size as u32,
+    );
+
+    // Step E: iNTT(2N) to get back H(X) coefficients
+    gpu.execute_ntt(&h_buf, &tw_inv_2n_buf, domain_size as u32);
+
+    // Step F: Reverse the Coset Shift on the resulting N coefficients
+    gpu.execute_coset_shift(&h_buf, &inv_shifts_buf, n as u32);
+
+    // 5. FINALLY PULL THE RESULT OFF THE GPU
+    // We only read back the first N elements (H drops the top half mathematically)
+    let h_bytes = gpu
+        .read_buffer(&h_buf, (n * 32) as wgpu::BufferAddress)
+        .await?;
 
     let mut h_poly = vec![G::Scalar::ZERO; n];
-    for i in 0..n {
-        h_poly[i] = h_evals[i] * domain_size_inv * current_shift;
-        current_shift *= shift_inv;
+    for (i, chunk) in h_bytes.chunks_exact(32).enumerate() {
+        h_poly[i] = G::deserialize_scalar(chunk)?;
     }
 
     Ok(h_poly)
@@ -437,6 +438,7 @@ where
     let b_g1_msm = gpu_msm_g1(gpu, &pk.b_query_g1, &full_assignment).await?;
     let l_msm = gpu_msm_g1(gpu, &pk.l_query, &cs.aux).await?;
 
+    // Groth16 naturally drops the highest degree component, meaning pk.h_query.len() = n - 1.
     let h_msm = gpu_msm_g1(gpu, &pk.h_query, &h_coeffs[..pk.h_query.len()]).await?;
 
     let b_g2_msm = gpu_msm_g2(gpu, &pk.b_query_g2, &full_assignment).await?;

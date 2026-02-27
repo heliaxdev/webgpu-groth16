@@ -12,6 +12,7 @@ pub trait GpuCurve: 'static {
 
     const NTT_SOURCE: &'static str;
     const MSM_SOURCE: &'static str;
+    const POLY_OPS_SOURCE: &'static str;
 
     // Serialization
     fn serialize_g1(point: &Self::G1Affine) -> Vec<u8>;
@@ -71,6 +72,12 @@ impl GpuCurve for Bls12 {
         include_str!("../shader/bls12_381/curve.wgsl"),
         "\n",
         include_str!("../shader/bls12_381/msm.wgsl"),
+    );
+
+    const POLY_OPS_SOURCE: &'static str = concat!(
+        include_str!("../shader/bls12_381/fr.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/poly_ops.wgsl"),
     );
 
     fn serialize_g1(point: &Self::G1Affine) -> Vec<u8> {

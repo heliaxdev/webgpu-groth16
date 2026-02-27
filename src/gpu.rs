@@ -13,7 +13,10 @@ pub struct GpuContext<C> {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
 
+    // Polynomial Pipelines
     pub ntt_pipeline: wgpu::ComputePipeline,
+    pub coset_shift_pipeline: wgpu::ComputePipeline,
+    pub pointwise_poly_pipeline: wgpu::ComputePipeline,
 
     // MSM 2-Stage Pipelines
     pub msm_agg_g1_pipeline: wgpu::ComputePipeline,
@@ -21,7 +24,10 @@ pub struct GpuContext<C> {
     pub msm_agg_g2_pipeline: wgpu::ComputePipeline,
     pub msm_sum_g2_pipeline: wgpu::ComputePipeline,
 
+    // Bind Group Layouts
     pub ntt_bind_group_layout: wgpu::BindGroupLayout,
+    pub coset_shift_bind_group_layout: wgpu::BindGroupLayout,
+    pub pointwise_poly_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_agg_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_sum_bind_group_layout: wgpu::BindGroupLayout,
 
@@ -31,10 +37,12 @@ pub struct GpuContext<C> {
 impl<C: GpuCurve> GpuContext<C> {
     pub async fn new() -> anyhow::Result<Self> {
         let instance = wgpu::Instance::default();
+
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
-                ..Default::default()
+                force_fallback_adapter: false,
+                compatible_surface: None,
             })
             .await
             .context("Failed to find a compatible WebGPU adapter")?;
@@ -42,20 +50,30 @@ impl<C: GpuCurve> GpuContext<C> {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Groth16 Prover Device"),
+                // Use adapter.limits() directly to support large buffers (>128MB) for WebAssembly
                 required_limits: adapter.limits(),
                 ..Default::default()
             })
-            .await?;
+            .await
+            .context("Failed to request WebGPU device")?;
 
+        // 1. Compile Shader Modules
         let ntt_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("NTT Shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::NTT_SOURCE)),
         });
+
         let msm_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("MSM Shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_SOURCE)),
         });
 
+        let poly_ops_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Poly Ops Shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::POLY_OPS_SOURCE)),
+        });
+
+        // 2. Define Bind Group Layouts
         let ntt_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("NTT Bind Group Layout"),
@@ -83,7 +101,90 @@ impl<C: GpuCurve> GpuContext<C> {
                 ],
             });
 
-        // Stage 1: Aggregation
+        let coset_shift_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Coset Shift Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let pointwise_poly_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Pointwise Poly Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
         let msm_agg_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("MSM Agg Bind Group Layout"),
@@ -141,7 +242,6 @@ impl<C: GpuCurve> GpuContext<C> {
                 ],
             });
 
-        // Stage 2: Subsum Accumulation
         let msm_sum_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("MSM Sum Bind Group Layout"),
@@ -199,6 +299,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 ],
             });
 
+        // 3. Create Compute Pipelines
         let ntt_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("NTT Compute Pipeline"),
             layout: Some(
@@ -213,6 +314,38 @@ impl<C: GpuCurve> GpuContext<C> {
             compilation_options: Default::default(),
             cache: None,
         });
+
+        let coset_shift_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Coset Shift Pipeline"),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: None,
+                        bind_group_layouts: &[&coset_shift_bind_group_layout],
+                        immediate_size: 0,
+                    }),
+                ),
+                module: &poly_ops_module,
+                entry_point: Some("coset_shift"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        let pointwise_poly_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Pointwise Poly Pipeline"),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: None,
+                        bind_group_layouts: &[&pointwise_poly_bind_group_layout],
+                        immediate_size: 0,
+                    }),
+                ),
+                module: &poly_ops_module,
+                entry_point: Some("pointwise_poly"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
 
         let msm_agg_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
@@ -266,11 +399,15 @@ impl<C: GpuCurve> GpuContext<C> {
             device,
             queue,
             ntt_pipeline,
+            coset_shift_pipeline,
+            pointwise_poly_pipeline,
             msm_agg_g1_pipeline,
             msm_sum_g1_pipeline,
             msm_agg_g2_pipeline,
             msm_sum_g2_pipeline,
             ntt_bind_group_layout,
+            coset_shift_bind_group_layout,
+            pointwise_poly_bind_group_layout,
             msm_agg_bind_group_layout,
             msm_sum_bind_group_layout,
             _marker: PhantomData,
@@ -319,7 +456,6 @@ impl<C: GpuCurve> GpuContext<C> {
                 },
             ],
         });
-
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -333,6 +469,91 @@ impl<C: GpuCurve> GpuContext<C> {
             cpass.set_pipeline(&self.ntt_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
             cpass.dispatch_workgroups(num_elements.div_ceil(512), 1, 1);
+        }
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    pub fn execute_coset_shift(
+        &self,
+        data_buffer: &wgpu::Buffer,
+        shifts_buffer: &wgpu::Buffer,
+        num_elements: u32,
+    ) {
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Coset Shift Bind Group"),
+            layout: &self.coset_shift_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: shifts_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.coset_shift_pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.dispatch_workgroups(num_elements.div_ceil(256), 1, 1);
+        }
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    pub fn execute_pointwise_poly(
+        &self,
+        a_buf: &wgpu::Buffer,
+        b_buf: &wgpu::Buffer,
+        c_buf: &wgpu::Buffer,
+        h_buf: &wgpu::Buffer,
+        z_invs_buf: &wgpu::Buffer,
+        num_elements: u32,
+    ) {
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Pointwise Poly Bind Group"),
+            layout: &self.pointwise_poly_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: a_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: b_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: c_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: h_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: z_invs_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.pointwise_poly_pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.dispatch_workgroups(num_elements.div_ceil(256), 1, 1);
         }
         self.queue.submit(Some(encoder.finish()));
     }
@@ -468,7 +689,7 @@ impl<C: GpuCurve> GpuContext<C> {
             sender.send(res).unwrap();
         });
 
-        #[cfg(not(target_family = "wasm"))]
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 
         if let Ok(Ok(())) = receiver.await {
