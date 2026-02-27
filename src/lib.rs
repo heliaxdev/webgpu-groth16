@@ -7,3 +7,9 @@
 pub mod bucket;
 pub mod gpu;
 pub mod prover;
+
+#[cfg(feature = "bellman-provider-bellman")]
+pub use bellman;
+
+#[cfg(feature = "bellman-provider-nam-bellperson")]
+pub use nam_bellperson as bellman;

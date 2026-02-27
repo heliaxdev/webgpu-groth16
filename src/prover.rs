@@ -7,6 +7,7 @@ use anyhow::Result;
 use ff::{Field, PrimeField};
 use rand_core::RngCore;
 
+use crate::bellman;
 use crate::bucket::{BucketData, compute_bucket_sorting};
 use crate::gpu::{GpuContext, curve::GpuCurve};
 
@@ -62,7 +63,7 @@ impl<G: GpuCurve> GpuConstraintSystem<G> {
     }
 }
 
-impl<G: GpuCurve> bellman::ConstraintSystem<G::Scalar> for GpuConstraintSystem<G> {
+impl<G: GpuCurve + Send> bellman::ConstraintSystem<G::Scalar> for GpuConstraintSystem<G> {
     type Root = Self;
     fn alloc<F, A, AR>(
         &mut self,
@@ -124,8 +125,13 @@ impl<G: GpuCurve> bellman::ConstraintSystem<G::Scalar> for GpuConstraintSystem<G
 }
 
 fn lc_to_vec<S: PrimeField>(lc: bellman::LinearCombination<S>) -> Vec<(usize, S)> {
-    lc.as_ref()
-        .iter()
+    #[cfg(feature = "bellman-provider-bellman")]
+    let lc_iter = lc.as_ref().iter();
+
+    #[cfg(feature = "bellman-provider-nam-bellperson")]
+    let lc_iter = lc.iter();
+
+    lc_iter
         .map(|(var, coeff)| {
             let idx = match var.get_unchecked() {
                 bellman::Index::Input(i) => i,
@@ -408,7 +414,7 @@ pub async fn create_proof<C, G, R>(
 ) -> Result<Proof<G>>
 where
     C: bellman::Circuit<G::Scalar>,
-    G: GpuCurve,
+    G: GpuCurve + Send,
     R: RngCore,
 {
     let mut cs = GpuConstraintSystem::<G>::new();

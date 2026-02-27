@@ -6,19 +6,25 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = ["bellman-provider-nam-bellperson"]
+bellman-provider-bellman = ["dep:bellman"]
+bellman-provider-nam-bellperson = ["dep:nam-bellperson"]
+
 [dependencies]
-wgpu = "28.0.0"
-wasm-bindgen = "0.2.113"
-blstrs = "0.7.1"
-ff = "0.13.1"
-group = "0.13"
-subtle = "2.5"
-futures = "0.3.32"
 anyhow = "1.0.102"
-rand_core = "0.6.4"
-bellman = "0.14"
+bellman = { version = "0.14.0", optional = true }
+blstrs = { package = "nam-blstrs", version = "0.7.1-nam.0" }
 bytemuck = "1.25.0"
+ff = "0.13.1"
+futures = "0.3.32"
+group = "0.13"
+nam-bellperson = { version = "0.26.6-nam.1", optional = true }
 pairing = "0.23.0"
+rand_core = "0.6.4"
+subtle = "2.5"
+wasm-bindgen = "0.2.113"
+wgpu = "28.0.0"
 
 [dev-dependencies]
 rand = "0.8"
