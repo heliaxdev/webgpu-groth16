@@ -12,42 +12,42 @@ struct U384 {
 fn add_u384(a: U384, b: U384) -> U384 {
     var result: U384;
     var carry: u32 = 0u;
-    
+
     for (var i: u32 = 0u; i < 12u; i = i + 1u) {
         let a_val = a.limbs[i];
         let b_val = b.limbs[i];
-        
+
         let sum1 = a_val + b_val;
         let carry1 = u32(sum1 < a_val);
-        
+
         let sum2 = sum1 + carry;
         let carry2 = u32(sum2 < sum1);
-        
+
         result.limbs[i] = sum2;
         carry = carry1 + carry2;
     }
-    
+
     return result;
 }
 
 fn sub_u384(a: U384, b: U384) -> U384 {
     var result: U384;
     var borrow: u32 = 0u;
-    
+
     for (var i: u32 = 0u; i < 12u; i = i + 1u) {
         let a_val = a.limbs[i];
         let b_val = b.limbs[i];
-        
+
         let diff1 = a_val - b_val;
         let borrow1 = u32(a_val < b_val);
-        
+
         let diff2 = diff1 - borrow;
         let borrow2 = u32(diff1 < borrow);
-        
+
         result.limbs[i] = diff2;
         borrow = borrow1 + borrow2;
     }
-    
+
     return result;
 }
 
@@ -121,7 +121,7 @@ fn mul_montgomery_u256(a: U256, b: U256) -> U256 {
             let c1 = u32(sum1 < t[j]);
             let sum2 = sum1 + prod.x;
             let c2 = u32(sum2 < sum1);
-            
+
             t[j] = sum2;
             carry = prod.y + c1 + c2;
         }
@@ -138,14 +138,14 @@ fn mul_montgomery_u256(a: U256, b: U256) -> U256 {
         let sum_m0_2 = sum_m0_1 + prod0.x;
         let c_m0_2 = u32(sum_m0_2 < sum_m0_1);
         carry = prod0.y + c_m0_1 + c_m0_2;
-        
+
         for (var j: u32 = 1u; j < 8u; j = j + 1u) {
             let prod = mul_u32(m, R_MODULUS[j]);
             let sum1 = t[j] + carry;
             let c1 = u32(sum1 < t[j]);
             let sum2 = sum1 + prod.x;
             let c2 = u32(sum2 < sum1);
-            
+
             t[j - 1u] = sum2;
             carry = prod.y + c1 + c2;
         }
@@ -163,12 +163,12 @@ fn mul_montgomery_u256(a: U256, b: U256) -> U256 {
     // Final subtraction if result >= R_MODULUS
     var is_gte = true;
     for (var i: u32 = 7u; i < 8u; i = i - 1u) {
-        if (result.limbs[i] > R_MODULUS[i]) { break; }
-        if (result.limbs[i] < R_MODULUS[i]) { is_gte = false; break; }
-        if (i == 0u) { break; }
+        if result.limbs[i] > R_MODULUS[i] { break; }
+        if result.limbs[i] < R_MODULUS[i] { is_gte = false; break; }
+        if i == 0u { break; }
     }
 
-    if (t[8] > 0u || is_gte) {
+    if t[8] > 0u || is_gte {
         return sub_u256(result, U256(R_MODULUS));
     }
     return result;
@@ -183,14 +183,14 @@ fn mul_montgomery_u384(a: U384, b: U384) -> U384 {
 
     for (var i: u32 = 0u; i < 12u; i = i + 1u) {
         var carry: u32 = 0u;
-        
+
         for (var j: u32 = 0u; j < 12u; j = j + 1u) {
             let prod = mul_u32(a.limbs[i], b.limbs[j]);
             let sum1 = t[j] + carry;
             let c1 = u32(sum1 < t[j]);
             let sum2 = sum1 + prod.x;
             let c2 = u32(sum2 < sum1);
-            
+
             t[j] = sum2;
             carry = prod.y + c1 + c2;
         }
@@ -198,21 +198,21 @@ fn mul_montgomery_u384(a: U384, b: U384) -> U384 {
 
         let m = t[0] * INV_Q;
         carry = 0u;
-        
+
         let prod0 = mul_u32(m, Q_MODULUS[0]);
         let sum_m0_1 = t[0] + carry;
         let c_m0_1 = u32(sum_m0_1 < t[0]);
         let sum_m0_2 = sum_m0_1 + prod0.x;
         let c_m0_2 = u32(sum_m0_2 < sum_m0_1);
         carry = prod0.y + c_m0_1 + c_m0_2;
-        
+
         for (var j: u32 = 1u; j < 12u; j = j + 1u) {
             let prod = mul_u32(m, Q_MODULUS[j]);
             let sum1 = t[j] + carry;
             let c1 = u32(sum1 < t[j]);
             let sum2 = sum1 + prod.x;
             let c2 = u32(sum2 < sum1);
-            
+
             t[j - 1u] = sum2;
             carry = prod.y + c1 + c2;
         }
@@ -229,12 +229,12 @@ fn mul_montgomery_u384(a: U384, b: U384) -> U384 {
 
     var is_gte = true;
     for (var i: u32 = 11u; i < 12u; i = i - 1u) {
-        if (result.limbs[i] > Q_MODULUS[i]) { break; }
-        if (result.limbs[i] < Q_MODULUS[i]) { is_gte = false; break; }
-        if (i == 0u) { break; }
+        if result.limbs[i] > Q_MODULUS[i] { break; }
+        if result.limbs[i] < Q_MODULUS[i] { is_gte = false; break; }
+        if i == 0u { break; }
     }
 
-    if (t[12] > 0u || is_gte) {
+    if t[12] > 0u || is_gte {
         return sub_u384(result, U384(Q_MODULUS));
     }
     return result;

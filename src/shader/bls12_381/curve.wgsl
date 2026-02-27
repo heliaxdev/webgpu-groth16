@@ -134,10 +134,10 @@ fn mul_fp2(a: Fq2, b: Fq2) -> Fq2 {
     let a0_plus_a1 = add_u384(a.c0, a.c1);
     let b0_plus_b1 = add_u384(b.c0, b.c1);
     let a_plus_b_prod = mul_montgomery_u384(a0_plus_a1, b0_plus_b1);
-    
+
     var c1_out = sub_u384(a_plus_b_prod, a0b0);
     c1_out = sub_u384(c1_out, a1b1);
-    
+
     let c0_out = sub_u384(a0b0, a1b1);
 
     return Fq2(c0_out, c1_out);

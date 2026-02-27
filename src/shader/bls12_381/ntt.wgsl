@@ -52,16 +52,16 @@ fn ntt_tile(
     // The Cooley-Tukey algorithm yields elements out of order, requiring bit-inversion.
     // We apply the bit-reversal permutation while loading into shared memory.
     let log2_elements = 9u; // log2(512) = 9
-    
+
     let local_idx_1 = local_id.x;
     let local_idx_2 = local_id.x + THREADS_PER_WORKGROUP;
-    
+
     let rev_idx_1 = reverse_bits(local_idx_1, log2_elements);
     let rev_idx_2 = reverse_bits(local_idx_2, log2_elements);
-    
+
     shared_data[rev_idx_1] = data[tile_offset + local_idx_1];
     shared_data[rev_idx_2] = data[tile_offset + local_idx_2];
-    
+
     workgroupBarrier();
     
     // 2. Cooley-Tukey Radix-2 In-Place Butterfly Iterations
@@ -79,8 +79,8 @@ fn ntt_tile(
         // In a full hierarchical setup, the stride depends on the global pass.
         // For this local tile, we scale the index.
         let twiddle_stride = ELEMENTS_PER_TILE / len;
-        let twiddle = twiddles[k * twiddle_stride]; 
-        
+        let twiddle = twiddles[k * twiddle_stride];
+
         let u = shared_data[pos];
         let v = shared_data[pos + half_len];
         
@@ -92,7 +92,7 @@ fn ntt_tile(
         // v_new = u - temp
         shared_data[pos] = add_u256(u, v_omega);
         shared_data[pos + half_len] = sub_u256(u, v_omega);
-        
+
         half_len = len;
         workgroupBarrier();
     }

@@ -14,7 +14,7 @@ const G1_INFINITY = PointG1(
 fn is_inf_g1(p: PointG1) -> bool {
     var is_zero = true;
     for (var i: u32 = 0u; i < 12u; i = i + 1u) {
-        if (p.z.limbs[i] != 0u) {
+        if p.z.limbs[i] != 0u {
             is_zero = false;
             break;
         }
@@ -26,11 +26,11 @@ fn is_inf_g1(p: PointG1) -> bool {
 fn add_g1_safe(p1: PointG1, p2: PointG1) -> PointG1 {
     let p1_inf = is_inf_g1(p1);
     let p2_inf = is_inf_g1(p2);
-    
-    if (p1_inf && p2_inf) { return G1_INFINITY; }
-    if (p1_inf) { return p2; }
-    if (p2_inf) { return p1; }
-    
+
+    if p1_inf && p2_inf { return G1_INFINITY; }
+    if p1_inf { return p2; }
+    if p2_inf { return p1; }
+
     return add_g1(p1, p2);
 }
 
@@ -58,10 +58,10 @@ var<storage, read_write> final_result: array<PointG1>;
 // Optimized for inconsecutive bucket indices where the max difference d=6.
 @compute @workgroup_size(1)
 fn subsum_accumulation_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if (global_id.x != 0u) { return; } // Executed by a single thread post-reduction
+    if global_id.x != 0u { return; } // Executed by a single thread post-reduction
 
     let m = bucket_count;
-    if (m == 0u) {
+    if m == 0u {
         final_result[0] = G1_INFINITY;
         return;
     }
@@ -73,7 +73,7 @@ fn subsum_accumulation_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     );
 
     var prev_b: u32 = 0u;
-    if (m > 0u) {
+    if m > 0u {
         prev_b = bucket_indices[m - 1u];
     }
 
@@ -86,7 +86,7 @@ fn subsum_accumulation_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         let current_b = bucket_indices[i - 1u];
         var next_b: u32 = 0u;
-        if (i > 1u) {
+        if i > 1u {
             next_b = bucket_indices[i - 2u];
         }
 
@@ -94,7 +94,7 @@ fn subsum_accumulation_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let k = current_b - next_b;
 
         // if k >= 1 then tmp[k] = tmp[k] + tmp[0]
-        if (k >= 1u && k <= 6u) {
+        if k >= 1u && k <= 6u {
             tmp[k] = add_g1_safe(tmp[k], tmp[0]);
         }
     }
@@ -152,7 +152,7 @@ const G2_INFINITY = PointG2(FQ2_ZERO, FQ2_ZERO, FQ2_ZERO);
 fn is_inf_g2(p: PointG2) -> bool {
     var is_zero = true;
     for (var i: u32 = 0u; i < 12u; i = i + 1u) {
-        if (p.z.c0.limbs[i] != 0u || p.z.c1.limbs[i] != 0u) {
+        if p.z.c0.limbs[i] != 0u || p.z.c1.limbs[i] != 0u {
             is_zero = false;
             break;
         }
@@ -164,11 +164,11 @@ fn is_inf_g2(p: PointG2) -> bool {
 fn add_g2_safe(p1: PointG2, p2: PointG2) -> PointG2 {
     let p1_inf = is_inf_g2(p1);
     let p2_inf = is_inf_g2(p2);
-    
-    if (p1_inf && p2_inf) { return G2_INFINITY; }
-    if (p1_inf) { return p2; }
-    if (p2_inf) { return p1; }
-    
+
+    if p1_inf && p2_inf { return G2_INFINITY; }
+    if p1_inf { return p2; }
+    if p2_inf { return p1; }
+
     return add_g2(p1, p2);
 }
 
@@ -195,10 +195,10 @@ var<storage, read_write> final_result_g2: array<PointG2>;
 // Evaluates S = b_1*S_1 + b_2*S_2 + ... + b_m*S_m for G2 points
 @compute @workgroup_size(1)
 fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if (global_id.x != 0u) { return; } // Executed by a single thread post-reduction
+    if global_id.x != 0u { return; } // Executed by a single thread post-reduction
 
     let m = bucket_count_g2;
-    if (m == 0u) {
+    if m == 0u {
         final_result_g2[0] = G2_INFINITY;
         return;
     }
@@ -210,7 +210,7 @@ fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
     );
 
     var prev_b: u32 = 0u;
-    if (m > 0u) {
+    if m > 0u {
         prev_b = bucket_indices_g2[m - 1u];
     }
 
@@ -223,7 +223,7 @@ fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         let current_b = bucket_indices_g2[i - 1u];
         var next_b: u32 = 0u;
-        if (i > 1u) {
+        if i > 1u {
             next_b = bucket_indices_g2[i - 2u];
         }
 
@@ -231,7 +231,7 @@ fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let k = current_b - next_b;
 
         // if k >= 1 then tmp[k] = tmp[k] + tmp[0]
-        if (k >= 1u && k <= 6u) {
+        if k >= 1u && k <= 6u {
             tmp[k] = add_g2_safe(tmp[k], tmp[0]);
         }
     }
