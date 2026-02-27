@@ -1,16 +1,17 @@
 use crate::gpu::curve::GpuCurve;
 
-pub struct BucketData<G: GpuCurve> {
-    pub buckets: Vec<G::G1Affine>,
+// Generalized over the Affine type (A)
+pub struct BucketData<A> {
+    pub buckets: Vec<A>,
     pub indices: Vec<u32>,
     pub bucket_count: usize,
 }
 
 // TODO: optimize this
-pub fn compute_bucket_sorting<G: GpuCurve>(
-    bases: &[G::G1Affine],
+pub fn compute_bucket_sorting<G: GpuCurve, A: Clone>(
+    bases: &[A],
     scalars: &[G::Scalar],
-) -> BucketData<G> {
+) -> BucketData<A> {
     let n = bases.len();
     assert_eq!(n, scalars.len());
 

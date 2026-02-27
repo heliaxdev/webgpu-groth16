@@ -15,9 +15,11 @@ pub trait GpuCurve: 'static {
 
     // Serialization
     fn serialize_g1(point: &Self::G1Affine) -> Vec<u8>;
+    fn serialize_g2(point: &Self::G2Affine) -> Vec<u8>;
     fn serialize_scalar(s: &Self::Scalar) -> Vec<u8>;
     fn deserialize_scalar(bytes: &[u8]) -> anyhow::Result<Self::Scalar>;
     fn deserialize_g1(bytes: &[u8]) -> anyhow::Result<Self::G1Projective>;
+    fn deserialize_g2(bytes: &[u8]) -> anyhow::Result<Self::G2Projective>;
 
     // Scalar decomposition for bucket sorting
     fn scalar_to_windows(s: &Self::Scalar, c: usize) -> Vec<u32>;
@@ -30,10 +32,7 @@ pub trait GpuCurve: 'static {
 
     // Identity element
     fn g1_identity() -> Self::G1Projective;
-
-    // CPU Fallbacks & Math
-    fn msm_g2_cpu(bases: &[Self::G2Affine], scalars: &[Self::Scalar]) -> Self::G2Projective;
-    fn msm_g1_cpu(bases: &[Self::G1Affine], scalars: &[Self::Scalar]) -> Self::G1Projective;
+    fn g2_identity() -> Self::G2Projective;
 
     fn affine_to_proj_g1(p: &Self::G1Affine) -> Self::G1Projective;
     fn affine_to_proj_g2(p: &Self::G2Affine) -> Self::G2Projective;
@@ -188,22 +187,6 @@ impl GpuCurve for Bls12 {
         blstrs::Scalar::ROOT_OF_UNITY.pow_vartime([exponent])
     }
 
-    fn msm_g2_cpu(bases: &[Self::G2Affine], scalars: &[Self::Scalar]) -> Self::G2Projective {
-        let mut result = blstrs::G2Projective::identity();
-        for (base, scalar) in bases.iter().zip(scalars.iter()) {
-            result = result.add(base.mul(scalar));
-        }
-        result
-    }
-
-    fn msm_g1_cpu(bases: &[Self::G1Affine], scalars: &[Self::Scalar]) -> Self::G1Projective {
-        let mut result = blstrs::G1Projective::identity();
-        for (base, scalar) in bases.iter().zip(scalars.iter()) {
-            result = result.add(base.mul(scalar));
-        }
-        result
-    }
-
     fn affine_to_proj_g1(p: &Self::G1Affine) -> Self::G1Projective {
         p.into()
     }
@@ -235,5 +218,74 @@ impl GpuCurve for Bls12 {
     }
     fn mul_g1_proj_scalar(a: &Self::G1Projective, b: &Self::Scalar) -> Self::G1Projective {
         a.mul(b)
+    }
+
+    fn serialize_g2(point: &Self::G2Affine) -> Vec<u8> {
+        let uncompressed = point.to_uncompressed();
+
+        // blstrs G2 uncompressed layout (192 bytes):
+        // x.c1 (48 bytes, BE), x.c0 (48 bytes, BE)
+        // y.c1 (48 bytes, BE), y.c0 (48 bytes, BE)
+        // WGSL expects (288 bytes total):
+        // x.c0, x.c1, y.c0, y.c1, z.c0, z.c1 (each 48 bytes, LE)
+
+        let mut x_c1 = uncompressed[0..48].to_vec();
+        x_c1.reverse();
+        let mut x_c0 = uncompressed[48..96].to_vec();
+        x_c0.reverse();
+        let mut y_c1 = uncompressed[96..144].to_vec();
+        y_c1.reverse();
+        let mut y_c0 = uncompressed[144..192].to_vec();
+        y_c0.reverse();
+
+        // Z = 1 (z.c0 = 1, z.c1 = 0)
+        let mut z_c0 = vec![0u8; 48];
+        z_c0[0] = 1;
+        let z_c1 = vec![0u8; 48];
+
+        let mut wgsl_bytes = Vec::with_capacity(288);
+        wgsl_bytes.extend_from_slice(&x_c0);
+        wgsl_bytes.extend_from_slice(&x_c1);
+        wgsl_bytes.extend_from_slice(&y_c0);
+        wgsl_bytes.extend_from_slice(&y_c1);
+        wgsl_bytes.extend_from_slice(&z_c0);
+        wgsl_bytes.extend_from_slice(&z_c1);
+        wgsl_bytes
+    }
+
+    fn deserialize_g2(bytes: &[u8]) -> anyhow::Result<Self::G2Projective> {
+        // Read LE blocks from GPU
+        let mut x_c0 = [0u8; 48];
+        x_c0.copy_from_slice(&bytes[0..48]);
+        x_c0.reverse();
+        let mut x_c1 = [0u8; 48];
+        x_c1.copy_from_slice(&bytes[48..96]);
+        x_c1.reverse();
+        let mut y_c0 = [0u8; 48];
+        y_c0.copy_from_slice(&bytes[96..144]);
+        y_c0.reverse();
+        let mut y_c1 = [0u8; 48];
+        y_c1.copy_from_slice(&bytes[144..192]);
+        y_c1.reverse();
+
+        // Reconstruct BE uncompressed structure
+        let mut uncompressed = [0u8; 192];
+        uncompressed[0..48].copy_from_slice(&x_c1);
+        uncompressed[48..96].copy_from_slice(&x_c0);
+        uncompressed[96..144].copy_from_slice(&y_c1);
+        uncompressed[144..192].copy_from_slice(&y_c0);
+
+        let ct: subtle::CtOption<blstrs::G2Affine> =
+            blstrs::G2Affine::from_uncompressed(&uncompressed);
+        let affine: Option<blstrs::G2Affine> = Option::from(ct);
+        if let Some(affine) = affine {
+            return Ok(affine.into());
+        }
+
+        anyhow::bail!("Failed to deserialize G2 point from GPU")
+    }
+
+    fn g2_identity() -> Self::G2Projective {
+        Self::G2Projective::identity()
     }
 }

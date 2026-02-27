@@ -15,7 +15,8 @@ pub struct GpuContext<C> {
 
     // Pipelines
     pub ntt_pipeline: wgpu::ComputePipeline,
-    pub msm_pipeline: wgpu::ComputePipeline,
+    pub msm_g1_pipeline: wgpu::ComputePipeline,
+    pub msm_g2_pipeline: wgpu::ComputePipeline,
 
     // Bind Group Layouts
     pub ntt_bind_group_layout: wgpu::BindGroupLayout,
@@ -156,11 +157,20 @@ impl<C: GpuCurve> GpuContext<C> {
             immediate_size: 0,
         });
 
-        let msm_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("MSM Compute Pipeline"),
+        let msm_g1_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("MSM G1 Compute Pipeline"),
             layout: Some(&msm_pipeline_layout),
             module: &msm_module,
             entry_point: Some("subsum_accumulation_g1"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let msm_g2_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("MSM G2 Compute Pipeline"),
+            layout: Some(&msm_pipeline_layout),
+            module: &msm_module,
+            entry_point: Some("subsum_accumulation_g2"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -169,7 +179,8 @@ impl<C: GpuCurve> GpuContext<C> {
             device,
             queue,
             ntt_pipeline,
-            msm_pipeline,
+            msm_g1_pipeline,
+            msm_g2_pipeline,
             ntt_bind_group_layout,
             msm_bind_group_layout,
             _marker: PhantomData,
@@ -239,7 +250,7 @@ impl<C: GpuCurve> GpuContext<C> {
         self.queue.submit(Some(encoder.finish()));
     }
 
-    pub fn execute_msm(
+    pub fn execute_msm_g1(
         &self,
         buckets_buf: &wgpu::Buffer,
         indices_buf: &wgpu::Buffer,
@@ -247,7 +258,7 @@ impl<C: GpuCurve> GpuContext<C> {
         result_buf: &wgpu::Buffer,
     ) {
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("MSM Bind Group"),
+            label: Some("MSM G1 Bind Group"),
             layout: &self.msm_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -272,15 +283,64 @@ impl<C: GpuCurve> GpuContext<C> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("MSM Encoder"),
+                label: Some("MSM G1 Encoder"),
             });
 
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("MSM Pass"),
+                label: Some("MSM G1 Pass"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.msm_pipeline);
+            cpass.set_pipeline(&self.msm_g1_pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.dispatch_workgroups(1, 1, 1);
+        }
+
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    pub fn execute_msm_g2(
+        &self,
+        buckets_buf: &wgpu::Buffer,
+        indices_buf: &wgpu::Buffer,
+        count_buf: &wgpu::Buffer,
+        result_buf: &wgpu::Buffer,
+    ) {
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("MSM G2 Bind Group"),
+            layout: &self.msm_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buckets_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: indices_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: count_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: result_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("MSM G2 Encoder"),
+            });
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("MSM G2 Pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.msm_g2_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
             cpass.dispatch_workgroups(1, 1, 1);
         }

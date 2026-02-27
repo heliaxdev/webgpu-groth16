@@ -1,7 +1,5 @@
-// TODO: replace msm_g2_cpu with GPU compute shaders (need to write
-// `async fn gpu_msm_g2`, and new shaders). in another stage, implement
-// a form of efficient batching of GPU operations. loading data in and out
-// of the GPU is slow. we want to batch as many ops as possible,
+// TODO: implement a form of efficient batching of GPU operations.
+// loading data in and out of the GPU is slow. we want to batch as many ops as possible,
 // without using a stupid amount of VRAM (perhaps we need to check
 // how much VRAM the host has). if we're constantly calling `gpu_msm_g1`,
 // `gpu_msm_g2`, and `gpu_fft` with small batches, we pay the cost
@@ -181,7 +179,8 @@ async fn gpu_msm_g1<G: GpuCurve>(
     bases: &[G::G1Affine],
     scalars: &[G::Scalar],
 ) -> Result<G::G1Projective> {
-    let bucket_data: BucketData<G> = compute_bucket_sorting(bases, scalars);
+    let bucket_data: BucketData<G::G1Affine> =
+        compute_bucket_sorting::<G, G::G1Affine>(bases, scalars);
 
     if bucket_data.bucket_count == 0 {
         return Ok(G::g1_identity());
@@ -199,15 +198,50 @@ async fn gpu_msm_g1<G: GpuCurve>(
 
     let count_bytes = (bucket_data.bucket_count as u32).to_le_bytes();
 
-    let buckets_buf = gpu.create_storage_buffer("MSM Buckets", &bucket_bytes);
-    let indices_buf = gpu.create_storage_buffer("MSM Indices", &indices_bytes);
-    let count_buf = gpu.create_storage_buffer("MSM Count", &count_bytes);
-    let result_buf = gpu.create_empty_buffer("MSM Result", 144);
+    let buckets_buf = gpu.create_storage_buffer("MSM G1 Buckets", &bucket_bytes);
+    let indices_buf = gpu.create_storage_buffer("MSM G1 Indices", &indices_bytes);
+    let count_buf = gpu.create_storage_buffer("MSM G1 Count", &count_bytes);
+    let result_buf = gpu.create_empty_buffer("MSM G1 Result", 144);
 
-    gpu.execute_msm(&buckets_buf, &indices_buf, &count_buf, &result_buf);
+    gpu.execute_msm_g1(&buckets_buf, &indices_buf, &count_buf, &result_buf);
 
     let result_bytes = gpu.read_buffer(&result_buf, 144).await?;
     G::deserialize_g1(&result_bytes)
+}
+
+async fn gpu_msm_g2<G: GpuCurve>(
+    gpu: &GpuContext<G>,
+    bases: &[G::G2Affine],
+    scalars: &[G::Scalar],
+) -> Result<G::G2Projective> {
+    let bucket_data: BucketData<G::G2Affine> =
+        compute_bucket_sorting::<G, G::G2Affine>(bases, scalars);
+
+    if bucket_data.bucket_count == 0 {
+        return Ok(G::g2_identity());
+    }
+
+    let mut bucket_bytes = Vec::new();
+    for base in &bucket_data.buckets {
+        bucket_bytes.extend_from_slice(&G::serialize_g2(base));
+    }
+
+    let mut indices_bytes = Vec::new();
+    for idx in &bucket_data.indices {
+        indices_bytes.extend_from_slice(&idx.to_le_bytes());
+    }
+
+    let count_bytes = (bucket_data.bucket_count as u32).to_le_bytes();
+
+    let buckets_buf = gpu.create_storage_buffer("MSM G2 Buckets", &bucket_bytes);
+    let indices_buf = gpu.create_storage_buffer("MSM G2 Indices", &indices_bytes);
+    let count_buf = gpu.create_storage_buffer("MSM G2 Count", &count_bytes);
+    let result_buf = gpu.create_empty_buffer("MSM G2 Result", 288);
+
+    gpu.execute_msm_g2(&buckets_buf, &indices_buf, &count_buf, &result_buf);
+
+    let result_bytes = gpu.read_buffer(&result_buf, 288).await?;
+    G::deserialize_g2(&result_bytes)
 }
 
 fn eval_lc<S: PrimeField>(lc: &[(usize, S)], inputs: &[S], aux: &[S]) -> S {
@@ -340,7 +374,7 @@ where
     let l_msm = gpu_msm_g1(gpu, &pk.l_query, &aux).await?;
     let h_msm = gpu_msm_g1(gpu, &pk.h_query, &h_coeffs).await?;
 
-    let b_g2_msm = G::msm_g2_cpu(&pk.b_query_g2, &full_assignment);
+    let b_g2_msm = gpu_msm_g2(gpu, &pk.b_query_g2, &full_assignment).await?;
 
     let r = G::Scalar::random(&mut *rng);
     let s = G::Scalar::random(&mut *rng);
