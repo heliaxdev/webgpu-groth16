@@ -175,7 +175,7 @@ fn mul_montgomery_u256(a: U256, b: U256) -> U256 {
 
         var k = i + 8u;
         var c = carry;
-        while c > 0u {
+        while c > 0u && k < 16u {
             let s = t[k] + c;
             c = u32(s < t[k]);
             t[k] = s;
@@ -199,7 +199,7 @@ fn mul_montgomery_u256(a: U256, b: U256) -> U256 {
 
         var k = i + 8u;
         var c = carry;
-        while c > 0u {
+        while c > 0u && k < 16u {
             let s = t[k] + c;
             c = u32(s < t[k]);
             t[k] = s;
@@ -250,7 +250,7 @@ fn mul_montgomery_u384(a: U384, b: U384) -> U384 {
 
         var k = i + 12u;
         var c = carry;
-        while c > 0u {
+        while c > 0u && k < 24u {
             let s = t[k] + c;
             c = u32(s < t[k]);
             t[k] = s;
@@ -274,7 +274,7 @@ fn mul_montgomery_u384(a: U384, b: U384) -> U384 {
 
         var k = i + 12u;
         var c = carry;
-        while c > 0u {
+        while c > 0u && k < 24u {
             let s = t[k] + c;
             c = u32(s < t[k]);
             t[k] = s;
