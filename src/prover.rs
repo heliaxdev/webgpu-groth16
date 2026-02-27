@@ -148,7 +148,7 @@ async fn gpu_msm_g1<G: GpuCurve>(
     gpu: &GpuContext<G>,
     bases: &[G::G1Affine],
     scalars: &[G::Scalar],
-) -> Result<G::G1Projective> {
+) -> Result<G::G1> {
     let bd: BucketData = compute_bucket_sorting::<G>(scalars);
     if bd.num_active_buckets == 0 {
         return Ok(G::g1_identity());
@@ -209,7 +209,7 @@ async fn gpu_msm_g2<G: GpuCurve>(
     gpu: &GpuContext<G>,
     bases: &[G::G2Affine],
     scalars: &[G::Scalar],
-) -> Result<G::G2Projective> {
+) -> Result<G::G2> {
     let bd: BucketData = compute_bucket_sorting::<G>(scalars);
     if bd.num_active_buckets == 0 {
         return Ok(G::g2_identity());

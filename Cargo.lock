@@ -1256,6 +1256,7 @@ dependencies = [
  "ff",
  "futures",
  "group",
+ "pairing",
  "rand",
  "rand_core",
  "subtle",

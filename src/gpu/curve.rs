@@ -4,11 +4,13 @@ use ff::{Field, PrimeField, PrimeFieldBits};
 use group::Group;
 
 pub trait GpuCurve: 'static {
-    type Scalar: PrimeField;
-    type G1Affine: Clone + std::fmt::Debug;
-    type G2Affine: Clone + std::fmt::Debug;
-    type G1Projective: Clone;
-    type G2Projective: Clone;
+    type Engine: pairing::Engine;
+
+    type Scalar: PrimeField + PrimeFieldBits;
+    type G1: Group<Scalar = Self::Scalar>;
+    type G2: Group<Scalar = Self::Scalar>;
+    type G1Affine;
+    type G2Affine;
 
     const NTT_SOURCE: &'static str;
     const MSM_SOURCE: &'static str;
@@ -19,8 +21,8 @@ pub trait GpuCurve: 'static {
     fn serialize_g2(point: &Self::G2Affine) -> Vec<u8>;
     fn serialize_scalar(s: &Self::Scalar) -> Vec<u8>;
     fn deserialize_scalar(bytes: &[u8]) -> anyhow::Result<Self::Scalar>;
-    fn deserialize_g1(bytes: &[u8]) -> anyhow::Result<Self::G1Projective>;
-    fn deserialize_g2(bytes: &[u8]) -> anyhow::Result<Self::G2Projective>;
+    fn deserialize_g1(bytes: &[u8]) -> anyhow::Result<Self::G1>;
+    fn deserialize_g2(bytes: &[u8]) -> anyhow::Result<Self::G2>;
 
     // Scalar decomposition for bucket sorting
     fn scalar_to_windows(s: &Self::Scalar, c: usize) -> Vec<u32>;
@@ -32,31 +34,34 @@ pub trait GpuCurve: 'static {
     fn root_of_unity(n: usize) -> Self::Scalar;
 
     // Identity element
-    fn g1_identity() -> Self::G1Projective;
-    fn g2_identity() -> Self::G2Projective;
+    fn g1_identity() -> Self::G1 {
+        Self::G1::identity()
+    }
+    fn g2_identity() -> Self::G2 {
+        Self::G2::identity()
+    }
 
-    fn affine_to_proj_g1(p: &Self::G1Affine) -> Self::G1Projective;
-    fn affine_to_proj_g2(p: &Self::G2Affine) -> Self::G2Projective;
-    fn proj_to_affine_g1(p: &Self::G1Projective) -> Self::G1Affine;
-    fn proj_to_affine_g2(p: &Self::G2Projective) -> Self::G2Affine;
+    fn affine_to_proj_g1(p: &Self::G1Affine) -> Self::G1;
+    fn affine_to_proj_g2(p: &Self::G2Affine) -> Self::G2;
+    fn proj_to_affine_g1(p: &Self::G1) -> Self::G1Affine;
+    fn proj_to_affine_g2(p: &Self::G2) -> Self::G2Affine;
 
-    fn add_g1_proj(a: &Self::G1Projective, b: &Self::G1Projective) -> Self::G1Projective;
-    fn sub_g1_proj(a: &Self::G1Projective, b: &Self::G1Projective) -> Self::G1Projective;
-    fn add_g2_proj(a: &Self::G2Projective, b: &Self::G2Projective) -> Self::G2Projective;
+    fn add_g1_proj(a: &Self::G1, b: &Self::G1) -> Self::G1;
+    fn sub_g1_proj(a: &Self::G1, b: &Self::G1) -> Self::G1;
+    fn add_g2_proj(a: &Self::G2, b: &Self::G2) -> Self::G2;
 
-    fn mul_g1_scalar(a: &Self::G1Affine, b: &Self::Scalar) -> Self::G1Projective;
-    fn mul_g2_scalar(a: &Self::G2Affine, b: &Self::Scalar) -> Self::G2Projective;
-    fn mul_g1_proj_scalar(a: &Self::G1Projective, b: &Self::Scalar) -> Self::G1Projective;
+    fn mul_g1_scalar(a: &Self::G1Affine, b: &Self::Scalar) -> Self::G1;
+    fn mul_g2_scalar(a: &Self::G2Affine, b: &Self::Scalar) -> Self::G2;
+    fn mul_g1_proj_scalar(a: &Self::G1, b: &Self::Scalar) -> Self::G1;
 }
 
-pub enum Bls12 {}
-
-impl GpuCurve for Bls12 {
-    type Scalar = blstrs::Scalar;
-    type G1Affine = blstrs::G1Affine;
-    type G2Affine = blstrs::G2Affine;
-    type G1Projective = blstrs::G1Projective;
-    type G2Projective = blstrs::G2Projective;
+impl GpuCurve for blstrs::Bls12 {
+    type Engine = Self;
+    type Scalar = <Self::Engine as pairing::Engine>::Fr;
+    type G1 = <Self::Engine as pairing::Engine>::G1;
+    type G2 = <Self::Engine as pairing::Engine>::G2;
+    type G1Affine = <Self::Engine as pairing::Engine>::G1Affine;
+    type G2Affine = <Self::Engine as pairing::Engine>::G2Affine;
 
     const NTT_SOURCE: &'static str = concat!(
         include_str!("../shader/bls12_381/fr.wgsl"),
@@ -115,13 +120,11 @@ impl GpuCurve for Bls12 {
     fn deserialize_scalar(bytes: &[u8]) -> anyhow::Result<Self::Scalar> {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(bytes);
-        // FIXME: blstrs::Scalar::from_bytes_le returns CtOption, we convert it to
-        // Option then Result. to prevent sidechannel attacks, we must preserve CtOption
         let scalar: Option<blstrs::Scalar> = blstrs::Scalar::from_bytes_le(&arr).into();
         scalar.ok_or_else(|| anyhow::anyhow!("Invalid scalar bytes from GPU"))
     }
 
-    fn deserialize_g1(bytes: &[u8]) -> anyhow::Result<Self::G1Projective> {
+    fn deserialize_g1(bytes: &[u8]) -> anyhow::Result<Self::G1> {
         let mut x = [0u8; 48];
         let mut y = [0u8; 48];
 
@@ -178,52 +181,48 @@ impl GpuCurve for Bls12 {
     }
 
     fn bucket_width() -> usize {
-        // For BLS12-381 scalar field (255 bits), c=15 is optimal
-        // This gives 2^15 = 32768 buckets
         15
     }
 
-    fn g1_identity() -> Self::G1Projective {
-        Self::G1Projective::identity()
+    fn g1_identity() -> Self::G1 {
+        Self::G1::identity()
     }
 
     fn root_of_unity(n: usize) -> Self::Scalar {
-        // blstrs::Scalar::ROOT_OF_UNITY is the 2^32 root of unity
-        // To get a primitive n-th root where n divides 2^32: ω^((2^32)/n)
         let exponent = 0x100000000u64 >> n.trailing_zeros();
         blstrs::Scalar::ROOT_OF_UNITY.pow_vartime([exponent])
     }
 
-    fn affine_to_proj_g1(p: &Self::G1Affine) -> Self::G1Projective {
+    fn affine_to_proj_g1(p: &Self::G1Affine) -> Self::G1 {
         p.into()
     }
-    fn affine_to_proj_g2(p: &Self::G2Affine) -> Self::G2Projective {
+    fn affine_to_proj_g2(p: &Self::G2Affine) -> Self::G2 {
         p.into()
     }
-    fn proj_to_affine_g1(p: &Self::G1Projective) -> Self::G1Affine {
+    fn proj_to_affine_g1(p: &Self::G1) -> Self::G1Affine {
         p.into()
     }
-    fn proj_to_affine_g2(p: &Self::G2Projective) -> Self::G2Affine {
+    fn proj_to_affine_g2(p: &Self::G2) -> Self::G2Affine {
         p.into()
     }
 
-    fn add_g1_proj(a: &Self::G1Projective, b: &Self::G1Projective) -> Self::G1Projective {
+    fn add_g1_proj(a: &Self::G1, b: &Self::G1) -> Self::G1 {
         a.add(b)
     }
-    fn sub_g1_proj(a: &Self::G1Projective, b: &Self::G1Projective) -> Self::G1Projective {
+    fn sub_g1_proj(a: &Self::G1, b: &Self::G1) -> Self::G1 {
         a.sub(b)
     }
-    fn add_g2_proj(a: &Self::G2Projective, b: &Self::G2Projective) -> Self::G2Projective {
+    fn add_g2_proj(a: &Self::G2, b: &Self::G2) -> Self::G2 {
         a.add(b)
     }
 
-    fn mul_g1_scalar(a: &Self::G1Affine, b: &Self::Scalar) -> Self::G1Projective {
+    fn mul_g1_scalar(a: &Self::G1Affine, b: &Self::Scalar) -> Self::G1 {
         a.mul(b)
     }
-    fn mul_g2_scalar(a: &Self::G2Affine, b: &Self::Scalar) -> Self::G2Projective {
+    fn mul_g2_scalar(a: &Self::G2Affine, b: &Self::Scalar) -> Self::G2 {
         a.mul(b)
     }
-    fn mul_g1_proj_scalar(a: &Self::G1Projective, b: &Self::Scalar) -> Self::G1Projective {
+    fn mul_g1_proj_scalar(a: &Self::G1, b: &Self::Scalar) -> Self::G1 {
         a.mul(b)
     }
 
@@ -260,8 +259,7 @@ impl GpuCurve for Bls12 {
         wgsl_bytes
     }
 
-    fn deserialize_g2(bytes: &[u8]) -> anyhow::Result<Self::G2Projective> {
-        // Read LE blocks from GPU
+    fn deserialize_g2(bytes: &[u8]) -> anyhow::Result<Self::G2> {
         let mut x_c0 = [0u8; 48];
         x_c0.copy_from_slice(&bytes[0..48]);
         x_c0.reverse();
@@ -275,7 +273,6 @@ impl GpuCurve for Bls12 {
         y_c1.copy_from_slice(&bytes[144..192]);
         y_c1.reverse();
 
-        // Reconstruct BE uncompressed structure
         let mut uncompressed = [0u8; 192];
         uncompressed[0..48].copy_from_slice(&x_c1);
         uncompressed[48..96].copy_from_slice(&x_c0);
@@ -292,7 +289,7 @@ impl GpuCurve for Bls12 {
         anyhow::bail!("Failed to deserialize G2 point from GPU")
     }
 
-    fn g2_identity() -> Self::G2Projective {
-        Self::G2Projective::identity()
+    fn g2_identity() -> Self::G2 {
+        Self::G2::identity()
     }
 }
