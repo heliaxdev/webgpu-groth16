@@ -153,5 +153,95 @@ struct PointG2 {
     z: Fq2,
 }
 
-// G2 Addition and Doubling follow the EXACT same Jacobian formulas as G1, 
-// but substituting `add_u384` with `add_fp2`, and `mul_montgomery_u384` with `mul_fp2`.
+// Computes 2 * P in Jacobian coordinates for G2.
+// BLS12-381 G2 curve: y^2 = x^3 + 4(1+i). (a = 0)
+fn double_g2(p: PointG2) -> PointG2 {
+    // XX = X^2
+    let xx = mul_fp2(p.x, p.x);
+    // YY = Y^2
+    let yy = mul_fp2(p.y, p.y);
+    // YYYY = YY^2
+    let yyyy = mul_fp2(yy, yy);
+
+    // S = 2 * ((X + YY)^2 - XX - YYYY)
+    let x_plus_yy = add_fp2(p.x, yy);
+    let x_plus_yy_sq = mul_fp2(x_plus_yy, x_plus_yy);
+    var s = sub_fp2(x_plus_yy_sq, xx);
+    s = sub_fp2(s, yyyy);
+    s = add_fp2(s, s); // * 2
+
+    // M = 3 * XX (since a = 0)
+    let m = add_fp2(add_fp2(xx, xx), xx);
+
+    // T = M^2 - 2*S
+    let m_sq = mul_fp2(m, m);
+    let t = sub_fp2(m_sq, add_fp2(s, s));
+
+    // X_out = T
+    let x_out = t;
+
+    // Y_out = M * (S - T) - 8 * YYYY
+    let s_minus_t = sub_fp2(s, t);
+    let m_times_s_minus_t = mul_fp2(m, s_minus_t);
+    var eight_yyyy = add_fp2(yyyy, yyyy); // 2
+    eight_yyyy = add_fp2(eight_yyyy, eight_yyyy); // 4
+    eight_yyyy = add_fp2(eight_yyyy, eight_yyyy); // 8
+    let y_out = sub_fp2(m_times_s_minus_t, eight_yyyy);
+
+    // Z_out = (Y + Z)^2 - YY - ZZ
+    let zz = mul_fp2(p.z, p.z);
+    let y_plus_z = add_fp2(p.y, p.z);
+    let y_plus_z_sq = mul_fp2(y_plus_z, y_plus_z);
+    var z_out = sub_fp2(y_plus_z_sq, yy);
+    z_out = sub_fp2(z_out, zz);
+
+    return PointG2(x_out, y_out, z_out);
+}
+
+// Computes P1 + P2 in Jacobian coordinates for G2.
+fn add_g2(p1: PointG2, p2: PointG2) -> PointG2 {
+    // Z1Z1 = Z1^2
+    let z1z1 = mul_fp2(p1.z, p1.z);
+    // Z2Z2 = Z2^2
+    let z2z2 = mul_fp2(p2.z, p2.z);
+
+    // U1 = X1 * Z2Z2
+    let u1 = mul_fp2(p1.x, z2z2);
+    // U2 = X2 * Z1Z1
+    let u2 = mul_fp2(p2.x, z1z1);
+
+    // S1 = Y1 * Z2 * Z2Z2
+    let s1 = mul_fp2(mul_fp2(p1.y, p2.z), z2z2);
+    // S2 = Y2 * Z1 * Z1Z1
+    let s2 = mul_fp2(mul_fp2(p2.y, p1.z), z1z1);
+
+    // H = U2 - U1
+    let h = sub_fp2(u2, u1);
+    // R = S2 - S1
+    let r = sub_fp2(s2, s1);
+
+    // HH = H^2
+    let hh = mul_fp2(h, h);
+    // HHH = H * HH
+    let hhh = mul_fp2(h, hh);
+
+    // V = U1 * HH
+    let v = mul_fp2(u1, hh);
+
+    // X3 = R^2 - HHH - 2*V
+    let r_sq = mul_fp2(r, r);
+    var x3 = sub_fp2(r_sq, hhh);
+    x3 = sub_fp2(x3, add_fp2(v, v));
+
+    // Y3 = R * (V - X3) - S1 * HHH
+    let v_minus_x3 = sub_fp2(v, x3);
+    let r_times_v_minus_x3 = mul_fp2(r, v_minus_x3);
+    let s1_hhh = mul_fp2(s1, hhh);
+    let y3 = sub_fp2(r_times_v_minus_x3, s1_hhh);
+
+    // Z3 = Z1 * Z2 * H
+    let z1z2 = mul_fp2(p1.z, p2.z);
+    let z3 = mul_fp2(z1z2, h);
+
+    return PointG2(x3, y3, z3);
+}
