@@ -1,8 +1,8 @@
 use std::ops::{Add, Mul, Sub};
 
 use ff::{Field, PrimeField, PrimeFieldBits};
-use group::prime::PrimeCurveAffine;
 use group::Group;
+use group::prime::PrimeCurveAffine;
 
 pub trait GpuCurve: 'static {
     type Engine: pairing::Engine;

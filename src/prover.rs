@@ -138,9 +138,7 @@ fn lc_to_vec<S: PrimeField>(lc: bellman::LinearCombination<S>) -> Vec<(bellman::
     #[cfg(feature = "bellman-provider-nam-bellperson")]
     let lc_iter = lc.iter();
 
-    lc_iter
-        .map(|(var, coeff)| (var, *coeff))
-        .collect()
+    lc_iter.map(|(var, coeff)| (var, *coeff)).collect()
 }
 
 fn marshal_scalars<G: GpuCurve>(scalars: &[G::Scalar]) -> Vec<u8> {
@@ -340,71 +338,68 @@ async fn gpu_msm_batch<G: GpuCurve>(
         num_windows: u32,
     }
 
-    let enqueue_g1 = |name: &str,
-                      bases: &[G::G1Affine],
-                      scalars: &[G::Scalar]|
-     -> Result<Option<G1Pending>> {
-        let bd: BucketData = compute_bucket_sorting::<G>(scalars);
-        if bd.num_active_buckets == 0 {
-            return Ok(None);
-        }
+    let enqueue_g1 =
+        |name: &str, bases: &[G::G1Affine], scalars: &[G::Scalar]| -> Result<Option<G1Pending>> {
+            let bd: BucketData = compute_bucket_sorting::<G>(scalars);
+            if bd.num_active_buckets == 0 {
+                return Ok(None);
+            }
 
-        let mut bases_bytes = Vec::with_capacity(bases.len() * 144);
-        for base in bases {
-            bases_bytes.extend_from_slice(&G::serialize_g1(base));
-        }
+            let mut bases_bytes = Vec::with_capacity(bases.len() * 144);
+            for base in bases {
+                bases_bytes.extend_from_slice(&G::serialize_g1(base));
+            }
 
-        let bases_buf = gpu.create_storage_buffer(&format!("{name}_bases"), &bases_bytes);
-        let indices_buf = gpu.create_storage_buffer(
-            &format!("{name}_indices"),
-            bytemuck::cast_slice(&bd.base_indices),
-        );
-        let ptrs_buf = gpu.create_storage_buffer(
-            &format!("{name}_ptrs"),
-            bytemuck::cast_slice(&bd.bucket_pointers),
-        );
-        let sizes_buf = gpu.create_storage_buffer(
-            &format!("{name}_sizes"),
-            bytemuck::cast_slice(&bd.bucket_sizes),
-        );
-        let vals_buf = gpu.create_storage_buffer(
-            &format!("{name}_vals"),
-            bytemuck::cast_slice(&bd.bucket_values),
-        );
-        let w_starts_buf = gpu.create_storage_buffer(
-            &format!("{name}_wstarts"),
-            bytemuck::cast_slice(&bd.window_starts),
-        );
-        let w_counts_buf = gpu.create_storage_buffer(
-            &format!("{name}_wcounts"),
-            bytemuck::cast_slice(&bd.window_counts),
-        );
-        let agg_buf = gpu.create_empty_buffer(
-            &format!("{name}_agg"),
-            (bd.num_active_buckets * 144) as u64,
-        );
-        let sums_buf = gpu.create_empty_buffer(&format!("{name}_sums"), (bd.num_windows * 144) as u64);
+            let bases_buf = gpu.create_storage_buffer(&format!("{name}_bases"), &bases_bytes);
+            let indices_buf = gpu.create_storage_buffer(
+                &format!("{name}_indices"),
+                bytemuck::cast_slice(&bd.base_indices),
+            );
+            let ptrs_buf = gpu.create_storage_buffer(
+                &format!("{name}_ptrs"),
+                bytemuck::cast_slice(&bd.bucket_pointers),
+            );
+            let sizes_buf = gpu.create_storage_buffer(
+                &format!("{name}_sizes"),
+                bytemuck::cast_slice(&bd.bucket_sizes),
+            );
+            let vals_buf = gpu.create_storage_buffer(
+                &format!("{name}_vals"),
+                bytemuck::cast_slice(&bd.bucket_values),
+            );
+            let w_starts_buf = gpu.create_storage_buffer(
+                &format!("{name}_wstarts"),
+                bytemuck::cast_slice(&bd.window_starts),
+            );
+            let w_counts_buf = gpu.create_storage_buffer(
+                &format!("{name}_wcounts"),
+                bytemuck::cast_slice(&bd.window_counts),
+            );
+            let agg_buf = gpu
+                .create_empty_buffer(&format!("{name}_agg"), (bd.num_active_buckets * 144) as u64);
+            let sums_buf =
+                gpu.create_empty_buffer(&format!("{name}_sums"), (bd.num_windows * 144) as u64);
 
-        gpu.execute_msm(
-            false,
-            &bases_buf,
-            &indices_buf,
-            &ptrs_buf,
-            &sizes_buf,
-            &agg_buf,
-            &vals_buf,
-            &w_starts_buf,
-            &w_counts_buf,
-            &sums_buf,
-            bd.num_active_buckets,
-            bd.num_windows,
-        );
+            gpu.execute_msm(
+                false,
+                &bases_buf,
+                &indices_buf,
+                &ptrs_buf,
+                &sizes_buf,
+                &agg_buf,
+                &vals_buf,
+                &w_starts_buf,
+                &w_counts_buf,
+                &sums_buf,
+                bd.num_active_buckets,
+                bd.num_windows,
+            );
 
-        Ok(Some(G1Pending {
-            sums_buf,
-            num_windows: bd.num_windows,
-        }))
-    };
+            Ok(Some(G1Pending {
+                sums_buf,
+                num_windows: bd.num_windows,
+            }))
+        };
 
     let enqueue_g2 = |bases: &[G::G2Affine], scalars: &[G::Scalar]| -> Result<Option<G2Pending>> {
         let bd: BucketData = compute_bucket_sorting::<G>(scalars);
@@ -418,12 +413,18 @@ async fn gpu_msm_batch<G: GpuCurve>(
         }
 
         let bases_buf = gpu.create_storage_buffer("b2_bases", &bases_bytes);
-        let indices_buf = gpu.create_storage_buffer("b2_indices", bytemuck::cast_slice(&bd.base_indices));
-        let ptrs_buf = gpu.create_storage_buffer("b2_ptrs", bytemuck::cast_slice(&bd.bucket_pointers));
-        let sizes_buf = gpu.create_storage_buffer("b2_sizes", bytemuck::cast_slice(&bd.bucket_sizes));
-        let vals_buf = gpu.create_storage_buffer("b2_vals", bytemuck::cast_slice(&bd.bucket_values));
-        let w_starts_buf = gpu.create_storage_buffer("b2_wstarts", bytemuck::cast_slice(&bd.window_starts));
-        let w_counts_buf = gpu.create_storage_buffer("b2_wcounts", bytemuck::cast_slice(&bd.window_counts));
+        let indices_buf =
+            gpu.create_storage_buffer("b2_indices", bytemuck::cast_slice(&bd.base_indices));
+        let ptrs_buf =
+            gpu.create_storage_buffer("b2_ptrs", bytemuck::cast_slice(&bd.bucket_pointers));
+        let sizes_buf =
+            gpu.create_storage_buffer("b2_sizes", bytemuck::cast_slice(&bd.bucket_sizes));
+        let vals_buf =
+            gpu.create_storage_buffer("b2_vals", bytemuck::cast_slice(&bd.bucket_values));
+        let w_starts_buf =
+            gpu.create_storage_buffer("b2_wstarts", bytemuck::cast_slice(&bd.window_starts));
+        let w_counts_buf =
+            gpu.create_storage_buffer("b2_wcounts", bytemuck::cast_slice(&bd.window_counts));
         let agg_buf = gpu.create_empty_buffer("b2_agg", (bd.num_active_buckets * 288) as u64);
         let sums_buf = gpu.create_empty_buffer("b2_sums", (bd.num_windows * 288) as u64);
 
@@ -654,12 +655,8 @@ where
             a_assignment.push(*v);
         }
     }
-    let b_assignment = dense_assignment_from_masks(
-        &cs.inputs,
-        &cs.aux,
-        &cs.b_input_density,
-        &cs.b_aux_density,
-    );
+    let b_assignment =
+        dense_assignment_from_masks(&cs.inputs, &cs.aux, &cs.b_input_density, &cs.b_aux_density);
 
     let (a_msm, b_g1_msm, l_msm, h_msm, b_g2_msm) = gpu_msm_batch(
         gpu,
@@ -730,8 +727,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use blstrs::{Bls12, Scalar};
     use crate::bellman::Circuit;
+    use blstrs::{Bls12, Scalar};
     use ff::Field;
     use group::Group;
     use masp_primitives::asset_type::AssetType;
@@ -912,7 +909,9 @@ mod tests {
         let vk = pgk.to_viewing_key();
         let mut payment_address = None;
         for d0 in 0u8..=255 {
-            if let Some(addr) = vk.to_payment_address(Diversifier([d0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])) {
+            if let Some(addr) =
+                vk.to_payment_address(Diversifier([d0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
+            {
                 payment_address = Some(addr);
                 break;
             }
@@ -939,9 +938,8 @@ mod tests {
             commitment_randomness: None,
             esk: None,
         };
-        let params =
-            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup, &mut rng)
-                .expect("failed to generate sapling output parameters");
+        let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup, &mut rng)
+            .expect("failed to generate sapling output parameters");
 
         let circuit = sample_sapling_output_circuit();
         let t0 = Instant::now();
@@ -963,9 +961,8 @@ mod tests {
             commitment_randomness: None,
             esk: None,
         };
-        let params =
-            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup, &mut rng)
-                .expect("failed to generate sapling output parameters");
+        let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup, &mut rng)
+            .expect("failed to generate sapling output parameters");
         let gpu_ctx = GpuContext::<Bls12>::new()
             .await
             .expect("failed to initialize gpu");
@@ -1068,7 +1065,10 @@ mod tests {
         let a_ok = gpu_a == cpu_a;
         let b_ok = gpu_b == cpu_b;
         let c_ok = gpu_c == cpu_c;
-        assert!(a_ok && b_ok && c_ok, "proof components mismatch: a={a_ok} b={b_ok} c={c_ok}");
+        assert!(
+            a_ok && b_ok && c_ok,
+            "proof components mismatch: a={a_ok} b={b_ok} c={c_ok}"
+        );
     }
 
     #[tokio::test]
@@ -1126,7 +1126,10 @@ mod tests {
             cpu_h += b * *s;
         }
 
-        assert_eq!(Bls12::proj_to_affine_g1(&gpu_h), Bls12::proj_to_affine_g1(&cpu_h));
+        assert_eq!(
+            Bls12::proj_to_affine_g1(&gpu_h),
+            Bls12::proj_to_affine_g1(&cpu_h)
+        );
     }
 
     #[tokio::test]
@@ -1190,7 +1193,10 @@ mod tests {
         let a_ok = Bls12::proj_to_affine_g1(&gpu_a) == Bls12::proj_to_affine_g1(&cpu_a);
         let b1_ok = Bls12::proj_to_affine_g1(&gpu_b_g1) == Bls12::proj_to_affine_g1(&cpu_b_g1);
         let b2_ok = Bls12::proj_to_affine_g2(&gpu_b_g2) == Bls12::proj_to_affine_g2(&cpu_b_g2);
-        assert!(a_ok && b1_ok && b2_ok, "ab msm mismatch: a={a_ok} b_g1={b1_ok} b_g2={b2_ok}");
+        assert!(
+            a_ok && b1_ok && b2_ok,
+            "ab msm mismatch: a={a_ok} b_g1={b1_ok} b_g2={b2_ok}"
+        );
     }
 
     #[tokio::test]
@@ -1276,5 +1282,4 @@ mod tests {
             "h component mismatch"
         );
     }
-
 }

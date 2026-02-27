@@ -170,7 +170,7 @@ fn ntt_tile(
     var half_len: u32 = 1u;
     for (var stage: u32 = 0u; stage < log2_elements; stage = stage + 1u) {
         let len = half_len * 2u;
-        
+
         let butterfly_count = n / 2u;
         if local_id.x < butterfly_count {
             // Each thread handles one butterfly operation.
