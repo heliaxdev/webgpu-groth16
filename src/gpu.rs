@@ -25,6 +25,8 @@ pub struct GpuContext<C> {
     pub msm_sum_g1_pipeline: wgpu::ComputePipeline,
     pub msm_agg_g2_pipeline: wgpu::ComputePipeline,
     pub msm_sum_g2_pipeline: wgpu::ComputePipeline,
+    pub msm_reduce_g1_pipeline: wgpu::ComputePipeline,
+    pub msm_reduce_g2_pipeline: wgpu::ComputePipeline,
 
     // Bind Group Layouts
     pub ntt_bind_group_layout: wgpu::BindGroupLayout,
@@ -33,6 +35,7 @@ pub struct GpuContext<C> {
     pub montgomery_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_agg_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_sum_bind_group_layout: wgpu::BindGroupLayout,
+    pub msm_reduce_bind_group_layout: wgpu::BindGroupLayout,
 
     _marker: PhantomData<C>,
 }
@@ -317,6 +320,33 @@ impl<C: GpuCurve> GpuContext<C> {
                 ],
             });
 
+        let msm_reduce_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("MSM Reduce Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
         // 3. Create Compute Pipelines
         let ntt_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("NTT Compute Pipeline"),
@@ -407,6 +437,11 @@ impl<C: GpuCurve> GpuContext<C> {
             bind_group_layouts: &[&msm_sum_bind_group_layout],
             immediate_size: 0,
         });
+        let msm_reduce_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&msm_reduce_bind_group_layout],
+            immediate_size: 0,
+        });
 
         let msm_agg_g1_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -444,6 +479,24 @@ impl<C: GpuCurve> GpuContext<C> {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        let msm_reduce_g1_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("MSM Reduce G1"),
+                layout: Some(&msm_reduce_layout),
+                module: &msm_module,
+                entry_point: Some("reduce_windows_g1"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let msm_reduce_g2_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("MSM Reduce G2"),
+                layout: Some(&msm_reduce_layout),
+                module: &msm_module,
+                entry_point: Some("reduce_windows_g2"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
 
         Ok(Self {
             device,
@@ -457,12 +510,15 @@ impl<C: GpuCurve> GpuContext<C> {
             msm_sum_g1_pipeline,
             msm_agg_g2_pipeline,
             msm_sum_g2_pipeline,
+            msm_reduce_g1_pipeline,
+            msm_reduce_g2_pipeline,
             ntt_bind_group_layout,
             coset_shift_bind_group_layout,
             pointwise_poly_bind_group_layout,
             montgomery_bind_group_layout,
             msm_agg_bind_group_layout,
             msm_sum_bind_group_layout,
+            msm_reduce_bind_group_layout,
             _marker: PhantomData,
         })
     }
@@ -660,6 +716,205 @@ impl<C: GpuCurve> GpuContext<C> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn execute_h_pipeline(
+        &self,
+        a_buf: &wgpu::Buffer,
+        b_buf: &wgpu::Buffer,
+        c_buf: &wgpu::Buffer,
+        h_buf: &wgpu::Buffer,
+        tw_inv_n_buf: &wgpu::Buffer,
+        tw_fwd_n_buf: &wgpu::Buffer,
+        shifts_buf: &wgpu::Buffer,
+        inv_shifts_buf: &wgpu::Buffer,
+        z_invs_buf: &wgpu::Buffer,
+        n: u32,
+    ) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("H Pipeline Encoder"),
+            });
+
+        let mont_bg = |buf: &wgpu::Buffer| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Montgomery BG"),
+                layout: &self.montgomery_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf.as_entire_binding(),
+                }],
+            })
+        };
+
+        let ntt_bg = |data: &wgpu::Buffer, tw: &wgpu::Buffer| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("NTT BG"),
+                layout: &self.ntt_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: data.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: tw.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+
+        let shift_bg = |data: &wgpu::Buffer, shifts: &wgpu::Buffer| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Coset Shift BG"),
+                layout: &self.coset_shift_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: data.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: shifts.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+
+        let pointwise_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Pointwise Poly BG"),
+            layout: &self.pointwise_poly_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: a_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: b_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: c_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: h_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: z_invs_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        // To Montgomery: a, b, c, twiddles (inv/fwd), shifts (fwd/inv), z_inv.
+        for bg in [
+            mont_bg(a_buf),
+            mont_bg(b_buf),
+            mont_bg(c_buf),
+            mont_bg(tw_inv_n_buf),
+            mont_bg(tw_fwd_n_buf),
+            mont_bg(shifts_buf),
+            mont_bg(inv_shifts_buf),
+            mont_bg(z_invs_buf),
+        ] {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("To Montgomery Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.to_montgomery_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(n.div_ceil(256), 1, 1);
+        }
+
+        // iNTT on A/B/C.
+        for bg in [ntt_bg(a_buf, tw_inv_n_buf), ntt_bg(b_buf, tw_inv_n_buf), ntt_bg(c_buf, tw_inv_n_buf)] {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("iNTT ABC Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.ntt_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(n.div_ceil(512), 1, 1);
+        }
+
+        // Coset shift A/B/C.
+        for bg in [
+            shift_bg(a_buf, shifts_buf),
+            shift_bg(b_buf, shifts_buf),
+            shift_bg(c_buf, shifts_buf),
+        ] {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Coset Shift ABC Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.coset_shift_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(n.div_ceil(256), 1, 1);
+        }
+
+        // NTT on A/B/C.
+        for bg in [ntt_bg(a_buf, tw_fwd_n_buf), ntt_bg(b_buf, tw_fwd_n_buf), ntt_bg(c_buf, tw_fwd_n_buf)] {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("NTT ABC Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.ntt_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(n.div_ceil(512), 1, 1);
+        }
+
+        // Pointwise H = (A*B-C)/Z.
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Pointwise Poly Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pointwise_poly_pipeline);
+            pass.set_bind_group(0, &pointwise_bg, &[]);
+            pass.dispatch_workgroups(n.div_ceil(256), 1, 1);
+        }
+
+        // iNTT(H).
+        {
+            let bg = ntt_bg(h_buf, tw_inv_n_buf);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("iNTT H Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.ntt_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(n.div_ceil(512), 1, 1);
+        }
+
+        // Inverse coset shift on H.
+        {
+            let bg = shift_bg(h_buf, inv_shifts_buf);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Inv Coset Shift H Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.coset_shift_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(n.div_ceil(256), 1, 1);
+        }
+
+        // From Montgomery on H.
+        {
+            let bg = mont_bg(h_buf);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("From Montgomery H Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.from_montgomery_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(n.div_ceil(256), 1, 1);
+        }
+
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_msm(
         &self,
         is_g2: bool,
@@ -761,6 +1016,143 @@ impl<C: GpuCurve> GpuContext<C> {
             });
             cpass.set_bind_group(0, &sum_bind_group, &[]);
             cpass.dispatch_workgroups(num_windows, 1, 1);
+        }
+
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_msm_with_final_reduction(
+        &self,
+        is_g2: bool,
+        bases_buf: &wgpu::Buffer,
+        base_indices_buf: &wgpu::Buffer,
+        bucket_pointers_buf: &wgpu::Buffer,
+        bucket_sizes_buf: &wgpu::Buffer,
+        aggregated_buckets_buf: &wgpu::Buffer,
+        bucket_values_buf: &wgpu::Buffer,
+        window_starts_buf: &wgpu::Buffer,
+        window_counts_buf: &wgpu::Buffer,
+        window_sums_buf: &wgpu::Buffer,
+        final_result_buf: &wgpu::Buffer,
+        num_active_buckets: u32,
+        num_windows: u32,
+    ) {
+        let agg_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("MSM Agg Bind Group"),
+            layout: &self.msm_agg_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: bases_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: base_indices_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: bucket_pointers_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: bucket_sizes_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: aggregated_buckets_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let sum_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("MSM Sum Bind Group"),
+            layout: &self.msm_sum_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: aggregated_buckets_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bucket_values_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: window_starts_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: window_counts_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: window_sums_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let reduce_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("MSM Reduce Bind Group"),
+            layout: &self.msm_reduce_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: window_sums_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: final_result_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("MSM+Reduce Encoder"),
+            });
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("MSM Pass 1"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(if is_g2 {
+                &self.msm_agg_g2_pipeline
+            } else {
+                &self.msm_agg_g1_pipeline
+            });
+            cpass.set_bind_group(0, &agg_bind_group, &[]);
+            cpass.dispatch_workgroups(num_active_buckets.div_ceil(64).max(1), 1, 1);
+        }
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("MSM Pass 2"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(if is_g2 {
+                &self.msm_sum_g2_pipeline
+            } else {
+                &self.msm_sum_g1_pipeline
+            });
+            cpass.set_bind_group(0, &sum_bind_group, &[]);
+            cpass.dispatch_workgroups(num_windows, 1, 1);
+        }
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("MSM Final Reduce Pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(if is_g2 {
+                &self.msm_reduce_g2_pipeline
+            } else {
+                &self.msm_reduce_g1_pipeline
+            });
+            cpass.set_bind_group(0, &reduce_bind_group, &[]);
+            cpass.dispatch_workgroups(1, 1, 1);
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -1023,20 +1415,6 @@ mod tests {
             .read_buffer(&out_buf, in_bytes.len() as u64)
             .await
             .expect("failed to read rt coords g1 bytes");
-
-        if in_bytes != out_bytes {
-            let mut mismatches = 0usize;
-            for i in 0..in_bytes.len() {
-                if in_bytes[i] != out_bytes[i] {
-                    mismatches += 1;
-                }
-            }
-            println!("coord rt mismatches: {}", mismatches);
-            println!("in[0..16]={:02x?}", &in_bytes[0..16]);
-            println!("out[0..16]={:02x?}", &out_bytes[0..16]);
-            println!("in[48..64]={:02x?}", &in_bytes[48..64]);
-            println!("out[48..64]={:02x?}", &out_bytes[48..64]);
-        }
 
         let parsed = <Bls12 as GpuCurve>::deserialize_g1(&out_bytes)
             .expect("deserializing coord round-tripped g1 bytes failed");

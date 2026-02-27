@@ -198,8 +198,9 @@ async fn gpu_msm_g1<G: GpuCurve>(
 
     let agg_buf = gpu.create_empty_buffer("Agg", (bd.num_active_buckets * 144) as u64);
     let sums_buf = gpu.create_empty_buffer("Sums", (bd.num_windows * 144) as u64);
+    let final_buf = gpu.create_empty_buffer("FinalG1", 144);
 
-    gpu.execute_msm(
+    gpu.execute_msm_with_final_reduction(
         false,
         &bases_buf,
         &indices_buf,
@@ -210,26 +211,13 @@ async fn gpu_msm_g1<G: GpuCurve>(
         &w_starts_buf,
         &w_counts_buf,
         &sums_buf,
+        &final_buf,
         bd.num_active_buckets,
         bd.num_windows,
     );
 
-    let result_bytes = gpu
-        .read_buffer(&sums_buf, (bd.num_windows * 144) as u64)
-        .await?;
-    let mut result = G::g1_identity();
-
-    // CPU Combination logic (standard Pippenger loop over window returns)
-    for (i, chunk) in result_bytes.chunks_exact(144).enumerate().rev() {
-        if i != (bd.num_windows - 1) as usize {
-            for _ in 0..G::bucket_width() {
-                result = G::add_g1_proj(&result, &result);
-            }
-        }
-        let w_sum = G::deserialize_g1(chunk)?;
-        result = G::add_g1_proj(&result, &w_sum);
-    }
-    Ok(result)
+    let result_bytes = gpu.read_buffer(&final_buf, 144).await?;
+    G::deserialize_g1(&result_bytes)
 }
 
 async fn gpu_msm_g2<G: GpuCurve>(
@@ -259,8 +247,9 @@ async fn gpu_msm_g2<G: GpuCurve>(
 
     let agg_buf = gpu.create_empty_buffer("AggG2", (bd.num_active_buckets * 288) as u64);
     let sums_buf = gpu.create_empty_buffer("SumsG2", (bd.num_windows * 288) as u64);
+    let final_buf = gpu.create_empty_buffer("FinalG2", 288);
 
-    gpu.execute_msm(
+    gpu.execute_msm_with_final_reduction(
         true,
         &bases_buf,
         &indices_buf,
@@ -271,25 +260,13 @@ async fn gpu_msm_g2<G: GpuCurve>(
         &w_starts_buf,
         &w_counts_buf,
         &sums_buf,
+        &final_buf,
         bd.num_active_buckets,
         bd.num_windows,
     );
 
-    let result_bytes = gpu
-        .read_buffer(&sums_buf, (bd.num_windows * 288) as u64)
-        .await?;
-    let mut result = G::g2_identity();
-
-    for (i, chunk) in result_bytes.chunks_exact(288).enumerate().rev() {
-        if i != (bd.num_windows - 1) as usize {
-            for _ in 0..G::bucket_width() {
-                result = G::add_g2_proj(&result, &result);
-            }
-        }
-        let w_sum = G::deserialize_g2(chunk)?;
-        result = G::add_g2_proj(&result, &w_sum);
-    }
-    Ok(result)
+    let result_bytes = gpu.read_buffer(&final_buf, 288).await?;
+    G::deserialize_g2(&result_bytes)
 }
 
 fn eval_lc<S: PrimeField>(lc: &[(bellman::Variable, S)], inputs: &[S], aux: &[S]) -> S {
@@ -363,50 +340,19 @@ async fn compute_h_poly<G: GpuCurve>(
     let inv_shifts_buf = gpu.create_storage_buffer("InvShifts", &marshal_scalars::<G>(&inv_shifts));
     let z_invs_buf = gpu.create_storage_buffer("ZInvs", &marshal_scalars::<G>(&z_invs));
 
-    // Convert raw bits into Montgomery domain for WGSL math
-    gpu.execute_to_montgomery(&a_buf, n as u32);
-    gpu.execute_to_montgomery(&b_buf, n as u32);
-    gpu.execute_to_montgomery(&c_buf, n as u32);
-    gpu.execute_to_montgomery(&tw_inv_n_buf, n as u32);
-    gpu.execute_to_montgomery(&tw_fwd_n_buf, n as u32);
-    gpu.execute_to_montgomery(&shifts_buf, n as u32);
-    gpu.execute_to_montgomery(&inv_shifts_buf, n as u32);
-    gpu.execute_to_montgomery(&z_invs_buf, 1);
-
-    // 4. DISPATCH 100% VRAM-BOUND GPU COMPUTE CHAIN
-    // Step A: iNTT(N) to get coefficients
-    gpu.execute_ntt(&a_buf, &tw_inv_n_buf, n as u32);
-    gpu.execute_ntt(&b_buf, &tw_inv_n_buf, n as u32);
-    gpu.execute_ntt(&c_buf, &tw_inv_n_buf, n as u32);
-
-    // Step B: Shift evaluations by Coset Generator
-    gpu.execute_coset_shift(&a_buf, &shifts_buf, n as u32);
-    gpu.execute_coset_shift(&b_buf, &shifts_buf, n as u32);
-    gpu.execute_coset_shift(&c_buf, &shifts_buf, n as u32);
-
-    // Step C: NTT(N) to get shifted evaluations over coset
-    gpu.execute_ntt(&a_buf, &tw_fwd_n_buf, n as u32);
-    gpu.execute_ntt(&b_buf, &tw_fwd_n_buf, n as u32);
-    gpu.execute_ntt(&c_buf, &tw_fwd_n_buf, n as u32);
-
-    // Step D: Evaluate H(X) pointwise
-    gpu.execute_pointwise_poly(
+    // 4. DISPATCH FULL H PIPELINE ON GPU USING A SINGLE COMMAND BUFFER
+    gpu.execute_h_pipeline(
         &a_buf,
         &b_buf,
         &c_buf,
         &h_buf,
+        &tw_inv_n_buf,
+        &tw_fwd_n_buf,
+        &shifts_buf,
+        &inv_shifts_buf,
         &z_invs_buf,
         n as u32,
     );
-
-    // Step E: iNTT(N) to get back H(X) coefficients
-    gpu.execute_ntt(&h_buf, &tw_inv_n_buf, n as u32);
-
-    // Step F: Reverse the Coset Shift on the resulting N coefficients
-    gpu.execute_coset_shift(&h_buf, &inv_shifts_buf, n as u32);
-
-    // Convert final coefficients back to standard form before reading
-    gpu.execute_from_montgomery(&h_buf, n as u32);
 
     // 5. FINALLY PULL THE RESULT OFF THE GPU
     let h_bytes = gpu
@@ -655,6 +601,32 @@ mod tests {
             !is_valid_wrong,
             "The verifier should reject a proof with tampered public inputs"
         );
+    }
+
+    #[test]
+    fn test_cpu_groth16_prover_baseline() {
+        let mut rng = OsRng;
+
+        let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
+        let params =
+            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+                .expect("failed to generate trusted setup parameters");
+
+        let x_value = Scalar::from(3u64);
+        let y_value = Scalar::from(27u64);
+        let circuit = DummyCircuit {
+            x: Some(x_value),
+            y: Some(y_value),
+        };
+
+        let proof = bellman::groth16::create_random_proof(circuit, &params, &mut rng)
+            .expect("failed to create cpu proof");
+
+        let pvk = bellman::groth16::prepare_verifying_key(&params.vk);
+        let public_inputs = vec![y_value];
+        let is_valid = bellman::groth16::verify_proof(&pvk, &proof, &public_inputs)
+            .expect("verification failed");
+        assert!(is_valid, "cpu proof should verify");
     }
 
     #[tokio::test]
