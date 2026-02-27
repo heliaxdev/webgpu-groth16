@@ -11,30 +11,6 @@ use crate::bellman;
 use crate::bucket::{BucketData, compute_bucket_sorting};
 use crate::gpu::{GpuContext, curve::GpuCurve};
 
-// TODO: replace with [`bellman::groth16::Proof`]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Proof<G: GpuCurve> {
-    pub a: G::G1Affine,
-    pub b: G::G2Affine,
-    pub c: G::G1Affine,
-}
-
-// TODO: in `create_proof`, replace this type with a generic
-// type that implements the trait [`bellman::groth16::ParameterSource`]
-pub struct ProvingKey<G: GpuCurve> {
-    pub alpha_g1: G::G1Affine,
-    pub beta_g1: G::G1Affine,
-    pub beta_g2: G::G2Affine,
-    pub delta_g1: G::G1Affine,
-    pub delta_g2: G::G2Affine,
-
-    pub a_query: Vec<G::G1Affine>,
-    pub b_query_g1: Vec<G::G1Affine>,
-    pub b_query_g2: Vec<G::G2Affine>,
-    pub h_query: Vec<G::G1Affine>,
-    pub l_query: Vec<G::G1Affine>,
-}
-
 struct GpuConstraintSystem<G: GpuCurve> {
     inputs: Vec<G::Scalar>,
     aux: Vec<G::Scalar>,
@@ -406,15 +382,23 @@ async fn compute_h_poly<G: GpuCurve>(
     Ok(h_poly)
 }
 
-pub async fn create_proof<C, G, R>(
+pub async fn create_proof<E, G, C, R>(
     circuit: C,
-    pk: &ProvingKey<G>,
+    pk: &bellman::groth16::Parameters<E>,
     gpu: &GpuContext<G>,
     rng: &mut R,
-) -> Result<Proof<G>>
+) -> Result<bellman::groth16::Proof<E>>
 where
+    E: pairing::MultiMillerLoop,
     C: bellman::Circuit<G::Scalar>,
-    G: GpuCurve + Send,
+    G: GpuCurve<
+            Engine = E,
+            Scalar = E::Fr,
+            G1 = E::G1,
+            G2 = E::G2,
+            G1Affine = E::G1Affine,
+            G2Affine = E::G2Affine,
+        > + Send,
     R: RngCore,
 {
     let mut cs = GpuConstraintSystem::<G>::new();
@@ -440,27 +424,27 @@ where
     let mut full_assignment = cs.inputs.clone();
     full_assignment.extend(cs.aux.clone());
 
-    let a_msm = gpu_msm_g1(gpu, &pk.a_query, &full_assignment).await?;
-    let b_g1_msm = gpu_msm_g1(gpu, &pk.b_query_g1, &full_assignment).await?;
-    let l_msm = gpu_msm_g1(gpu, &pk.l_query, &cs.aux).await?;
+    let a_msm = gpu_msm_g1(gpu, &pk.a, &full_assignment).await?;
+    let b_g1_msm = gpu_msm_g1(gpu, &pk.b_g1, &full_assignment).await?;
+    let l_msm = gpu_msm_g1(gpu, &pk.vk.ic, &cs.aux).await?;
 
     // Groth16 naturally drops the highest degree component, meaning pk.h_query.len() = n - 1.
-    let h_msm = gpu_msm_g1(gpu, &pk.h_query, &h_coeffs[..pk.h_query.len()]).await?;
+    let h_msm = gpu_msm_g1(gpu, &pk.h, &h_coeffs[..pk.h.len()]).await?;
 
-    let b_g2_msm = gpu_msm_g2(gpu, &pk.b_query_g2, &full_assignment).await?;
+    let b_g2_msm = gpu_msm_g2(gpu, &pk.b_g2, &full_assignment).await?;
 
     let r = G::Scalar::random(&mut *rng);
     let s = G::Scalar::random(&mut *rng);
 
-    let mut proof_a = G::add_g1_proj(&G::affine_to_proj_g1(&pk.alpha_g1), &a_msm);
-    proof_a = G::add_g1_proj(&proof_a, &G::mul_g1_scalar(&pk.delta_g1, &r));
+    let mut proof_a = G::add_g1_proj(&G::affine_to_proj_g1(&pk.vk.alpha_g1), &a_msm);
+    proof_a = G::add_g1_proj(&proof_a, &G::mul_g1_scalar(&pk.vk.delta_g1, &r));
 
-    let mut proof_b = G::add_g2_proj(&G::affine_to_proj_g2(&pk.beta_g2), &b_g2_msm);
-    proof_b = G::add_g2_proj(&proof_b, &G::mul_g2_scalar(&pk.delta_g2, &s));
+    let mut proof_b = G::add_g2_proj(&G::affine_to_proj_g2(&pk.vk.beta_g2), &b_g2_msm);
+    proof_b = G::add_g2_proj(&proof_b, &G::mul_g2_scalar(&pk.vk.delta_g2, &s));
 
     let mut proof_c = G::add_g1_proj(&l_msm, &h_msm);
-    let mut b_g1 = G::add_g1_proj(&G::affine_to_proj_g1(&pk.beta_g1), &b_g1_msm);
-    b_g1 = G::add_g1_proj(&b_g1, &G::mul_g1_scalar(&pk.delta_g1, &s));
+    let mut b_g1 = G::add_g1_proj(&G::affine_to_proj_g1(&pk.vk.beta_g1), &b_g1_msm);
+    b_g1 = G::add_g1_proj(&b_g1, &G::mul_g1_scalar(&pk.vk.delta_g1, &s));
 
     let c_shift_a = G::mul_g1_proj_scalar(&proof_a, &s);
     proof_c = G::add_g1_proj(&proof_c, &c_shift_a);
@@ -470,10 +454,10 @@ where
 
     let mut rs = r;
     rs *= s;
-    let rs_delta = G::mul_g1_scalar(&pk.delta_g1, &rs);
+    let rs_delta = G::mul_g1_scalar(&pk.vk.delta_g1, &rs);
     proof_c = G::sub_g1_proj(&proof_c, &rs_delta);
 
-    Ok(Proof {
+    Ok(bellman::groth16::Proof {
         a: G::proj_to_affine_g1(&proof_a),
         b: G::proj_to_affine_g2(&proof_b),
         c: G::proj_to_affine_g1(&proof_c),
