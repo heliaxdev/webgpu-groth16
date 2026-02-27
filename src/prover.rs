@@ -1,3 +1,10 @@
+// TODO: implement a form of efficient batching of GPU operations.
+// loading data in and out of the GPU is slow. we want to batch as many ops as possible,
+// without using a stupid amount of VRAM (perhaps we need to check
+// how much VRAM the host has). if we're constantly calling `gpu_msm_g1`,
+// `gpu_msm_g2`, and `gpu_fft` with small batches, we pay the cost
+// of GPU data transfer, and won't gain much in terms of proving speed.
+
 use anyhow::Result;
 use ff::{Field, PrimeField};
 use rand_core::RngCore;
@@ -206,7 +213,6 @@ async fn gpu_msm_g1<G: GpuCurve>(
         .await?;
     let mut result = G::g1_identity();
 
-    // CPU Combination logic (standard Pippenger loop over window returns)
     for (i, chunk) in result_bytes.chunks_exact(144).enumerate().rev() {
         if i != (bd.num_windows - 1) as usize {
             for _ in 0..G::bucket_width() {
@@ -301,63 +307,96 @@ async fn compute_h_poly<G: GpuCurve>(
     c_values: &[G::Scalar],
 ) -> Result<Vec<G::Scalar>> {
     let n = a_values.len().next_power_of_two();
-    let omega = G::root_of_unity(n);
-    let omega_inv = omega.invert().unwrap();
 
-    let mut fwd_twiddles = vec![G::Scalar::ONE; n];
-    let mut inv_twiddles = vec![G::Scalar::ONE; n];
+    let domain_size = n * 2;
+
+    // Step 1: Interpolate A, B, C back to standard coefficients using iNTT(N)
+    let omega_n = G::root_of_unity(n);
+    let omega_n_inv = omega_n.invert().unwrap();
+
+    let mut inv_twiddles_n = vec![G::Scalar::ONE; n];
     for i in 1..n {
-        fwd_twiddles[i] = fwd_twiddles[i - 1] * omega;
-        inv_twiddles[i] = inv_twiddles[i - 1] * omega_inv;
+        inv_twiddles_n[i] = inv_twiddles_n[i - 1] * omega_n_inv;
     }
 
-    let mut a_evals = a_values.to_vec();
-    a_evals.resize(n, G::Scalar::ZERO);
-    let mut b_evals = b_values.to_vec();
-    b_evals.resize(n, G::Scalar::ZERO);
-    let mut c_evals = c_values.to_vec();
-    c_evals.resize(n, G::Scalar::ZERO);
+    let mut a_coeffs = a_values.to_vec();
+    a_coeffs.resize(n, G::Scalar::ZERO);
+    let mut b_coeffs = b_values.to_vec();
+    b_coeffs.resize(n, G::Scalar::ZERO);
+    let mut c_coeffs = c_values.to_vec();
+    c_coeffs.resize(n, G::Scalar::ZERO);
 
-    gpu_fft(gpu, &mut a_evals, &inv_twiddles).await?;
-    gpu_fft(gpu, &mut b_evals, &inv_twiddles).await?;
-    gpu_fft(gpu, &mut c_evals, &inv_twiddles).await?;
+    gpu_fft(gpu, &mut a_coeffs, &inv_twiddles_n).await?;
+    gpu_fft(gpu, &mut b_coeffs, &inv_twiddles_n).await?;
+    gpu_fft(gpu, &mut c_coeffs, &inv_twiddles_n).await?;
 
+    // Step 2: Apply coset shift to evaluate Z_H safely without Division-by-Zero panic
     let n_inv = G::Scalar::from(n as u64).invert().unwrap();
 
-    let coset_shift = G::Scalar::MULTIPLICATIVE_GENERATOR;
+    let coset_generator = G::Scalar::MULTIPLICATIVE_GENERATOR;
     let mut shift = G::Scalar::ONE;
 
     for i in 0..n {
-        a_evals[i] *= n_inv * shift;
-        b_evals[i] *= n_inv * shift;
-        c_evals[i] *= n_inv * shift;
-        shift *= coset_shift;
+        let mult = n_inv * shift;
+        a_coeffs[i] *= mult;
+        b_coeffs[i] *= mult;
+        c_coeffs[i] *= mult;
+        shift *= coset_generator;
     }
 
-    gpu_fft(gpu, &mut a_evals, &fwd_twiddles).await?;
-    gpu_fft(gpu, &mut b_evals, &fwd_twiddles).await?;
-    gpu_fft(gpu, &mut c_evals, &fwd_twiddles).await?;
+    // Step 3: Pad the shifted coefficients to evaluate on the 2N domain
+    a_coeffs.resize(domain_size, G::Scalar::ZERO);
+    b_coeffs.resize(domain_size, G::Scalar::ZERO);
+    c_coeffs.resize(domain_size, G::Scalar::ZERO);
 
-    let mut h_evals = vec![G::Scalar::ZERO; n];
-    let z_inv = (coset_shift.pow([n as u64]) - G::Scalar::ONE)
-        .invert()
-        .unwrap();
-
-    for i in 0..n {
-        h_evals[i] = ((a_evals[i] * b_evals[i]) - c_evals[i]) * z_inv;
+    let omega_2n = G::root_of_unity(domain_size);
+    let mut fwd_twiddles_2n = vec![G::Scalar::ONE; domain_size];
+    for i in 1..domain_size {
+        fwd_twiddles_2n[i] = fwd_twiddles_2n[i - 1] * omega_2n;
     }
 
-    gpu_fft(gpu, &mut h_evals, &inv_twiddles).await?;
+    gpu_fft(gpu, &mut a_coeffs, &fwd_twiddles_2n).await?;
+    gpu_fft(gpu, &mut b_coeffs, &fwd_twiddles_2n).await?;
+    gpu_fft(gpu, &mut c_coeffs, &fwd_twiddles_2n).await?;
 
-    let shift_inv = coset_shift.invert().unwrap();
+    // Step 4: Pointwise Polynomial Equation H(X) = (A(X) * B(X) - C(X)) / Z_H(X)
+    let mut h_evals = vec![G::Scalar::ZERO; domain_size];
+    let g_to_n = coset_generator.pow([n as u64]);
+
+    // Mathematical Optimization: Precompute the vanishing evaluations
+    // Z_H(X) = X^N - 1, substituting shifted roots -> Z_H = g^N * (-1)^i - 1
+    let z_even = g_to_n - G::Scalar::ONE;
+    let z_odd = -g_to_n - G::Scalar::ONE;
+
+    let z_even_inv = z_even.invert().unwrap();
+    let z_odd_inv = z_odd.invert().unwrap();
+
+    for i in 0..domain_size {
+        let z_inv = if i % 2 == 0 { z_even_inv } else { z_odd_inv };
+        h_evals[i] = ((a_coeffs[i] * b_coeffs[i]) - c_coeffs[i]) * z_inv;
+    }
+
+    // Step 5: Convert the H(X) evaluations back to standard coefficients using iNTT(2N)
+    let omega_2n_inv = omega_2n.invert().unwrap();
+    let mut inv_twiddles_2n = vec![G::Scalar::ONE; domain_size];
+    for i in 1..domain_size {
+        inv_twiddles_2n[i] = inv_twiddles_2n[i - 1] * omega_2n_inv;
+    }
+
+    gpu_fft(gpu, &mut h_evals, &inv_twiddles_2n).await?;
+
+    // Step 6: Remove the coset shift to get standard H coefficients (We only need the first N)
+    let domain_size_inv = G::Scalar::from(domain_size as u64).invert().unwrap();
+    let shift_inv = coset_generator.invert().unwrap();
     let mut current_shift = G::Scalar::ONE;
 
-    for h_eval in h_evals.iter_mut().take(n) {
-        *h_eval *= n_inv * current_shift;
+    let mut h_poly = vec![G::Scalar::ZERO; n];
+    for i in 0..n {
+        h_poly[i] = h_evals[i] * domain_size_inv * current_shift;
         current_shift *= shift_inv;
     }
 
-    Ok(h_evals)
+    Ok(h_poly)
 }
 
 pub async fn create_proof<C, G, R>(
@@ -397,7 +436,8 @@ where
     let a_msm = gpu_msm_g1(gpu, &pk.a_query, &full_assignment).await?;
     let b_g1_msm = gpu_msm_g1(gpu, &pk.b_query_g1, &full_assignment).await?;
     let l_msm = gpu_msm_g1(gpu, &pk.l_query, &cs.aux).await?;
-    let h_msm = gpu_msm_g1(gpu, &pk.h_query, &h_coeffs).await?;
+
+    let h_msm = gpu_msm_g1(gpu, &pk.h_query, &h_coeffs[..pk.h_query.len()]).await?;
 
     let b_g2_msm = gpu_msm_g2(gpu, &pk.b_query_g2, &full_assignment).await?;
 
