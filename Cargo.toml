@@ -27,4 +27,5 @@ wasm-bindgen = "0.2.113"
 wgpu = "28.0.0"
 
 [dev-dependencies]
-rand = "0.8"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }

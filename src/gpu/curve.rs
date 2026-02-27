@@ -72,6 +72,8 @@ impl GpuCurve for blstrs::Bls12 {
     );
 
     const MSM_SOURCE: &'static str = concat!(
+        include_str!("../shader/bls12_381/fr.wgsl"),
+        "\n",
         include_str!("../shader/bls12_381/fp.wgsl"),
         "\n",
         include_str!("../shader/bls12_381/curve.wgsl"),
@@ -81,6 +83,8 @@ impl GpuCurve for blstrs::Bls12 {
 
     const POLY_OPS_SOURCE: &'static str = concat!(
         include_str!("../shader/bls12_381/fr.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/fp.wgsl"),
         "\n",
         include_str!("../shader/bls12_381/poly_ops.wgsl"),
     );

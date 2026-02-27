@@ -463,3 +463,118 @@ where
         c: G::proj_to_affine_g1(&proof_c),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use blstrs::{Bls12, Scalar};
+    use rand_core::OsRng;
+
+    use super::*;
+
+    /// A simple dummy circuit that proves knowledge of a secret `x`
+    /// such that `x^3 = y` (where `y` is public).
+    struct DummyCircuit<Scalar: PrimeField> {
+        pub x: Option<Scalar>,
+        pub y: Option<Scalar>,
+    }
+
+    impl<Scalar: PrimeField> bellman::Circuit<Scalar> for DummyCircuit<Scalar> {
+        fn synthesize<CS: bellman::ConstraintSystem<Scalar>>(
+            self,
+            cs: &mut CS,
+        ) -> Result<(), bellman::SynthesisError> {
+            // Allocate public input `y`
+            let y_val = self.y;
+            let y = cs.alloc_input(
+                || "y",
+                || y_val.ok_or(bellman::SynthesisError::AssignmentMissing),
+            )?;
+
+            // Allocate private input (witness) `x`
+            let x_val = self.x;
+            let x = cs.alloc(
+                || "x",
+                || x_val.ok_or(bellman::SynthesisError::AssignmentMissing),
+            )?;
+
+            // Intermediate constraint 1: x_sq = x * x
+            let x_sq_val = x_val.map(|v| v.square());
+            let x_sq = cs.alloc(
+                || "x_sq",
+                || x_sq_val.ok_or(bellman::SynthesisError::AssignmentMissing),
+            )?;
+            cs.enforce(|| "x * x = x_sq", |lc| lc + x, |lc| lc + x, |lc| lc + x_sq);
+
+            // Intermediate constraint 2: y = x_sq * x  (which means y = x^3)
+            cs.enforce(|| "x_sq * x = y", |lc| lc + x_sq, |lc| lc + x, |lc| lc + y);
+
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gpu_groth16_prover() {
+        let mut rng = OsRng;
+
+        // --------------------------------------------------------------------
+        // 1. Trusted Setup
+        // --------------------------------------------------------------------
+        let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
+
+        // Use Bls12 as the Engine (E)
+        let params =
+            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+                .expect("Failed to generate trusted setup parameters");
+
+        // --------------------------------------------------------------------
+        // 2. Initialize GPU Context
+        // --------------------------------------------------------------------
+        // Use Bls12 as the GpuCurve (G)
+        let gpu_ctx = GpuContext::<Bls12>::new()
+            .await
+            .expect("Failed to initialize WebGPU context");
+
+        // --------------------------------------------------------------------
+        // 3. Generate GPU-Accelerated Proof
+        // --------------------------------------------------------------------
+        // Let's prove we know `x = 3` such that `x^3 = 27`.
+        let x_value = Scalar::from(3u64);
+        let y_value = Scalar::from(27u64);
+
+        let circuit = DummyCircuit {
+            x: Some(x_value),
+            y: Some(y_value),
+        };
+
+        // Pass Bls12 for both the E and G generic parameters
+        let proof = create_proof::<Bls12, Bls12, _, _>(circuit, &params, &gpu_ctx, &mut rng)
+            .await
+            .expect("Failed to generate Groth16 proof on GPU");
+
+        // --------------------------------------------------------------------
+        // 4. Verify Proof (CPU)
+        // --------------------------------------------------------------------
+        let pvk = bellman::groth16::prepare_verifying_key(&params.vk);
+
+        // Our only public input is `y = 27`
+        let public_inputs = vec![y_value];
+
+        let is_valid = bellman::groth16::verify_proof(&pvk, &proof, &public_inputs)
+            .expect("Failed during proof verification step");
+
+        assert!(is_valid, "The generated Groth16 proof is invalid!");
+
+        // --------------------------------------------------------------------
+        // 5. Sanity Check: Invalid Proof Rejection
+        // --------------------------------------------------------------------
+        // Ensure that passing the wrong public input (e.g., y = 28) causes a rejection.
+        let wrong_public_inputs = vec![Scalar::from(28u64)];
+        let is_valid_wrong = bellman::groth16::verify_proof(&pvk, &proof, &wrong_public_inputs)
+            .expect("Failed during proof verification step");
+
+        assert!(
+            !is_valid_wrong,
+            "The verifier should reject a proof with tampered public inputs"
+        );
+    }
+}
