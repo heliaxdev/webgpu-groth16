@@ -38,7 +38,7 @@ fn coset_shift(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @group(0) @binding(1) var<storage, read> B: array<U256>;
 @group(0) @binding(2) var<storage, read> C: array<U256>;
 @group(0) @binding(3) var<storage, read_write> H: array<U256>;
-@group(0) @binding(4) var<storage, read> Z_invs: array<U256>; // [z_even_inv, z_odd_inv]
+@group(0) @binding(4) var<storage, read> Z_invs: array<U256>; // [z_inv_on_coset]
 
 @compute @workgroup_size(256)
 fn pointwise_poly(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -52,14 +52,7 @@ fn pointwise_poly(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let ab = mul_montgomery_u256(a, b);
     let res = sub_fr(ab, c);
 
-    var z_inv: U256;
-    if (i % 2u) == 0u {
-        z_inv = Z_invs[0];
-    } else {
-        z_inv = Z_invs[1];
-    }
-
-    H[i] = mul_montgomery_u256(res, z_inv);
+    H[i] = mul_montgomery_u256(res, Z_invs[0]);
 }
 
 // ============================================================================
@@ -69,8 +62,8 @@ fn pointwise_poly(@builtin(global_invocation_id) global_id: vec3<u32>) {
 // R^2 mod r for the BLS12-381 scalar field (F_r).
 // Required to convert Standard Form scalars into Montgomery Form.
 const R2_MOD_R = U256(array<u32, 8>(
-    0xc422c543u, 0x86dc10c2u, 0x4a1168bau, 0xb0e50a5du,
-    0x28981180u, 0x49d9f8e5u, 0xa060e40du, 0x099d2609u
+    0xf3f29c6du, 0xc999e990u, 0x87925c23u, 0x2b6cedcbu,
+    0x7254398fu, 0x05d31496u, 0x9f59ff11u, 0x0748d9d9u
 ));
 
 fn to_montgomery_u256(a: U256) -> U256 {

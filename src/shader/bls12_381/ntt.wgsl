@@ -4,7 +4,7 @@
 // CONSTANTS & WORKGROUP SIZE
 // ============================================================================
 // We use a workgroup size of 256 threads.
-// Each thread processes 2 elements, so one workgroup handles a 512-element NTT tile.
+// Each thread processes 2 elements, so one workgroup handles up to 512 elements.
 const THREADS_PER_WORKGROUP: u32 = 256u;
 const ELEMENTS_PER_TILE: u32 = 512u;
 
@@ -76,11 +76,23 @@ fn ntt_tile(
     @builtin(workgroup_id) group_id: vec3<u32>
 ) {
     let tile_offset = group_id.x * ELEMENTS_PER_TILE;
+    let n_total = arrayLength(&twiddles);
+    let n = min(ELEMENTS_PER_TILE, n_total - tile_offset);
+    if n == 0u { return; }
+
+    // This shader implements a single-tile NTT. Larger domains are not yet
+    // supported by this kernel and are left untouched for out-of-range groups.
+    if n > ELEMENTS_PER_TILE { return; }
     
     // 1. Bit-Reversed Load from Global VRAM to Workgroup Memory
     // The Cooley-Tukey algorithm yields elements out of order, requiring bit-inversion.
     // We apply the bit-reversal permutation while loading into shared memory.
-    let log2_elements = 9u; // log2(512) = 9
+    var log2_elements = 0u;
+    var m = n;
+    while m > 1u {
+        m = m >> 1u;
+        log2_elements = log2_elements + 1u;
+    }
 
     let local_idx_1 = local_id.x;
     let local_idx_2 = local_id.x + THREADS_PER_WORKGROUP;
@@ -88,8 +100,12 @@ fn ntt_tile(
     let rev_idx_1 = reverse_bits(local_idx_1, log2_elements);
     let rev_idx_2 = reverse_bits(local_idx_2, log2_elements);
 
-    shared_data[rev_idx_1] = data[tile_offset + local_idx_1];
-    shared_data[rev_idx_2] = data[tile_offset + local_idx_2];
+    if local_idx_1 < n {
+        shared_data[rev_idx_1] = data[tile_offset + local_idx_1];
+    }
+    if local_idx_2 < n {
+        shared_data[rev_idx_2] = data[tile_offset + local_idx_2];
+    }
 
     workgroupBarrier();
     
@@ -99,34 +115,32 @@ fn ntt_tile(
     for (var stage: u32 = 0u; stage < log2_elements; stage = stage + 1u) {
         let len = half_len * 2u;
         
-        // Each thread handles one butterfly operation.
-        // We map the linear thread ID to the corresponding butterfly indices.
-        let k = local_id.x % half_len;
-        let pos = (local_id.x / half_len) * len + k;
-        
-        // Fetch twiddle factor. 
-        // In a full hierarchical setup, the stride depends on the global pass.
-        // For this local tile, we scale the index.
-        let twiddle_stride = ELEMENTS_PER_TILE / len;
-        let twiddle = twiddles[k * twiddle_stride];
+        let butterfly_count = n / 2u;
+        if local_id.x < butterfly_count {
+            // Each thread handles one butterfly operation.
+            let k = local_id.x % half_len;
+            let pos = (local_id.x / half_len) * len + k;
 
-        let u = shared_data[pos];
-        let v = shared_data[pos + half_len];
-        
-        // Butterfly operation:
-        // temp = v * omega
-        let v_omega = mul_montgomery_u256(v, twiddle);
-        
-        // u_new = u + temp
-        // v_new = u - temp
-        shared_data[pos] = add_fr(u, v_omega);
-        shared_data[pos + half_len] = sub_fr(u, v_omega);
+            let twiddle_stride = n / len;
+            let twiddle = twiddles[k * twiddle_stride];
+
+            let u = shared_data[pos];
+            let v = shared_data[pos + half_len];
+
+            let v_omega = mul_montgomery_u256(v, twiddle);
+            shared_data[pos] = add_fr(u, v_omega);
+            shared_data[pos + half_len] = sub_fr(u, v_omega);
+        }
 
         half_len = len;
         workgroupBarrier();
     }
     
     // 3. Store the processed tile back to Global VRAM
-    data[tile_offset + local_idx_1] = shared_data[local_idx_1];
-    data[tile_offset + local_idx_2] = shared_data[local_idx_2];
+    if local_idx_1 < n {
+        data[tile_offset + local_idx_1] = shared_data[local_idx_1];
+    }
+    if local_idx_2 < n {
+        data[tile_offset + local_idx_2] = shared_data[local_idx_2];
+    }
 }

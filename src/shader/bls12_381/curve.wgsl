@@ -104,33 +104,37 @@ fn add_g1(p1: PointG1, p2: PointG1) -> PointG1 {
     }
 
     // Proceed with standard Jacobian addition
+    // Jacobian add-2007-bl formula (EFD)
     // H = U2 - U1
     let h = sub_mod_q(u2, u1);
-    // R = S2 - S1
-    let r = sub_mod_q(s2, s1);
+    // I = (2*H)^2
+    let two_h = add_mod_q(h, h);
+    let i = mul_montgomery_u384(two_h, two_h);
+    // J = H * I
+    let j = mul_montgomery_u384(h, i);
+    // r = 2*(S2 - S1)
+    let s2_minus_s1 = sub_mod_q(s2, s1);
+    let r = add_mod_q(s2_minus_s1, s2_minus_s1);
+    // V = U1 * I
+    let v = mul_montgomery_u384(u1, i);
 
-    // HH = H^2
-    let hh = mul_montgomery_u384(h, h);
-    // HHH = H * HH
-    let hhh = mul_montgomery_u384(h, hh);
-
-    // V = U1 * HH
-    let v = mul_montgomery_u384(u1, hh);
-
-    // X3 = R^2 - HHH - 2*V
+    // X3 = r^2 - J - 2*V
     let r_sq = mul_montgomery_u384(r, r);
-    var x3 = sub_mod_q(r_sq, hhh);
+    var x3 = sub_mod_q(r_sq, j);
     x3 = sub_mod_q(x3, add_mod_q(v, v));
 
-    // Y3 = R * (V - X3) - S1 * HHH
+    // Y3 = r*(V - X3) - 2*S1*J
     let v_minus_x3 = sub_mod_q(v, x3);
     let r_times_v_minus_x3 = mul_montgomery_u384(r, v_minus_x3);
-    let s1_hhh = mul_montgomery_u384(s1, hhh);
-    let y3 = sub_mod_q(r_times_v_minus_x3, s1_hhh);
+    let two_s1 = add_mod_q(s1, s1);
+    let two_s1_j = mul_montgomery_u384(two_s1, j);
+    let y3 = sub_mod_q(r_times_v_minus_x3, two_s1_j);
 
-    // Z3 = Z1 * Z2 * H
-    let z1z2 = mul_montgomery_u384(p1.z, p2.z);
-    let z3 = mul_montgomery_u384(z1z2, h);
+    // Z3 = ((Z1 + Z2)^2 - Z1Z1 - Z2Z2) * H
+    let z1_plus_z2 = add_mod_q(p1.z, p2.z);
+    let z1_plus_z2_sq = mul_montgomery_u384(z1_plus_z2, z1_plus_z2);
+    let z1z2_factor = sub_mod_q(sub_mod_q(z1_plus_z2_sq, z1z1), z2z2);
+    let z3 = mul_montgomery_u384(z1z2_factor, h);
 
     return PointG1(x3, y3, z3);
 }
@@ -244,33 +248,53 @@ fn add_g2(p1: PointG2, p2: PointG2) -> PointG2 {
     // S2 = Y2 * Z1 * Z1Z1
     let s2 = mul_fp2(mul_fp2(p2.y, p1.z), z1z1);
 
-    // H = U2 - U1
+    // Explicitly handle edge cases where incomplete Jacobian addition fails.
+    var u_eq = true;
+    for (var i = 0u; i < 12u; i = i + 1u) {
+        if u1.c0.limbs[i] != u2.c0.limbs[i] || u1.c1.limbs[i] != u2.c1.limbs[i] {
+            u_eq = false;
+            break;
+        }
+    }
+
+    if u_eq {
+        var s_eq = true;
+        for (var i = 0u; i < 12u; i = i + 1u) {
+            if s1.c0.limbs[i] != s2.c0.limbs[i] || s1.c1.limbs[i] != s2.c1.limbs[i] {
+                s_eq = false;
+                break;
+            }
+        }
+        if s_eq {
+            return double_g2(p1);
+        } else {
+            return PointG2(Fq2(U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)), U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))), Fq2(U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)), U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))), Fq2(U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)), U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))));
+        }
+    }
+
+    // Jacobian add-2007-bl formula (EFD), lifted to Fp2.
     let h = sub_fp2(u2, u1);
-    // R = S2 - S1
-    let r = sub_fp2(s2, s1);
+    let two_h = add_fp2(h, h);
+    let i = mul_fp2(two_h, two_h);
+    let j = mul_fp2(h, i);
+    let s2_minus_s1 = sub_fp2(s2, s1);
+    let r = add_fp2(s2_minus_s1, s2_minus_s1);
+    let v = mul_fp2(u1, i);
 
-    // HH = H^2
-    let hh = mul_fp2(h, h);
-    // HHH = H * HH
-    let hhh = mul_fp2(h, hh);
-
-    // V = U1 * HH
-    let v = mul_fp2(u1, hh);
-
-    // X3 = R^2 - HHH - 2*V
     let r_sq = mul_fp2(r, r);
-    var x3 = sub_fp2(r_sq, hhh);
+    var x3 = sub_fp2(r_sq, j);
     x3 = sub_fp2(x3, add_fp2(v, v));
 
-    // Y3 = R * (V - X3) - S1 * HHH
     let v_minus_x3 = sub_fp2(v, x3);
     let r_times_v_minus_x3 = mul_fp2(r, v_minus_x3);
-    let s1_hhh = mul_fp2(s1, hhh);
-    let y3 = sub_fp2(r_times_v_minus_x3, s1_hhh);
+    let two_s1 = add_fp2(s1, s1);
+    let two_s1_j = mul_fp2(two_s1, j);
+    let y3 = sub_fp2(r_times_v_minus_x3, two_s1_j);
 
-    // Z3 = Z1 * Z2 * H
-    let z1z2 = mul_fp2(p1.z, p2.z);
-    let z3 = mul_fp2(z1z2, h);
+    let z1_plus_z2 = add_fp2(p1.z, p2.z);
+    let z1_plus_z2_sq = mul_fp2(z1_plus_z2, z1_plus_z2);
+    let z1z2_factor = sub_fp2(sub_fp2(z1_plus_z2_sq, z1z1), z2z2);
+    let z3 = mul_fp2(z1z2_factor, h);
 
     return PointG2(x3, y3, z3);
 }

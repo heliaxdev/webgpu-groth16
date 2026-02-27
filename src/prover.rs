@@ -14,6 +14,9 @@ use crate::gpu::{GpuContext, curve::GpuCurve};
 struct GpuConstraintSystem<G: GpuCurve> {
     inputs: Vec<G::Scalar>,
     aux: Vec<G::Scalar>,
+    a_aux_density: Vec<bool>,
+    b_input_density: Vec<bool>,
+    b_aux_density: Vec<bool>,
     a_lcs: Vec<Vec<(bellman::Variable, G::Scalar)>>,
     b_lcs: Vec<Vec<(bellman::Variable, G::Scalar)>>,
     c_lcs: Vec<Vec<(bellman::Variable, G::Scalar)>>,
@@ -31,6 +34,9 @@ impl<G: GpuCurve> GpuConstraintSystem<G> {
         GpuConstraintSystem {
             inputs: vec![G::Scalar::ONE],
             aux: Vec::new(),
+            a_aux_density: Vec::new(),
+            b_input_density: vec![false],
+            b_aux_density: Vec::new(),
             a_lcs: Vec::new(),
             b_lcs: Vec::new(),
             c_lcs: Vec::new(),
@@ -53,6 +59,8 @@ impl<G: GpuCurve + Send> bellman::ConstraintSystem<G::Scalar> for GpuConstraintS
     {
         let value = f()?;
         self.aux.push(value);
+        self.a_aux_density.push(false);
+        self.b_aux_density.push(false);
         Ok(bellman::Variable::new_unchecked(bellman::Index::Aux(
             self.aux.len() - 1,
         )))
@@ -69,6 +77,7 @@ impl<G: GpuCurve + Send> bellman::ConstraintSystem<G::Scalar> for GpuConstraintS
     {
         let value = f()?;
         self.inputs.push(value);
+        self.b_input_density.push(false);
         Ok(bellman::Variable::new_unchecked(bellman::Index::Input(
             self.inputs.len() - 1,
         )))
@@ -84,8 +93,30 @@ impl<G: GpuCurve + Send> bellman::ConstraintSystem<G::Scalar> for GpuConstraintS
         let a_lc = a(bellman::LinearCombination::zero());
         let b_lc = b(bellman::LinearCombination::zero());
         let c_lc = c(bellman::LinearCombination::zero());
-        self.a_lcs.push(lc_to_vec(a_lc));
-        self.b_lcs.push(lc_to_vec(b_lc));
+
+        let a_vec = lc_to_vec(a_lc);
+        for (var, coeff) in &a_vec {
+            if *coeff == G::Scalar::ZERO {
+                continue;
+            }
+            if let bellman::Index::Aux(i) = var.get_unchecked() {
+                self.a_aux_density[i] = true;
+            }
+        }
+
+        let b_vec = lc_to_vec(b_lc);
+        for (var, coeff) in &b_vec {
+            if *coeff == G::Scalar::ZERO {
+                continue;
+            }
+            match var.get_unchecked() {
+                bellman::Index::Input(i) => self.b_input_density[i] = true,
+                bellman::Index::Aux(i) => self.b_aux_density[i] = true,
+            }
+        }
+
+        self.a_lcs.push(a_vec);
+        self.b_lcs.push(b_vec);
         self.c_lcs.push(lc_to_vec(c_lc));
     }
     fn push_namespace<NR, N>(&mut self, _name_fn: N)
@@ -118,6 +149,26 @@ fn marshal_scalars<G: GpuCurve>(scalars: &[G::Scalar]) -> Vec<u8> {
         buffer.extend_from_slice(&G::serialize_scalar(s));
     }
     buffer
+}
+
+fn dense_assignment_from_masks<S: PrimeField>(
+    inputs: &[S],
+    aux: &[S],
+    input_mask: &[bool],
+    aux_mask: &[bool],
+) -> Vec<S> {
+    let mut out = Vec::new();
+    for (i, s) in inputs.iter().enumerate() {
+        if i < input_mask.len() && input_mask[i] {
+            out.push(*s);
+        }
+    }
+    for (i, s) in aux.iter().enumerate() {
+        if i < aux_mask.len() && aux_mask[i] {
+            out.push(*s);
+        }
+    }
+    out
 }
 
 async fn gpu_msm_g1<G: GpuCurve>(
@@ -262,78 +313,65 @@ async fn compute_h_poly<G: GpuCurve>(
     c_values: &[G::Scalar],
 ) -> Result<Vec<G::Scalar>> {
     let n = a_values.len().next_power_of_two();
-    let domain_size = n * 2;
 
     // 1. CPU PRE-COMPUTES CONSTANT FACTORS
     let omega_n = G::root_of_unity(n);
     let omega_n_inv = omega_n.invert().unwrap();
-    let omega_2n = G::root_of_unity(domain_size);
-    let omega_2n_inv = omega_2n.invert().unwrap();
 
     let n_inv = G::Scalar::from(n as u64).invert().unwrap();
     let coset_generator = G::Scalar::MULTIPLICATIVE_GENERATOR;
     let coset_inv = coset_generator.invert().unwrap();
-    let domain_inv = G::Scalar::from(domain_size as u64).invert().unwrap();
 
     let mut inv_twiddles_n = vec![G::Scalar::ONE; n];
-    let mut fwd_twiddles_2n = vec![G::Scalar::ONE; domain_size];
-    let mut inv_twiddles_2n = vec![G::Scalar::ONE; domain_size];
+    let mut fwd_twiddles_n = vec![G::Scalar::ONE; n];
     let mut shifts = vec![G::Scalar::ONE; n];
     let mut inv_shifts = vec![G::Scalar::ONE; n];
 
-    for i in 1..domain_size {
-        if i < n {
-            inv_twiddles_n[i] = inv_twiddles_n[i - 1] * omega_n_inv;
-            shifts[i] = shifts[i - 1] * coset_generator;
-            inv_shifts[i] = inv_shifts[i - 1] * coset_inv;
-        }
-        fwd_twiddles_2n[i] = fwd_twiddles_2n[i - 1] * omega_2n;
-        inv_twiddles_2n[i] = inv_twiddles_2n[i - 1] * omega_2n_inv;
+    for i in 1..n {
+        inv_twiddles_n[i] = inv_twiddles_n[i - 1] * omega_n_inv;
+        fwd_twiddles_n[i] = fwd_twiddles_n[i - 1] * omega_n;
+        shifts[i] = shifts[i - 1] * coset_generator;
+        inv_shifts[i] = inv_shifts[i - 1] * coset_inv;
     }
 
     for i in 0..n {
         shifts[i] *= n_inv;
-        inv_shifts[i] *= domain_inv;
+        inv_shifts[i] *= n_inv;
     }
 
     let g_to_n = coset_generator.pow([n as u64]);
-    let z_even_inv = (g_to_n - G::Scalar::ONE).invert().unwrap();
-    let z_odd_inv = (-g_to_n - G::Scalar::ONE).invert().unwrap();
-    let z_invs = vec![z_even_inv, z_odd_inv];
+    let z_inv = (g_to_n - G::Scalar::ONE).invert().unwrap();
+    let z_invs = vec![z_inv];
 
     // 2. CPU ZERO-PADDING
     let mut a_coeffs = a_values.to_vec();
-    a_coeffs.resize(domain_size, G::Scalar::ZERO);
+    a_coeffs.resize(n, G::Scalar::ZERO);
     let mut b_coeffs = b_values.to_vec();
-    b_coeffs.resize(domain_size, G::Scalar::ZERO);
+    b_coeffs.resize(n, G::Scalar::ZERO);
     let mut c_coeffs = c_values.to_vec();
-    c_coeffs.resize(domain_size, G::Scalar::ZERO);
+    c_coeffs.resize(n, G::Scalar::ZERO);
 
     // 3. UPLOAD ALL BUFFERS TO VRAM
     let a_buf = gpu.create_storage_buffer("A", &marshal_scalars::<G>(&a_coeffs));
     let b_buf = gpu.create_storage_buffer("B", &marshal_scalars::<G>(&b_coeffs));
     let c_buf = gpu.create_storage_buffer("C", &marshal_scalars::<G>(&c_coeffs));
-    let h_buf = gpu.create_empty_buffer("H", (domain_size * 32) as u64);
+    let h_buf = gpu.create_empty_buffer("H", (n * 32) as u64);
 
     let tw_inv_n_buf = gpu.create_storage_buffer("TwInvN", &marshal_scalars::<G>(&inv_twiddles_n));
-    let tw_fwd_2n_buf =
-        gpu.create_storage_buffer("TwFwd2N", &marshal_scalars::<G>(&fwd_twiddles_2n));
-    let tw_inv_2n_buf =
-        gpu.create_storage_buffer("TwInv2N", &marshal_scalars::<G>(&inv_twiddles_2n));
+    let tw_fwd_n_buf = gpu.create_storage_buffer("TwFwdN", &marshal_scalars::<G>(&fwd_twiddles_n));
     let shifts_buf = gpu.create_storage_buffer("Shifts", &marshal_scalars::<G>(&shifts));
     let inv_shifts_buf = gpu.create_storage_buffer("InvShifts", &marshal_scalars::<G>(&inv_shifts));
     let z_invs_buf = gpu.create_storage_buffer("ZInvs", &marshal_scalars::<G>(&z_invs));
 
     // Convert raw bits into Montgomery domain for WGSL math
-    gpu.execute_to_montgomery(&a_buf, domain_size as u32);
-    gpu.execute_to_montgomery(&b_buf, domain_size as u32);
-    gpu.execute_to_montgomery(&c_buf, domain_size as u32);
+    gpu.execute_to_montgomery(&a_buf, n as u32);
+    gpu.execute_to_montgomery(&b_buf, n as u32);
+    gpu.execute_to_montgomery(&c_buf, n as u32);
     gpu.execute_to_montgomery(&tw_inv_n_buf, n as u32);
-    gpu.execute_to_montgomery(&tw_fwd_2n_buf, domain_size as u32);
-    gpu.execute_to_montgomery(&tw_inv_2n_buf, domain_size as u32);
+    gpu.execute_to_montgomery(&tw_fwd_n_buf, n as u32);
     gpu.execute_to_montgomery(&shifts_buf, n as u32);
     gpu.execute_to_montgomery(&inv_shifts_buf, n as u32);
-    gpu.execute_to_montgomery(&z_invs_buf, 2);
+    gpu.execute_to_montgomery(&z_invs_buf, 1);
 
     // 4. DISPATCH 100% VRAM-BOUND GPU COMPUTE CHAIN
     // Step A: iNTT(N) to get coefficients
@@ -346,10 +384,10 @@ async fn compute_h_poly<G: GpuCurve>(
     gpu.execute_coset_shift(&b_buf, &shifts_buf, n as u32);
     gpu.execute_coset_shift(&c_buf, &shifts_buf, n as u32);
 
-    // Step C: NTT(2N) to get shifted evaluations over padded domain
-    gpu.execute_ntt(&a_buf, &tw_fwd_2n_buf, domain_size as u32);
-    gpu.execute_ntt(&b_buf, &tw_fwd_2n_buf, domain_size as u32);
-    gpu.execute_ntt(&c_buf, &tw_fwd_2n_buf, domain_size as u32);
+    // Step C: NTT(N) to get shifted evaluations over coset
+    gpu.execute_ntt(&a_buf, &tw_fwd_n_buf, n as u32);
+    gpu.execute_ntt(&b_buf, &tw_fwd_n_buf, n as u32);
+    gpu.execute_ntt(&c_buf, &tw_fwd_n_buf, n as u32);
 
     // Step D: Evaluate H(X) pointwise
     gpu.execute_pointwise_poly(
@@ -358,11 +396,11 @@ async fn compute_h_poly<G: GpuCurve>(
         &c_buf,
         &h_buf,
         &z_invs_buf,
-        domain_size as u32,
+        n as u32,
     );
 
-    // Step E: iNTT(2N) to get back H(X) coefficients
-    gpu.execute_ntt(&h_buf, &tw_inv_2n_buf, domain_size as u32);
+    // Step E: iNTT(N) to get back H(X) coefficients
+    gpu.execute_ntt(&h_buf, &tw_inv_n_buf, n as u32);
 
     // Step F: Reverse the Coset Shift on the resulting N coefficients
     gpu.execute_coset_shift(&h_buf, &inv_shifts_buf, n as u32);
@@ -371,7 +409,6 @@ async fn compute_h_poly<G: GpuCurve>(
     gpu.execute_from_montgomery(&h_buf, n as u32);
 
     // 5. FINALLY PULL THE RESULT OFF THE GPU
-    // We only read back the first N elements (H drops the top half mathematically)
     let h_bytes = gpu
         .read_buffer(&h_buf, (n * 32) as wgpu::BufferAddress)
         .await?;
@@ -384,11 +421,12 @@ async fn compute_h_poly<G: GpuCurve>(
     Ok(h_poly)
 }
 
-pub async fn create_proof<E, G, C, R>(
+async fn create_proof_with_fixed_randomness<E, G, C>(
     circuit: C,
     pk: &bellman::groth16::Parameters<E>,
     gpu: &GpuContext<G>,
-    rng: &mut R,
+    r: G::Scalar,
+    s: G::Scalar,
 ) -> Result<bellman::groth16::Proof<E>>
 where
     E: pairing::MultiMillerLoop,
@@ -401,16 +439,23 @@ where
             G1Affine = E::G1Affine,
             G2Affine = E::G2Affine,
         > + Send,
-    R: RngCore,
 {
     let mut cs = GpuConstraintSystem::<G>::new();
     circuit
         .synthesize(&mut cs)
         .map_err(|e| anyhow::anyhow!("circuit synthesis failed: {:?}", e))?;
 
+    for i in 0..cs.inputs.len() {
+        cs.a_lcs.push(vec![(
+            bellman::Variable::new_unchecked(bellman::Index::Input(i)),
+            G::Scalar::ONE,
+        )]);
+        cs.b_lcs.push(Vec::new());
+        cs.c_lcs.push(Vec::new());
+    }
+
     let num_constraints = cs.a_lcs.len();
-    // Match Bellman evaluation domain sizing: include constraints and public inputs.
-    let n = (num_constraints + cs.inputs.len()).next_power_of_two();
+    let n = num_constraints.next_power_of_two();
 
     let mut a_values = vec![G::Scalar::ZERO; n];
     let mut b_values = vec![G::Scalar::ZERO; n];
@@ -424,20 +469,24 @@ where
 
     let h_coeffs = compute_h_poly(gpu, &a_values, &b_values, &c_values).await?;
 
-    let mut full_assignment = cs.inputs.clone();
-    full_assignment.extend(cs.aux.clone());
+    let mut a_assignment = cs.inputs.clone();
+    for (i, v) in cs.aux.iter().enumerate() {
+        if cs.a_aux_density[i] {
+            a_assignment.push(*v);
+        }
+    }
+    let b_assignment = dense_assignment_from_masks(
+        &cs.inputs,
+        &cs.aux,
+        &cs.b_input_density,
+        &cs.b_aux_density,
+    );
 
-    let a_msm = gpu_msm_g1(gpu, &pk.a, &full_assignment).await?;
-    let b_g1_msm = gpu_msm_g1(gpu, &pk.b_g1, &full_assignment).await?;
+    let a_msm = gpu_msm_g1(gpu, &pk.a, &a_assignment).await?;
+    let b_g1_msm = gpu_msm_g1(gpu, &pk.b_g1, &b_assignment).await?;
     let l_msm = gpu_msm_g1(gpu, &pk.l, &cs.aux).await?;
-
-    // Groth16 naturally drops the highest degree component, meaning pk.h_query.len() = n - 1.
     let h_msm = gpu_msm_g1(gpu, &pk.h, &h_coeffs[..pk.h.len()]).await?;
-
-    let b_g2_msm = gpu_msm_g2(gpu, &pk.b_g2, &full_assignment).await?;
-
-    let r = G::Scalar::random(&mut *rng);
-    let s = G::Scalar::random(&mut *rng);
+    let b_g2_msm = gpu_msm_g2(gpu, &pk.b_g2, &b_assignment).await?;
 
     let mut proof_a = G::add_g1_proj(&G::affine_to_proj_g1(&pk.vk.alpha_g1), &a_msm);
     proof_a = G::add_g1_proj(&proof_a, &G::mul_g1_scalar(&pk.vk.delta_g1, &r));
@@ -467,9 +516,36 @@ where
     })
 }
 
+pub async fn create_proof<E, G, C, R>(
+    circuit: C,
+    pk: &bellman::groth16::Parameters<E>,
+    gpu: &GpuContext<G>,
+    rng: &mut R,
+) -> Result<bellman::groth16::Proof<E>>
+where
+    E: pairing::MultiMillerLoop,
+    C: bellman::Circuit<G::Scalar>,
+    G: GpuCurve<
+            Engine = E,
+            Scalar = E::Fr,
+            G1 = E::G1,
+            G2 = E::G2,
+            G1Affine = E::G1Affine,
+            G2Affine = E::G2Affine,
+        > + Send,
+    R: RngCore,
+{
+    let r = G::Scalar::random(&mut *rng);
+    let s = G::Scalar::random(&mut *rng);
+    create_proof_with_fixed_randomness::<E, G, C>(circuit, pk, gpu, r, s).await
+}
+
 #[cfg(test)]
 mod tests {
     use blstrs::{Bls12, Scalar};
+    use crate::bellman::Circuit;
+    use ff::Field;
+    use group::Group;
     use rand_core::OsRng;
 
     use super::*;
@@ -622,4 +698,261 @@ mod tests {
         let gpu_affine = Bls12::proj_to_affine_g2(&gpu);
         assert_eq!(gpu_affine, base);
     }
+
+    #[tokio::test]
+    async fn test_proof_abc_match_cpu_reference() {
+        let mut rng = OsRng;
+        let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
+        let params =
+            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+                .expect("failed to generate parameters");
+        let gpu_ctx = GpuContext::<Bls12>::new()
+            .await
+            .expect("failed to initialize gpu");
+
+        let x_value = Scalar::from(3u64);
+        let y_value = Scalar::from(27u64);
+        let circuit = DummyCircuit {
+            x: Some(x_value),
+            y: Some(y_value),
+        };
+
+        let r = Scalar::ZERO;
+        let s = Scalar::ZERO;
+
+        let gpu_proof = create_proof_with_fixed_randomness::<Bls12, Bls12, _>(
+            DummyCircuit {
+                x: Some(x_value),
+                y: Some(y_value),
+            },
+            &params,
+            &gpu_ctx,
+            r,
+            s,
+        )
+        .await
+        .expect("gpu proof creation failed");
+
+        let cpu_proof = bellman::groth16::create_proof(circuit, &params, r, s)
+            .expect("cpu proof creation failed");
+
+        let gpu_a: blstrs::G1Projective = gpu_proof.a.into();
+        let cpu_a: blstrs::G1Projective = cpu_proof.a.into();
+        let gpu_b: blstrs::G2Projective = gpu_proof.b.into();
+        let cpu_b: blstrs::G2Projective = cpu_proof.b.into();
+        let gpu_c: blstrs::G1Projective = gpu_proof.c.into();
+        let cpu_c: blstrs::G1Projective = cpu_proof.c.into();
+
+        let a_ok = gpu_a == cpu_a;
+        let b_ok = gpu_b == cpu_b;
+        let c_ok = gpu_c == cpu_c;
+        assert!(a_ok && b_ok && c_ok, "proof components mismatch: a={a_ok} b={b_ok} c={c_ok}");
+    }
+
+    #[tokio::test]
+    async fn test_h_msm_matches_cpu_for_dummy_circuit() {
+        let mut rng = OsRng;
+        let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
+        let params =
+            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+                .expect("failed to generate parameters");
+        let gpu_ctx = GpuContext::<Bls12>::new()
+            .await
+            .expect("failed to initialize gpu");
+
+        let x_value = Scalar::from(3u64);
+        let y_value = Scalar::from(27u64);
+
+        let mut cs = GpuConstraintSystem::<Bls12>::new();
+        DummyCircuit {
+            x: Some(x_value),
+            y: Some(y_value),
+        }
+        .synthesize(&mut cs)
+        .expect("synthesis failed");
+
+        for i in 0..cs.inputs.len() {
+            cs.a_lcs.push(vec![(
+                bellman::Variable::new_unchecked(bellman::Index::Input(i)),
+                Scalar::ONE,
+            )]);
+            cs.b_lcs.push(Vec::new());
+            cs.c_lcs.push(Vec::new());
+        }
+
+        let num_constraints = cs.a_lcs.len();
+        let n = num_constraints.next_power_of_two();
+        let mut a_values = vec![Scalar::ZERO; n];
+        let mut b_values = vec![Scalar::ZERO; n];
+        let mut c_values = vec![Scalar::ZERO; n];
+        for i in 0..num_constraints {
+            a_values[i] = eval_lc(&cs.a_lcs[i], &cs.inputs, &cs.aux);
+            b_values[i] = eval_lc(&cs.b_lcs[i], &cs.inputs, &cs.aux);
+            c_values[i] = eval_lc(&cs.c_lcs[i], &cs.inputs, &cs.aux);
+        }
+
+        let h_coeffs = compute_h_poly(&gpu_ctx, &a_values, &b_values, &c_values)
+            .await
+            .expect("compute_h_poly failed");
+
+        let gpu_h = gpu_msm_g1::<Bls12>(&gpu_ctx, &params.h, &h_coeffs[..params.h.len()])
+            .await
+            .expect("gpu h msm failed");
+
+        let mut cpu_h = <Bls12 as pairing::Engine>::G1::identity();
+        for (b, s) in params.h.iter().zip(h_coeffs.iter()) {
+            cpu_h += b * *s;
+        }
+
+        assert_eq!(Bls12::proj_to_affine_g1(&gpu_h), Bls12::proj_to_affine_g1(&cpu_h));
+    }
+
+    #[tokio::test]
+    async fn test_ab_msm_match_cpu_for_dummy_circuit() {
+        let mut rng = OsRng;
+        let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
+        let params =
+            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+                .expect("failed to generate parameters");
+        let gpu_ctx = GpuContext::<Bls12>::new()
+            .await
+            .expect("failed to initialize gpu");
+
+        let x_value = Scalar::from(3u64);
+        let y_value = Scalar::from(27u64);
+
+        let mut cs = GpuConstraintSystem::<Bls12>::new();
+        DummyCircuit {
+            x: Some(x_value),
+            y: Some(y_value),
+        }
+        .synthesize(&mut cs)
+        .expect("synthesis failed");
+
+        let mut a_assignment = cs.inputs.clone();
+        for (i, s) in cs.aux.iter().enumerate() {
+            if cs.a_aux_density[i] {
+                a_assignment.push(*s);
+            }
+        }
+        let b_assignment = dense_assignment_from_masks(
+            &cs.inputs,
+            &cs.aux,
+            &cs.b_input_density,
+            &cs.b_aux_density,
+        );
+
+        let gpu_a = gpu_msm_g1::<Bls12>(&gpu_ctx, &params.a, &a_assignment)
+            .await
+            .expect("gpu a msm failed");
+        let gpu_b_g1 = gpu_msm_g1::<Bls12>(&gpu_ctx, &params.b_g1, &b_assignment)
+            .await
+            .expect("gpu b_g1 msm failed");
+        let gpu_b_g2 = gpu_msm_g2::<Bls12>(&gpu_ctx, &params.b_g2, &b_assignment)
+            .await
+            .expect("gpu b_g2 msm failed");
+
+        let mut cpu_a = <Bls12 as pairing::Engine>::G1::identity();
+        for (b, s) in params.a.iter().zip(a_assignment.iter()) {
+            cpu_a += b * *s;
+        }
+        let mut cpu_b_g1 = <Bls12 as pairing::Engine>::G1::identity();
+        for (b, s) in params.b_g1.iter().zip(b_assignment.iter()) {
+            cpu_b_g1 += b * *s;
+        }
+        let mut cpu_b_g2 = <Bls12 as pairing::Engine>::G2::identity();
+        for (b, s) in params.b_g2.iter().zip(b_assignment.iter()) {
+            cpu_b_g2 += b * *s;
+        }
+
+        let a_ok = Bls12::proj_to_affine_g1(&gpu_a) == Bls12::proj_to_affine_g1(&cpu_a);
+        let b1_ok = Bls12::proj_to_affine_g1(&gpu_b_g1) == Bls12::proj_to_affine_g1(&cpu_b_g1);
+        let b2_ok = Bls12::proj_to_affine_g2(&gpu_b_g2) == Bls12::proj_to_affine_g2(&cpu_b_g2);
+        assert!(a_ok && b1_ok && b2_ok, "ab msm mismatch: a={a_ok} b_g1={b1_ok} b_g2={b2_ok}");
+    }
+
+    #[tokio::test]
+    async fn test_h_component_matches_cpu_when_r_s_zero() {
+        let mut rng = OsRng;
+        let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
+        let params =
+            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+                .expect("failed to generate parameters");
+        let gpu_ctx = GpuContext::<Bls12>::new()
+            .await
+            .expect("failed to initialize gpu");
+
+        let x_value = Scalar::from(3u64);
+        let y_value = Scalar::from(27u64);
+
+        let mut cs = GpuConstraintSystem::<Bls12>::new();
+        DummyCircuit {
+            x: Some(x_value),
+            y: Some(y_value),
+        }
+        .synthesize(&mut cs)
+        .expect("synthesis failed");
+
+        for i in 0..cs.inputs.len() {
+            cs.a_lcs.push(vec![(
+                bellman::Variable::new_unchecked(bellman::Index::Input(i)),
+                Scalar::ONE,
+            )]);
+            cs.b_lcs.push(Vec::new());
+            cs.c_lcs.push(Vec::new());
+        }
+
+        let num_constraints = cs.a_lcs.len();
+        let n = num_constraints.next_power_of_two();
+        let mut a_values = vec![Scalar::ZERO; n];
+        let mut b_values = vec![Scalar::ZERO; n];
+        let mut c_values = vec![Scalar::ZERO; n];
+        for i in 0..num_constraints {
+            a_values[i] = eval_lc(&cs.a_lcs[i], &cs.inputs, &cs.aux);
+            b_values[i] = eval_lc(&cs.b_lcs[i], &cs.inputs, &cs.aux);
+            c_values[i] = eval_lc(&cs.c_lcs[i], &cs.inputs, &cs.aux);
+        }
+
+        let h_coeffs = compute_h_poly(&gpu_ctx, &a_values, &b_values, &c_values)
+            .await
+            .expect("compute_h_poly failed");
+        let gpu_h = gpu_msm_g1::<Bls12>(&gpu_ctx, &params.h, &h_coeffs[..params.h.len()])
+            .await
+            .expect("gpu h msm failed");
+        let gpu_l = gpu_msm_g1::<Bls12>(&gpu_ctx, &params.l, &cs.aux)
+            .await
+            .expect("gpu l msm failed");
+
+        let cpu_proof = bellman::groth16::create_proof(
+            DummyCircuit {
+                x: Some(x_value),
+                y: Some(y_value),
+            },
+            &params,
+            Scalar::ZERO,
+            Scalar::ZERO,
+        )
+        .expect("cpu proof failed");
+
+        let cpu_c: blstrs::G1Projective = cpu_proof.c.into();
+        let mut cpu_l = <Bls12 as pairing::Engine>::G1::identity();
+        for (b, s) in params.l.iter().zip(cs.aux.iter()) {
+            cpu_l += b * *s;
+        }
+
+        let mut cpu_h = cpu_c;
+        cpu_h -= cpu_l;
+
+        assert_eq!(
+            Bls12::proj_to_affine_g1(&gpu_l),
+            Bls12::proj_to_affine_g1(&cpu_l),
+            "l component mismatch"
+        );
+        assert_eq!(
+            Bls12::proj_to_affine_g1(&gpu_h),
+            Bls12::proj_to_affine_g1(&cpu_h),
+            "h component mismatch"
+        );
+    }
+
 }

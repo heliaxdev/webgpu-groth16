@@ -807,7 +807,8 @@ impl<C: GpuCurve> GpuContext<C> {
 mod tests {
     use super::*;
     use crate::gpu::curve::GpuCurve;
-    use blstrs::{Bls12, G1Affine};
+    use blstrs::{Bls12, G1Affine, Scalar};
+    use ff::Field;
     use group::prime::PrimeCurveAffine;
     use std::borrow::Cow;
 
@@ -1041,5 +1042,40 @@ mod tests {
             .expect("deserializing coord round-tripped g1 bytes failed");
         let parsed_affine: G1Affine = parsed.into();
         assert_eq!(parsed_affine, point, "g1 coord roundtrip point mismatch");
+    }
+
+    #[tokio::test]
+    async fn test_scalar_to_from_montgomery_roundtrip() {
+        let gpu = GpuContext::<Bls12>::new()
+            .await
+            .expect("failed to init gpu context");
+
+        let scalars = vec![
+            Scalar::ZERO,
+            Scalar::ONE,
+            Scalar::from(2u64),
+            Scalar::from(3u64),
+            Scalar::from(0x1234_5678_9abc_def0u64),
+            -Scalar::from(5u64),
+        ];
+
+        let mut bytes = Vec::with_capacity(scalars.len() * 32);
+        for s in &scalars {
+            bytes.extend_from_slice(&<Bls12 as GpuCurve>::serialize_scalar(s));
+        }
+
+        let buf = gpu.create_storage_buffer("scalar_roundtrip", &bytes);
+        gpu.execute_to_montgomery(&buf, scalars.len() as u32);
+        gpu.execute_from_montgomery(&buf, scalars.len() as u32);
+        let out = gpu
+            .read_buffer(&buf, bytes.len() as u64)
+            .await
+            .expect("failed to read scalar roundtrip");
+
+        for (i, chunk) in out.chunks_exact(32).enumerate() {
+            let got = <Bls12 as GpuCurve>::deserialize_scalar(chunk)
+                .expect("deserialize scalar failed");
+            assert_eq!(got, scalars[i], "scalar mismatch at index {i}");
+        }
     }
 }
