@@ -106,7 +106,7 @@ fn bench_full_proof(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
 
-    for &num_sq in &[2, 1_000, 10_000] {
+    for &num_sq in &[2, 1_000, 10_000, 100_000] {
         let bs = setup(num_sq);
         group.bench_function(format!("n={num_sq}"), |b| {
             b.iter(|| {
@@ -165,7 +165,7 @@ fn bench_msm_g1(c: &mut Criterion) {
     let mut group = c.benchmark_group("msm_g1");
     group.sample_size(10);
 
-    for &size in &[100, 1_000, 10_000] {
+    for &size in &[100, 1_000, 10_000, 100_000] {
         let mut rng = OsRng;
         let bases: Vec<<Bls12 as GpuCurve>::G1Affine> = (0..size)
             .map(|_| <Bls12 as GpuCurve>::G1::random(&mut rng).to_affine())
@@ -206,7 +206,7 @@ fn bench_msm_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("msm_batch");
     group.sample_size(10);
 
-    for &n in &[100, 1_000, 10_000] {
+    for &n in &[100, 1_000, 10_000, 100_000] {
         let mut rng = OsRng;
         let a_bases = make_g1_bases(&mut rng, n);
         let a_scalars = make_scalars(&mut rng, n);
@@ -247,7 +247,7 @@ fn bench_msm_batch(c: &mut Criterion) {
 fn bench_bucket_sorting(c: &mut Criterion) {
     let mut group = c.benchmark_group("bucket_sorting");
 
-    for &size in &[1_000, 10_000] {
+    for &size in &[1_000, 10_000, 100_000] {
         let mut rng = OsRng;
         let scalars: Vec<Scalar> = (0..size).map(|_| Scalar::random(&mut rng)).collect();
 
