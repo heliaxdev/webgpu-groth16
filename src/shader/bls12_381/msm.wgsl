@@ -174,6 +174,7 @@ fn store_g2(p: PointG2) -> PointG2 {
 @group(0) @binding(2) var<storage, read> bucket_pointers: array<u32>;
 @group(0) @binding(3) var<storage, read> bucket_sizes: array<u32>;
 @group(0) @binding(4) var<storage, read_write> aggregated_buckets_g1: array<PointG1>;
+@group(0) @binding(5) var<storage, read> bucket_values_agg: array<u32>;
 
 @compute @workgroup_size(64)
 fn aggregate_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -186,7 +187,10 @@ fn aggregate_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     for (var i = 0u; i < size; i = i + 1u) {
         sum = add_g1_safe(sum, load_g1(bases_g1[base_indices[start + i]]));
     }
-    aggregated_buckets_g1[bucket_idx] = sum;
+    // Weight the bucket sum by its bucket value: v * B[v]
+    // This moves O(log(v)) work per bucket into the parallel aggregate pass,
+    // so the subsum only needs a simple addition per bucket.
+    aggregated_buckets_g1[bucket_idx] = scalar_mul_g1(sum, bucket_values_agg[bucket_idx]);
 }
 
 // Computes k * P using double-and-add (k is at most 2^15 - 1 for bucket gaps)
@@ -222,28 +226,11 @@ fn subsum_accumulation_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
+    // Buckets are already weighted by their value (v * B[v]) from the aggregate pass.
+    // Just sum the pre-weighted results for this window.
     var S = G1_INFINITY;
-    var running_sum = G1_INFINITY;
-
-    // Process active buckets from highest to lowest value.
-    // Instead of iterating every bucket value one-by-one (O(2^c) per window),
-    // skip gaps between active buckets using scalar multiplication (O(log(gap))).
     for (var i = 0u; i < count; i = i + 1u) {
-        let idx = start + count - 1u - i;
-        let bucket_val = bucket_values[idx];
-
-        // Add this bucket's aggregated sum to running_sum
-        running_sum = add_g1_safe(running_sum, aggregated_buckets_in_g1[idx]);
-
-        // Compute gap to next lower active bucket (or 0 if none)
-        var next_val = 0u;
-        if i + 1u < count {
-            next_val = bucket_values[start + count - 2u - i];
-        }
-        let gap = bucket_val - next_val;
-
-        // S += gap * running_sum via O(log(gap)) double-and-add
-        S = add_g1_safe(S, scalar_mul_g1(running_sum, gap));
+        S = add_g1_safe(S, aggregated_buckets_in_g1[start + i]);
     }
 
     window_sums_g1[window_id] = store_g1(S);
@@ -256,6 +243,7 @@ fn subsum_accumulation_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @group(0) @binding(2) var<storage, read> bucket_pointers_g2: array<u32>;
 @group(0) @binding(3) var<storage, read> bucket_sizes_g2: array<u32>;
 @group(0) @binding(4) var<storage, read_write> aggregated_buckets_g2: array<PointG2>;
+@group(0) @binding(5) var<storage, read> bucket_values_agg_g2: array<u32>;
 
 @compute @workgroup_size(64)
 fn aggregate_buckets_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {

@@ -297,6 +297,16 @@ impl<C: GpuCurve> GpuContext<C> {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -1072,6 +1082,10 @@ impl<C: GpuCurve> GpuContext<C> {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: aggregated_buckets_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: bucket_values_buf.as_entire_binding(),
                 },
             ],
         });
