@@ -222,10 +222,16 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     bases: &[G::G1Affine],
     scalars: &[G::Scalar],
 ) -> Result<G::G1> {
+    #[cfg(feature = "timing")]
+    let t_start = std::time::Instant::now();
+
     let bd: BucketData = compute_bucket_sorting::<G>(scalars);
     if bd.num_active_buckets == 0 {
         return Ok(G::g1_identity());
     }
+
+    #[cfg(feature = "timing")]
+    let t_bucket = std::time::Instant::now();
 
     let mut bases_bytes = Vec::with_capacity(bases.len() * 144);
     for base in bases {
@@ -245,6 +251,9 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     let agg_buf = gpu.create_empty_buffer("Agg", (bd.num_active_buckets * 144) as u64);
     let sums_buf = gpu.create_empty_buffer("Sums", (bd.num_windows * 144) as u64);
 
+    #[cfg(feature = "timing")]
+    let t_upload = std::time::Instant::now();
+
     gpu.execute_msm(
         false,
         &bases_buf,
@@ -260,19 +269,33 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
         bd.num_windows,
     );
 
+    #[cfg(feature = "timing")]
+    let t_dispatch = std::time::Instant::now();
+
     let result_bytes = gpu
         .read_buffer(&sums_buf, (bd.num_windows * 144) as u64)
         .await?;
-    let mut result = G::g1_identity();
-    for (i, chunk) in result_bytes.chunks_exact(144).enumerate().rev() {
-        if i != (bd.num_windows - 1) as usize {
-            for _ in 0..G::bucket_width() {
-                result = G::add_g1_proj(&result, &result);
-            }
-        }
-        let w_sum = G::deserialize_g1(chunk)?;
-        result = G::add_g1_proj(&result, &w_sum);
+
+    #[cfg(feature = "timing")]
+    let t_read = std::time::Instant::now();
+
+    let result = fold_window_sums_g1::<G>(&result_bytes, bd.num_windows, G::bucket_width())?;
+
+    #[cfg(feature = "timing")]
+    {
+        let t_fold = std::time::Instant::now();
+        eprintln!(
+            "[timing] msm_g1 n={}: bucket_sort={:?} upload={:?} dispatch+gpu={:?} readback={:?} fold={:?} total={:?}",
+            scalars.len(),
+            t_bucket.duration_since(t_start),
+            t_upload.duration_since(t_bucket),
+            t_dispatch.duration_since(t_upload),
+            t_read.duration_since(t_dispatch),
+            t_fold.duration_since(t_read),
+            t_fold.duration_since(t_start),
+        );
     }
+
     Ok(result)
 }
 
@@ -714,7 +737,13 @@ where
         c_values[i] = eval_lc(&cs.c_lcs[i], &cs.inputs, &cs.aux);
     }
 
+    #[cfg(feature = "timing")]
+    let t_h_start = std::time::Instant::now();
+
     let h_coeffs = compute_h_poly(gpu, &a_values, &b_values, &c_values).await?;
+
+    #[cfg(feature = "timing")]
+    eprintln!("[timing] h_poly: {:?}", t_h_start.elapsed());
 
     let mut a_assignment = cs.inputs.clone();
     for (i, v) in cs.aux.iter().enumerate() {
@@ -724,6 +753,9 @@ where
     }
     let b_assignment =
         dense_assignment_from_masks(&cs.inputs, &cs.aux, &cs.b_input_density, &cs.b_aux_density);
+
+    #[cfg(feature = "timing")]
+    let t_msm_start = std::time::Instant::now();
 
     let (a_msm, b_g1_msm, l_msm, h_msm, b_g2_msm) = gpu_msm_batch_bytes::<G>(
         gpu,
@@ -739,6 +771,9 @@ where
         &b_assignment,
     )
     .await?;
+
+    #[cfg(feature = "timing")]
+    eprintln!("[timing] msm_batch: {:?}", t_msm_start.elapsed());
 
     let mut proof_a = G::add_g1_proj(&G::affine_to_proj_g1(&pk.vk.alpha_g1), &a_msm);
     proof_a = G::add_g1_proj(&proof_a, &G::mul_g1_scalar(&pk.vk.delta_g1, &r));

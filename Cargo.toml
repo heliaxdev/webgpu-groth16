@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 default = ["bellman-provider-nam-bellperson"]
 bellman-provider-bellman = ["dep:bellman"]
 bellman-provider-nam-bellperson = ["dep:nam-bellperson"]
+timing = []
 
 [dependencies]
 anyhow = "1.0.102"

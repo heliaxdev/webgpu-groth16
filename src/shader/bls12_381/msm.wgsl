@@ -246,26 +246,47 @@ fn scalar_mul_g1(p: PointG1, k: u32) -> PointG1 {
 @group(0) @binding(3) var<storage, read> window_counts: array<u32>;
 @group(0) @binding(4) var<storage, read_write> window_sums_g1: array<PointG1>;
 
-@compute @workgroup_size(1)
-fn subsum_accumulation_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let window_id = global_id.x;
+const SUBSUM_WG_SIZE: u32 = 64u;
+var<workgroup> shared_g1: array<PointG1, 64>;
+
+@compute @workgroup_size(64)
+fn subsum_accumulation_g1(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) wg_id: vec3<u32>,
+) {
+    let window_id = wg_id.x;
+    let tid = local_id.x;
     if window_id >= arrayLength(&window_starts) { return; }
 
     let start = window_starts[window_id];
     let count = window_counts[window_id];
-    if count == 0u {
-        window_sums_g1[window_id] = G1_INFINITY;
-        return;
-    }
 
-    // Buckets are already weighted by their value (v * B[v]) from the aggregate pass.
-    // Just sum the pre-weighted results for this window.
-    var S = G1_INFINITY;
-    for (var i = 0u; i < count; i = i + 1u) {
-        S = add_g1_safe(S, aggregated_buckets_in_g1[start + i]);
+    // Phase 1: Each thread sums its strided subset of pre-weighted buckets.
+    var local_sum = G1_INFINITY;
+    var i = tid;
+    for (var iter = 0u; iter < 1024u; iter = iter + 1u) {
+        if i >= count { break; }
+        local_sum = add_g1_safe(local_sum, aggregated_buckets_in_g1[start + i]);
+        i = i + SUBSUM_WG_SIZE;
     }
+    shared_g1[tid] = local_sum;
+    workgroupBarrier();
 
-    window_sums_g1[window_id] = store_g1(S);
+    // Phase 2: Tree reduction in shared memory.
+    if tid < 32u { shared_g1[tid] = add_g1_safe(shared_g1[tid], shared_g1[tid + 32u]); }
+    workgroupBarrier();
+    if tid < 16u { shared_g1[tid] = add_g1_safe(shared_g1[tid], shared_g1[tid + 16u]); }
+    workgroupBarrier();
+    if tid < 8u { shared_g1[tid] = add_g1_safe(shared_g1[tid], shared_g1[tid + 8u]); }
+    workgroupBarrier();
+    if tid < 4u { shared_g1[tid] = add_g1_safe(shared_g1[tid], shared_g1[tid + 4u]); }
+    workgroupBarrier();
+    if tid < 2u { shared_g1[tid] = add_g1_safe(shared_g1[tid], shared_g1[tid + 2u]); }
+    workgroupBarrier();
+    if tid == 0u {
+        let result = add_g1_safe(shared_g1[0], shared_g1[1]);
+        window_sums_g1[window_id] = store_g1(result);
+    }
 }
 
 // ==== G2 Pipelines ====
