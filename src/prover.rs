@@ -398,18 +398,23 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
     b2_bases: &[G::G2Affine],
     b2_scalars: &[G::Scalar],
 ) -> Result<(G::G1, G::G1, G::G1, G::G1, G::G2)> {
+    let a_bd = compute_bucket_sorting::<G>(a_scalars);
+    let b_bd = compute_bucket_sorting::<G>(b_scalars);
+    let l_bd = compute_bucket_sorting::<G>(l_scalars);
+    let h_bd = compute_bucket_sorting::<G>(h_scalars);
+    let b2_bd = compute_bucket_sorting_with_width::<G>(b2_scalars, G::g2_bucket_width());
     gpu_msm_batch_bytes::<G>(
         gpu,
         &serialize_g1_bases::<G>(a_bases),
-        a_scalars,
+        a_bd,
         &serialize_g1_bases::<G>(b1_bases),
-        b_scalars,
+        b_bd,
         &serialize_g1_bases::<G>(l_bases),
-        l_scalars,
+        l_bd,
         &serialize_g1_bases::<G>(h_bases),
-        h_scalars,
+        h_bd,
         &serialize_g2_bases::<G>(b2_bases),
-        b2_scalars,
+        b2_bd,
     )
     .await
 }
@@ -418,15 +423,15 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
 async fn gpu_msm_batch_bytes<G: GpuCurve>(
     gpu: &GpuContext<G>,
     a_bytes: &[u8],
-    a_scalars: &[G::Scalar],
+    a_bd: BucketData,
     b1_bytes: &[u8],
-    b_scalars: &[G::Scalar],
+    b1_bd: BucketData,
     l_bytes: &[u8],
-    l_scalars: &[G::Scalar],
+    l_bd: BucketData,
     h_bytes: &[u8],
-    h_scalars: &[G::Scalar],
+    h_bd: BucketData,
     b2_bytes: &[u8],
-    b2_scalars: &[G::Scalar],
+    b2_bd: BucketData,
 ) -> Result<(G::G1, G::G1, G::G1, G::G1, G::G2)> {
     struct G1Pending {
         sums_buf: wgpu::Buffer,
@@ -438,8 +443,7 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
     }
 
     let enqueue_g1 =
-        |name: &str, bases_bytes: &[u8], scalars: &[G::Scalar]| -> Result<Option<G1Pending>> {
-            let bd: BucketData = compute_bucket_sorting::<G>(scalars);
+        |name: &str, bases_bytes: &[u8], bd: BucketData| -> Result<Option<G1Pending>> {
             if bd.num_active_buckets == 0 {
                 return Ok(None);
             }
@@ -495,8 +499,7 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
             }))
         };
 
-    let enqueue_g2 = |bases_bytes: &[u8], scalars: &[G::Scalar]| -> Result<Option<G2Pending>> {
-        let bd: BucketData = compute_bucket_sorting_with_width::<G>(scalars, G::g2_bucket_width());
+    let enqueue_g2 = |bases_bytes: &[u8], bd: BucketData| -> Result<Option<G2Pending>> {
         if bd.num_active_buckets == 0 {
             return Ok(None);
         }
@@ -538,11 +541,11 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
         }))
     };
 
-    let a_job = enqueue_g1("a", a_bytes, a_scalars)?;
-    let b1_job = enqueue_g1("b1", b1_bytes, b_scalars)?;
-    let l_job = enqueue_g1("l", l_bytes, l_scalars)?;
-    let h_job = enqueue_g1("h", h_bytes, h_scalars)?;
-    let b2_job = enqueue_g2(b2_bytes, b2_scalars)?;
+    let a_job = enqueue_g1("a", a_bytes, a_bd)?;
+    let b1_job = enqueue_g1("b1", b1_bytes, b1_bd)?;
+    let l_job = enqueue_g1("l", l_bytes, l_bd)?;
+    let h_job = enqueue_g1("h", h_bytes, h_bd)?;
+    let b2_job = enqueue_g2(b2_bytes, b2_bd)?;
 
     let mut read_targets: Vec<(&wgpu::Buffer, wgpu::BufferAddress)> = Vec::new();
     if let Some(job) = &a_job {
@@ -606,12 +609,19 @@ fn eval_lc<S: PrimeField>(lc: &[(bellman::Variable, S)], inputs: &[S], aux: &[S]
     res
 }
 
-pub async fn compute_h_poly<G: GpuCurve>(
+struct HPolyPending {
+    h_buf: wgpu::Buffer,
+    n: usize,
+}
+
+/// Submit the H polynomial pipeline to the GPU (non-blocking).
+/// Returns a pending handle that can be read later with `read_h_poly_result`.
+fn submit_h_poly<G: GpuCurve>(
     gpu: &GpuContext<G>,
     a_values: &[G::Scalar],
     b_values: &[G::Scalar],
     c_values: &[G::Scalar],
-) -> Result<Vec<G::Scalar>> {
+) -> Result<HPolyPending> {
     let n = a_values.len().next_power_of_two();
 
     // 1. CPU PRE-COMPUTES CONSTANT FACTORS
@@ -677,17 +687,34 @@ pub async fn compute_h_poly<G: GpuCurve>(
         n as u32,
     );
 
-    // 5. FINALLY PULL THE RESULT OFF THE GPU
+    Ok(HPolyPending { h_buf, n })
+}
+
+/// Read the result of a previously submitted H polynomial pipeline.
+async fn read_h_poly_result<G: GpuCurve>(
+    gpu: &GpuContext<G>,
+    pending: HPolyPending,
+) -> Result<Vec<G::Scalar>> {
     let h_bytes = gpu
-        .read_buffer(&h_buf, (n * 32) as wgpu::BufferAddress)
+        .read_buffer(&pending.h_buf, (pending.n * 32) as wgpu::BufferAddress)
         .await?;
 
-    let mut h_poly = vec![G::Scalar::ZERO; n];
+    let mut h_poly = vec![G::Scalar::ZERO; pending.n];
     for (i, chunk) in h_bytes.chunks_exact(32).enumerate() {
         h_poly[i] = G::deserialize_scalar(chunk)?;
     }
 
     Ok(h_poly)
+}
+
+pub async fn compute_h_poly<G: GpuCurve>(
+    gpu: &GpuContext<G>,
+    a_values: &[G::Scalar],
+    b_values: &[G::Scalar],
+    c_values: &[G::Scalar],
+) -> Result<Vec<G::Scalar>> {
+    let pending = submit_h_poly::<G>(gpu, a_values, b_values, c_values)?;
+    read_h_poly_result::<G>(gpu, pending).await
 }
 
 async fn create_proof_with_fixed_randomness<E, G, C>(
@@ -737,14 +764,8 @@ where
         c_values[i] = eval_lc(&cs.c_lcs[i], &cs.inputs, &cs.aux);
     }
 
-    #[cfg(feature = "timing")]
-    let t_h_start = std::time::Instant::now();
-
-    let h_coeffs = compute_h_poly(gpu, &a_values, &b_values, &c_values).await?;
-
-    #[cfg(feature = "timing")]
-    eprintln!("[timing] h_poly: {:?}", t_h_start.elapsed());
-
+    // Build assignments before H poly so we can pre-compute bucket data
+    // while the GPU processes the H polynomial pipeline.
     let mut a_assignment = cs.inputs.clone();
     for (i, v) in cs.aux.iter().enumerate() {
         if cs.a_aux_density[i] {
@@ -755,20 +776,41 @@ where
         dense_assignment_from_masks(&cs.inputs, &cs.aux, &cs.b_input_density, &cs.b_aux_density);
 
     #[cfg(feature = "timing")]
+    let t_h_start = std::time::Instant::now();
+
+    // Submit H polynomial to GPU (non-blocking — GPU processes asynchronously)
+    let h_pending = submit_h_poly::<G>(gpu, &a_values, &b_values, &c_values)?;
+
+    // Pre-compute bucket data for non-H MSMs while GPU computes H
+    let a_bd = compute_bucket_sorting::<G>(&a_assignment);
+    let b1_bd = compute_bucket_sorting::<G>(&b_assignment);
+    let l_bd = compute_bucket_sorting::<G>(&cs.aux);
+    let b2_bd = compute_bucket_sorting_with_width::<G>(&b_assignment, G::g2_bucket_width());
+
+    // Await H result (GPU likely already done by now)
+    let h_coeffs = read_h_poly_result::<G>(gpu, h_pending).await?;
+
+    #[cfg(feature = "timing")]
+    eprintln!("[timing] h_poly: {:?}", t_h_start.elapsed());
+
+    // H bucket data depends on h_coeffs
+    let h_bd = compute_bucket_sorting::<G>(&h_coeffs[..pk.h.len()]);
+
+    #[cfg(feature = "timing")]
     let t_msm_start = std::time::Instant::now();
 
     let (a_msm, b_g1_msm, l_msm, h_msm, b_g2_msm) = gpu_msm_batch_bytes::<G>(
         gpu,
         &ppk.a_bytes,
-        &a_assignment,
+        a_bd,
         &ppk.b_g1_bytes,
-        &b_assignment,
+        b1_bd,
         &ppk.l_bytes,
-        &cs.aux,
+        l_bd,
         &ppk.h_bytes,
-        &h_coeffs[..pk.h.len()],
+        h_bd,
         &ppk.b_g2_bytes,
-        &b_assignment,
+        b2_bd,
     )
     .await?;
 
