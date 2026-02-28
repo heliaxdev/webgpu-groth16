@@ -225,12 +225,15 @@ fn aggregate_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     aggregated_buckets_g1[bucket_idx] = scalar_mul_g1(sum, bucket_values_agg[bucket_idx]);
 }
 
-// Computes k * P using double-and-add (k is at most 2^15 - 1 for bucket gaps)
+// Computes k * P using double-and-add (k is at most 2^15 - 1 for bucket values)
 fn scalar_mul_g1(p: PointG1, k: u32) -> PointG1 {
+    if k == 0u { return G1_INFINITY; }
+    if k == 1u { return p; }
     var result = G1_INFINITY;
     var base = p;
     var scalar = k;
     for (var bit = 0u; bit < 16u; bit = bit + 1u) {
+        if scalar == 0u { break; }
         if (scalar & 1u) != 0u {
             result = add_g1_safe(result, base);
         }
