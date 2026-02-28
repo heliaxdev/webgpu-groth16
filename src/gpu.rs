@@ -27,6 +27,7 @@ pub struct GpuContext<C> {
     pub msm_sum_g1_pipeline: wgpu::ComputePipeline,
     pub msm_agg_g2_pipeline: wgpu::ComputePipeline,
     pub msm_sum_g2_pipeline: wgpu::ComputePipeline,
+    pub msm_to_mont_g1_pipeline: wgpu::ComputePipeline,
 
     // Bind Group Layouts
     pub ntt_bind_group_layout: wgpu::BindGroupLayout,
@@ -521,6 +522,22 @@ impl<C: GpuCurve> GpuContext<C> {
                 cache: None,
             });
 
+        let msm_to_mont_g1_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("MSM To Montgomery G1"),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: None,
+                        bind_group_layouts: &[&montgomery_bind_group_layout],
+                        immediate_size: 0,
+                    }),
+                ),
+                module: &msm_module,
+                entry_point: Some("to_montgomery_bases_g1"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
         Ok(Self {
             device,
             queue,
@@ -535,6 +552,7 @@ impl<C: GpuCurve> GpuContext<C> {
             msm_sum_g1_pipeline,
             msm_agg_g2_pipeline,
             msm_sum_g2_pipeline,
+            msm_to_mont_g1_pipeline,
             ntt_bind_group_layout,
             ntt_params_bind_group_layout,
             coset_shift_bind_group_layout,
@@ -1122,6 +1140,27 @@ impl<C: GpuCurve> GpuContext<C> {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("MSM Encoder"),
             });
+
+        // Pre-pass: convert G1 bases to Montgomery form in-place so aggregate
+        // can skip per-point to_montgomery_u384 calls (saves 3 muls per load).
+        if !is_g2 {
+            let mont_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("MSM Bases Mont Bind Group"),
+                layout: &self.montgomery_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: bases_buf.as_entire_binding(),
+                }],
+            });
+            let num_bases = (bases_buf.size() / 144) as u32;
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("MSM To Montgomery"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.msm_to_mont_g1_pipeline);
+            cpass.set_bind_group(0, &mont_bind_group, &[]);
+            cpass.dispatch_workgroups(num_bases.div_ceil(64), 1, 1);
+        }
 
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

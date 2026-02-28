@@ -166,6 +166,31 @@ fn store_g2(p: PointG2) -> PointG2 {
 }
 
 // ============================================================================
+// BASE POINT PRE-CONVERSION (standard → Montgomery form)
+// ============================================================================
+
+@group(0) @binding(0) var<storage, read_write> bases_preconv: array<PointG1>;
+
+@compute @workgroup_size(64)
+fn to_montgomery_bases_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    if i >= arrayLength(&bases_preconv) { return; }
+    let p = bases_preconv[i];
+    if p.x.limbs[0] == 0u && p.y.limbs[0] == 0u && p.z.limbs[0] == 0u { return; }
+    bases_preconv[i] = PointG1(
+        to_montgomery_u384(p.x),
+        to_montgomery_u384(p.y),
+        to_montgomery_u384(p.z)
+    );
+}
+
+// Load a base point that is already in Montgomery form (skip conversion).
+fn load_g1_mont(p: PointG1) -> PointG1 {
+    if p.x.limbs[0] == 0u && p.y.limbs[0] == 0u && p.z.limbs[0] == 0u { return G1_INFINITY; }
+    return p;
+}
+
+// ============================================================================
 // PIPPENGER ALGORITHM PIPELINES (G1 and G2)
 // ============================================================================
 
@@ -185,7 +210,7 @@ fn aggregate_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let size = bucket_sizes[bucket_idx];
     var sum = G1_INFINITY;
     for (var i = 0u; i < size; i = i + 1u) {
-        sum = add_g1_safe(sum, load_g1(bases_g1[base_indices[start + i]]));
+        sum = add_g1_safe(sum, load_g1_mont(bases_g1[base_indices[start + i]]));
     }
     // Weight the bucket sum by its bucket value: v * B[v]
     // This moves O(log(v)) work per bucket into the parallel aggregate pass,
