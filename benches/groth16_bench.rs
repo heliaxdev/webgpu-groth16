@@ -84,7 +84,7 @@ fn bench_full_proof(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("proof");
     group.sample_size(10);
-    group.measurement_time(Duration::from_secs(60));
+    group.measurement_time(Duration::from_secs(30));
     group.bench_function("full_proof", |b| {
         b.iter(|| {
             let circuit = DummyCircuit::<Scalar> {
@@ -100,7 +100,7 @@ fn bench_full_proof(c: &mut Criterion) {
             ))
             .expect("proof failed");
         });
-    }).sample_size(10);
+    });
     group.finish();
 }
 
@@ -125,12 +125,12 @@ fn bench_h_poly(c: &mut Criterion) {
             rt.block_on(prover::compute_h_poly::<Bls12>(&bs.gpu, &a, &b, &cv))
                 .expect("h_poly failed");
         });
-    }).sample_size(10);
+    });
     group.finish();
 }
 
 // ---------------------------------------------------------------------------
-// Benchmark: single MSM G1 at various sizes
+// Benchmark: single MSM G1 at n=100
 // ---------------------------------------------------------------------------
 fn bench_msm_g1(c: &mut Criterion) {
     let bs = setup();
@@ -139,20 +139,19 @@ fn bench_msm_g1(c: &mut Criterion) {
     let mut group = c.benchmark_group("msm_g1");
     group.sample_size(10);
 
-    for &size in &[10, 100, 1_000] {
-        let mut rng = OsRng;
-        let bases: Vec<<Bls12 as GpuCurve>::G1Affine> = (0..size)
-            .map(|_| <Bls12 as GpuCurve>::G1::random(&mut rng).to_affine())
-            .collect();
-        let scalars: Vec<Scalar> = (0..size).map(|_| Scalar::random(&mut rng)).collect();
+    let size = 100;
+    let mut rng = OsRng;
+    let bases: Vec<<Bls12 as GpuCurve>::G1Affine> = (0..size)
+        .map(|_| <Bls12 as GpuCurve>::G1::random(&mut rng).to_affine())
+        .collect();
+    let scalars: Vec<Scalar> = (0..size).map(|_| Scalar::random(&mut rng)).collect();
 
-        group.bench_function(format!("n={size}"), |b| {
-            b.iter(|| {
-                rt.block_on(prover::gpu_msm_g1::<Bls12>(&bs.gpu, &bases, &scalars))
-                    .expect("msm failed");
-            });
-        }).sample_size(10);
-    }
+    group.bench_function("n=100", |b| {
+        b.iter(|| {
+            rt.block_on(prover::gpu_msm_g1::<Bls12>(&bs.gpu, &bases, &scalars))
+                .expect("msm failed");
+        });
+    });
     group.finish();
 }
 
@@ -210,7 +209,7 @@ fn bench_msm_batch(c: &mut Criterion) {
             ))
             .expect("msm batch failed");
         });
-    }).sample_size(10);
+    });
     group.finish();
 }
 
@@ -220,7 +219,7 @@ fn bench_msm_batch(c: &mut Criterion) {
 fn bench_bucket_sorting(c: &mut Criterion) {
     let mut group = c.benchmark_group("bucket_sorting");
 
-    for &size in &[100, 1_000, 10_000] {
+    for &size in &[1_000, 10_000] {
         let mut rng = OsRng;
         let scalars: Vec<Scalar> = (0..size).map(|_| Scalar::random(&mut rng)).collect();
 
@@ -228,7 +227,7 @@ fn bench_bucket_sorting(c: &mut Criterion) {
             b.iter(|| {
                 compute_bucket_sorting::<Bls12>(&scalars);
             });
-        }).sample_size(10);
+        });
     }
     group.finish();
 }

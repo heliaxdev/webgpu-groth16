@@ -189,6 +189,21 @@ fn aggregate_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     aggregated_buckets_g1[bucket_idx] = sum;
 }
 
+// Computes k * P using double-and-add (k is at most 2^15 - 1 for bucket gaps)
+fn scalar_mul_g1(p: PointG1, k: u32) -> PointG1 {
+    var result = G1_INFINITY;
+    var base = p;
+    var scalar = k;
+    for (var bit = 0u; bit < 16u; bit = bit + 1u) {
+        if (scalar & 1u) != 0u {
+            result = add_g1_safe(result, base);
+        }
+        base = double_g1(base);
+        scalar = scalar >> 1u;
+    }
+    return result;
+}
+
 @group(0) @binding(0) var<storage, read> aggregated_buckets_in_g1: array<PointG1>;
 @group(0) @binding(1) var<storage, read> bucket_values: array<u32>;
 @group(0) @binding(2) var<storage, read> window_starts: array<u32>;
@@ -209,21 +224,28 @@ fn subsum_accumulation_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var S = G1_INFINITY;
     var running_sum = G1_INFINITY;
-    var bucket_ptr = start + count - 1u;
-    var next_active_b = bucket_values[bucket_ptr];
 
-    for (var b = next_active_b; b > 0u; b = b - 1u) {
-        if b == next_active_b {
-            running_sum = add_g1_safe(running_sum, aggregated_buckets_in_g1[bucket_ptr]);
-            if bucket_ptr > start {
-                bucket_ptr = bucket_ptr - 1u;
-                next_active_b = bucket_values[bucket_ptr];
-            } else {
-                next_active_b = 0u;
-            }
+    // Process active buckets from highest to lowest value.
+    // Instead of iterating every bucket value one-by-one (O(2^c) per window),
+    // skip gaps between active buckets using scalar multiplication (O(log(gap))).
+    for (var i = 0u; i < count; i = i + 1u) {
+        let idx = start + count - 1u - i;
+        let bucket_val = bucket_values[idx];
+
+        // Add this bucket's aggregated sum to running_sum
+        running_sum = add_g1_safe(running_sum, aggregated_buckets_in_g1[idx]);
+
+        // Compute gap to next lower active bucket (or 0 if none)
+        var next_val = 0u;
+        if i + 1u < count {
+            next_val = bucket_values[start + count - 2u - i];
         }
-        S = add_g1_safe(S, running_sum);
+        let gap = bucket_val - next_val;
+
+        // S += gap * running_sum via O(log(gap)) double-and-add
+        S = add_g1_safe(S, scalar_mul_g1(running_sum, gap));
     }
+
     window_sums_g1[window_id] = store_g1(S);
 }
 
@@ -269,6 +291,10 @@ fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var S = G2_INFINITY;
     var running_sum = G2_INFINITY;
+
+    // G2 keeps the original O(2^c) loop — the Metal shader compiler
+    // miscompiles double_g2 in the double-and-add context due to register pressure.
+    // G2 is only 1 of 5 MSMs per proof, so impact is limited.
     var bucket_ptr = start + count - 1u;
     var next_active_b = bucket_values_g2[bucket_ptr];
 
@@ -284,6 +310,7 @@ fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
         S = add_g2_safe(S, running_sum);
     }
+
     window_sums_g2[window_id] = store_g2(S);
 }
 
