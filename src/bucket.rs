@@ -21,9 +21,11 @@ pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
     scalars: &[G::Scalar],
     c: usize,
 ) -> BucketData {
-    let c = c;
     let scalar_bits = <G::Scalar as PrimeField>::NUM_BITS as usize;
     let num_windows = scalar_bits.div_ceil(c);
+
+    // Pre-compute all scalar window decompositions once (avoids n × num_windows allocations).
+    let all_windows: Vec<Vec<u32>> = scalars.iter().map(|s| G::scalar_to_windows(s, c)).collect();
 
     let mut base_indices = Vec::new();
     let mut bucket_pointers = Vec::new();
@@ -33,11 +35,9 @@ pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
     let mut window_counts = Vec::new();
 
     for w in 0..num_windows {
-        // Fast 2D array for sparse bucketing. c=15 means 32768 max value.
         let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); 1 << c];
 
-        for (i, scalar) in scalars.iter().enumerate() {
-            let windows = G::scalar_to_windows(scalar, c);
+        for (i, windows) in all_windows.iter().enumerate() {
             if w < windows.len() {
                 let val = windows[w] as usize;
                 if val != 0 {
