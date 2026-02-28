@@ -169,7 +169,7 @@ fn dense_assignment_from_masks<S: PrimeField>(
     out
 }
 
-async fn gpu_msm_g1<G: GpuCurve>(
+pub async fn gpu_msm_g1<G: GpuCurve>(
     gpu: &GpuContext<G>,
     bases: &[G::G1Affine],
     scalars: &[G::Scalar],
@@ -316,7 +316,7 @@ fn fold_window_sums_g2<G: GpuCurve>(result_bytes: &[u8], num_windows: u32) -> Re
 }
 
 #[allow(clippy::type_complexity)]
-async fn gpu_msm_batch<G: GpuCurve>(
+pub async fn gpu_msm_batch<G: GpuCurve>(
     gpu: &GpuContext<G>,
     a_bases: &[G::G1Affine],
     a_scalars: &[G::Scalar],
@@ -517,7 +517,7 @@ fn eval_lc<S: PrimeField>(lc: &[(bellman::Variable, S)], inputs: &[S], aux: &[S]
     res
 }
 
-async fn compute_h_poly<G: GpuCurve>(
+pub async fn compute_h_poly<G: GpuCurve>(
     gpu: &GpuContext<G>,
     a_values: &[G::Scalar],
     b_values: &[G::Scalar],
