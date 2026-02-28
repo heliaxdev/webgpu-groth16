@@ -1,5 +1,3 @@
-use ff::PrimeField;
-
 use crate::glv;
 use crate::gpu::curve::GpuCurve;
 
@@ -14,6 +12,10 @@ pub struct BucketData {
     pub num_active_buckets: u32,
 }
 
+/// Sign bit used to encode point negation in base_indices entries.
+/// When this bit is set, the GPU negates the point's y-coordinate before adding.
+const SIGN_BIT: u32 = 1 << 31;
+
 pub fn compute_bucket_sorting<G: GpuCurve>(scalars: &[G::Scalar]) -> BucketData {
     compute_bucket_sorting_with_width::<G>(scalars, G::bucket_width())
 }
@@ -22,11 +24,19 @@ pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
     scalars: &[G::Scalar],
     c: usize,
 ) -> BucketData {
-    let scalar_bits = <G::Scalar as PrimeField>::NUM_BITS as usize;
-    let num_windows = scalar_bits.div_ceil(c);
+    // Pre-compute all signed scalar window decompositions.
+    // Each window is (absolute_value, is_negative).
+    let all_windows: Vec<Vec<(u32, bool)>> = scalars
+        .iter()
+        .map(|s| G::scalar_to_signed_windows(s, c))
+        .collect();
 
-    // Pre-compute all scalar window decompositions once (avoids n × num_windows allocations).
-    let all_windows: Vec<Vec<u32>> = scalars.iter().map(|s| G::scalar_to_windows(s, c)).collect();
+    // The number of windows is determined by the longest decomposition
+    // (may be num_windows+1 if final carry produced an extra window).
+    let num_windows = all_windows.iter().map(|w| w.len()).max().unwrap_or(0);
+
+    // Bucket values now range 1..2^(c-1) (halved from unsigned).
+    let num_buckets = (1usize << (c - 1)) + 1;
 
     let mut base_indices = Vec::new();
     let mut bucket_pointers = Vec::new();
@@ -36,13 +46,15 @@ pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
     let mut window_counts = Vec::new();
 
     for w in 0..num_windows {
-        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); 1 << c];
+        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); num_buckets];
 
         for (i, windows) in all_windows.iter().enumerate() {
             if w < windows.len() {
-                let val = windows[w] as usize;
-                if val != 0 {
-                    buckets[val].push(i as u32);
+                let (abs, neg) = windows[w];
+                if abs != 0 {
+                    // Encode sign in MSB of the base index
+                    let entry = if neg { i as u32 | SIGN_BIT } else { i as u32 };
+                    buckets[abs as usize].push(entry);
                 }
             }
         }

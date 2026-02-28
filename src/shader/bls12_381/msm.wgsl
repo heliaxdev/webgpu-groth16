@@ -238,6 +238,11 @@ fn load_g2_mont(p: PointG2) -> PointG2 {
 @group(0) @binding(4) var<storage, read_write> aggregated_buckets_g1: array<PointG1>;
 @group(0) @binding(5) var<storage, read> bucket_values_agg: array<u32>;
 
+// Negate a G1 point in Montgomery form: (x, y, z) → (x, q−y, z).
+fn negate_g1(p: PointG1) -> PointG1 {
+    return PointG1(p.x, sub_u384(U384(Q_MODULUS), p.y), p.z);
+}
+
 @compute @workgroup_size(64)
 fn aggregate_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let bucket_idx = global_id.x;
@@ -247,7 +252,14 @@ fn aggregate_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let size = bucket_sizes[bucket_idx];
     var sum = G1_INFINITY;
     for (var i = 0u; i < size; i = i + 1u) {
-        sum = add_g1_mixed_safe(sum, load_g1_mont(bases_g1[base_indices[start + i]]));
+        let raw = base_indices[start + i];
+        let point_idx = raw & 0x7FFFFFFFu;
+        let is_neg = (raw >> 31u) != 0u;
+        var base = load_g1_mont(bases_g1[point_idx]);
+        if is_neg {
+            base = negate_g1(base);
+        }
+        sum = add_g1_mixed_safe(sum, base);
     }
     // Weight the bucket sum by its bucket value: v * B[v]
     // This moves O(log(v)) work per bucket into the parallel aggregate pass,
@@ -255,14 +267,16 @@ fn aggregate_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     aggregated_buckets_g1[bucket_idx] = scalar_mul_g1(sum, bucket_values_agg[bucket_idx]);
 }
 
-// Computes k * P using double-and-add (k is at most 2^15 - 1 for bucket values)
+// Computes k * P using double-and-add.
+// With signed bucket index, k is at most 2^(c-1) where c is the bucket width.
+// For c=13 this is 4096, needing at most 13 bits.
 fn scalar_mul_g1(p: PointG1, k: u32) -> PointG1 {
     if k == 0u { return G1_INFINITY; }
     if k == 1u { return p; }
     var result = G1_INFINITY;
     var base = p;
     var scalar = k;
-    for (var bit = 0u; bit < 16u; bit = bit + 1u) {
+    for (var bit = 0u; bit < 14u; bit = bit + 1u) {
         if scalar == 0u { break; }
         if (scalar & 1u) != 0u {
             result = add_g1_safe(result, base);
@@ -441,6 +455,15 @@ fn subsum_phase2_g1(
 @group(0) @binding(4) var<storage, read_write> aggregated_buckets_g2: array<PointG2>;
 @group(0) @binding(5) var<storage, read> bucket_values_agg_g2: array<u32>;
 
+// Negate a G2 point in Montgomery form: (x, y, z) → (x, −y, z) over Fq2.
+fn negate_g2(p: PointG2) -> PointG2 {
+    return PointG2(
+        p.x,
+        Fq2(sub_u384(U384(Q_MODULUS), p.y.c0), sub_u384(U384(Q_MODULUS), p.y.c1)),
+        p.z
+    );
+}
+
 @compute @workgroup_size(64)
 fn aggregate_buckets_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let bucket_idx = global_id.x;
@@ -450,7 +473,14 @@ fn aggregate_buckets_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let size = bucket_sizes_g2[bucket_idx];
     var sum = G2_INFINITY;
     for (var i = 0u; i < size; i = i + 1u) {
-        sum = add_g2_mixed_safe(sum, load_g2_mont(bases_g2[base_indices_g2[start + i]]));
+        let raw = base_indices_g2[start + i];
+        let point_idx = raw & 0x7FFFFFFFu;
+        let is_neg = (raw >> 31u) != 0u;
+        var base = load_g2_mont(bases_g2[point_idx]);
+        if is_neg {
+            base = negate_g2(base);
+        }
+        sum = add_g2_mixed_safe(sum, base);
     }
     aggregated_buckets_g2[bucket_idx] = sum;
 }

@@ -28,6 +28,37 @@ pub trait GpuCurve: 'static {
     // Scalar decomposition for bucket sorting
     fn scalar_to_windows(s: &Self::Scalar, c: usize) -> Vec<u32>;
 
+    /// Signed-digit scalar decomposition: each window value is in `[-(2^(c-1)), 2^(c-1)]`.
+    /// Returns `(absolute_value, is_negative)` pairs.  Bucket values are halved compared
+    /// to unsigned windows, and points with negative windows are negated on the GPU.
+    fn scalar_to_signed_windows(s: &Self::Scalar, c: usize) -> Vec<(u32, bool)> {
+        let unsigned = Self::scalar_to_windows(s, c);
+        let half = 1u64 << (c - 1);
+        let full = 1u64 << c;
+        let mut result = Vec::with_capacity(unsigned.len() + 1);
+        let mut carry: u64 = 0;
+
+        for &w in &unsigned {
+            let val = w as u64 + carry;
+            carry = 0;
+            if val >= half {
+                // Negative window: value = -(2^c - val), carry +1 to next window
+                let abs = full - val;
+                result.push((abs as u32, true));
+                carry = 1;
+            } else {
+                result.push((val as u32, false));
+            }
+        }
+
+        // Handle final carry (extra window needed)
+        if carry > 0 {
+            result.push((1, false));
+        }
+
+        result
+    }
+
     // Optimal bucket width for MSM (c such that 2^c buckets)
     fn bucket_width() -> usize;
 
@@ -424,6 +455,89 @@ mod tests {
             let got = <Bls12 as GpuCurve>::scalar_to_windows(&s, c);
             let exp = expected_windows(&s, c);
             assert_eq!(got, exp);
+        }
+    }
+
+    /// Verify that signed windows reconstruct the original scalar.
+    #[test]
+    fn signed_window_decomposition_roundtrip() {
+        use ff::Field;
+        use rand_core::OsRng;
+
+        let c = <Bls12 as GpuCurve>::bucket_width();
+        let samples = [
+            Scalar::from(0u64),
+            Scalar::from(1u64),
+            Scalar::from(2u64),
+            Scalar::from(0x1234_5678_9abc_def0u64),
+            -Scalar::from(5u64),
+            Scalar::ROOT_OF_UNITY,
+            Scalar::random(OsRng),
+            Scalar::random(OsRng),
+            Scalar::random(OsRng),
+        ];
+
+        let base = Scalar::from(1u64 << c);
+        let half = 1u32 << (c - 1);
+
+        for s in samples {
+            let signed = <Bls12 as GpuCurve>::scalar_to_signed_windows(&s, c);
+
+            // Reconstruct scalar from signed windows: ∑ (±abs) * 2^(i*c)
+            let mut reconstructed = Scalar::ZERO;
+            let mut power = Scalar::ONE;
+            for &(abs, neg) in &signed {
+                let term = Scalar::from(abs as u64) * power;
+                if neg {
+                    reconstructed -= term;
+                } else {
+                    reconstructed += term;
+                }
+                power *= base;
+            }
+
+            assert_eq!(
+                reconstructed, s,
+                "signed windows must reconstruct original scalar"
+            );
+
+            // Verify all absolute values are in [0, 2^(c-1)]
+            for &(abs, _neg) in &signed {
+                assert!(abs <= half, "abs value {} exceeds 2^(c-1) = {}", abs, half);
+            }
+        }
+    }
+
+    /// Verify signed windows for G2 bucket width.
+    #[test]
+    fn signed_window_decomposition_g2_roundtrip() {
+        use ff::Field;
+        use rand_core::OsRng;
+
+        let c = <Bls12 as GpuCurve>::g2_bucket_width();
+        let base = Scalar::from(1u64 << c);
+        let half = 1u32 << (c - 1);
+
+        for _ in 0..20 {
+            let s = Scalar::random(OsRng);
+            let signed = <Bls12 as GpuCurve>::scalar_to_signed_windows(&s, c);
+
+            let mut reconstructed = Scalar::ZERO;
+            let mut power = Scalar::ONE;
+            for &(abs, neg) in &signed {
+                let term = Scalar::from(abs as u64) * power;
+                if neg {
+                    reconstructed -= term;
+                } else {
+                    reconstructed += term;
+                }
+                power *= base;
+            }
+
+            assert_eq!(reconstructed, s);
+            for &(abs, _) in &signed {
+                assert!(abs <= half);
+            }
         }
     }
 }
