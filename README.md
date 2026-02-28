@@ -156,6 +156,26 @@ clear winner; c=10 regressed due to O(2^c) single-threaded subsum cost.
 - **msm_batch/5x100K:** 25.3s → 6.98s (3.6x)
 - **full_proof/n=100K:** 25.9s → 7.7s (3.4x)
 
+### 13. Multi-workgroup G1 tree reduction
+GPU profiling revealed that G1 tree_reduction consumed ~49% of MSM time — nearly
+equal to bucket_aggregation. The single-workgroup subsum dispatched only 18 workgroups
+× 64 threads = 1,152 threads on an M3 Max with ~4,000 shader cores (29% utilization).
+Split into a two-pass approach: Phase 1 dispatches `num_windows × 32` workgroups,
+each reducing a chunk of pre-weighted buckets into partial sums; Phase 2 reduces 32
+partial sums per window into the final window sum.
+- **proof/n=10K:** 2.55s → 2.26s (-12.6%)
+- **proof/n=100K:** 7.72s → 6.42s (-16.8%)
+- **msm_batch/5x100K:** 6.98s → 6.17s (-11.6%)
+
+### 14. Optimal G1 bucket width (c=15 → c=13)
+Profiled G1 bucket width at c=11..16. Results showed a bimodal pattern: c=11,12,14
+caused catastrophic regressions (30-54s), while c=13 and c=15 performed well. c=13
+was the fastest, likely due to better balance between bucket count, GPU occupancy,
+and per-thread work on the Metal GPU scheduler.
+- **proof/n=10K:** 2.26s → 2.18s (-3.5%)
+- **proof/n=100K:** 6.42s → 5.97s (-7.0%)
+- **msm_batch/5x100K:** 6.17s → 5.26s (-14.7%)
+
 ## Discarded optimizations
 
 The following optimizations were investigated but ultimately discarded because they
