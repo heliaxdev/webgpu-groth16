@@ -508,6 +508,41 @@ mod tests {
         }
     }
 
+    /// Verify signed decomposition handles the exact half-boundary correctly.
+    /// Scalar = 2^(c-1) should produce window 0 = (2^(c-1), true) with carry.
+    #[test]
+    fn signed_window_decomposition_half_boundary() {
+        let c = <Bls12 as GpuCurve>::bucket_width();
+        let half = 1u64 << (c - 1);
+        let s = Scalar::from(half);
+        let signed = <Bls12 as GpuCurve>::scalar_to_signed_windows(&s, c);
+
+        // Window 0: val=half is >= half, so abs = 2^c - half = half, neg=true, carry=1
+        assert_eq!(signed[0], (half as u32, true));
+        // Window 1: carry=1, which is < half, so (1, false)
+        assert_eq!(signed[1], (1, false));
+        // Remaining windows should be (0, false)
+        for &(abs, neg) in &signed[2..] {
+            assert_eq!((abs, neg), (0, false));
+        }
+    }
+
+    /// Verify that scalar = 2^(c-1) - 1 stays positive (just below the threshold).
+    #[test]
+    fn signed_window_decomposition_below_half() {
+        let c = <Bls12 as GpuCurve>::bucket_width();
+        let val = (1u64 << (c - 1)) - 1;
+        let s = Scalar::from(val);
+        let signed = <Bls12 as GpuCurve>::scalar_to_signed_windows(&s, c);
+
+        // Window 0: val < half, so (val, false), no carry
+        assert_eq!(signed[0], (val as u32, false));
+        // All remaining windows should be zero
+        for &(abs, _) in &signed[1..] {
+            assert_eq!(abs, 0);
+        }
+    }
+
     /// Verify signed windows for G2 bucket width.
     #[test]
     fn signed_window_decomposition_g2_roundtrip() {
