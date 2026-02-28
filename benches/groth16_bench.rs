@@ -12,6 +12,7 @@ use webgpu_groth16::bucket::compute_bucket_sorting;
 use webgpu_groth16::gpu::GpuContext;
 use webgpu_groth16::gpu::curve::GpuCurve;
 use webgpu_groth16::prover;
+use webgpu_groth16::prover::PreparedProvingKey;
 
 // ---------------------------------------------------------------------------
 // Dummy circuit: proves knowledge of x such that x^3 = y
@@ -55,6 +56,7 @@ impl<S: ff::PrimeField> bellman::Circuit<S> for DummyCircuit<S> {
 // ---------------------------------------------------------------------------
 struct BenchSetup {
     params: bellman::groth16::Parameters<Bls12>,
+    ppk: PreparedProvingKey<Bls12>,
     gpu: GpuContext<Bls12>,
 }
 
@@ -67,9 +69,10 @@ fn setup() -> BenchSetup {
         bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
             .expect("param gen failed");
 
+    let ppk = prover::prepare_proving_key::<Bls12, Bls12>(&params);
     let gpu = rt.block_on(GpuContext::<Bls12>::new()).expect("gpu init failed");
 
-    BenchSetup { params, gpu }
+    BenchSetup { params, ppk, gpu }
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +98,7 @@ fn bench_full_proof(c: &mut Criterion) {
             rt.block_on(prover::create_proof::<Bls12, Bls12, _, _>(
                 circuit,
                 &bs.params,
+                &bs.ppk,
                 &bs.gpu,
                 &mut rng,
             ))

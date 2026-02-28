@@ -141,6 +141,54 @@ fn lc_to_vec<S: PrimeField>(lc: bellman::LinearCombination<S>) -> Vec<(bellman::
     lc_iter.map(|(var, coeff)| (var, *coeff)).collect()
 }
 
+/// Pre-serialized proving key bases for GPU. Avoids re-serialization per proof.
+pub struct PreparedProvingKey<G: GpuCurve> {
+    pub a_bytes: Vec<u8>,
+    pub b_g1_bytes: Vec<u8>,
+    pub l_bytes: Vec<u8>,
+    pub h_bytes: Vec<u8>,
+    pub b_g2_bytes: Vec<u8>,
+    _marker: std::marker::PhantomData<G>,
+}
+
+fn serialize_g1_bases<G: GpuCurve>(bases: &[G::G1Affine]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(bases.len() * 144);
+    for base in bases {
+        bytes.extend_from_slice(&G::serialize_g1(base));
+    }
+    bytes
+}
+
+fn serialize_g2_bases<G: GpuCurve>(bases: &[G::G2Affine]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(bases.len() * 288);
+    for base in bases {
+        bytes.extend_from_slice(&G::serialize_g2(base));
+    }
+    bytes
+}
+
+pub fn prepare_proving_key<E, G>(pk: &bellman::groth16::Parameters<E>) -> PreparedProvingKey<G>
+where
+    E: pairing::MultiMillerLoop,
+    G: GpuCurve<
+        Engine = E,
+        Scalar = E::Fr,
+        G1 = E::G1,
+        G2 = E::G2,
+        G1Affine = E::G1Affine,
+        G2Affine = E::G2Affine,
+    >,
+{
+    PreparedProvingKey {
+        a_bytes: serialize_g1_bases::<G>(&pk.a),
+        b_g1_bytes: serialize_g1_bases::<G>(&pk.b_g1),
+        l_bytes: serialize_g1_bases::<G>(&pk.l),
+        h_bytes: serialize_g1_bases::<G>(&pk.h),
+        b_g2_bytes: serialize_g2_bases::<G>(&pk.b_g2),
+        _marker: std::marker::PhantomData,
+    }
+}
+
 fn marshal_scalars<G: GpuCurve>(scalars: &[G::Scalar]) -> Vec<u8> {
     let mut buffer = Vec::with_capacity(scalars.len() * 32);
     for s in scalars {
@@ -327,6 +375,36 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
     b2_bases: &[G::G2Affine],
     b2_scalars: &[G::Scalar],
 ) -> Result<(G::G1, G::G1, G::G1, G::G1, G::G2)> {
+    gpu_msm_batch_bytes::<G>(
+        gpu,
+        &serialize_g1_bases::<G>(a_bases),
+        a_scalars,
+        &serialize_g1_bases::<G>(b1_bases),
+        b_scalars,
+        &serialize_g1_bases::<G>(l_bases),
+        l_scalars,
+        &serialize_g1_bases::<G>(h_bases),
+        h_scalars,
+        &serialize_g2_bases::<G>(b2_bases),
+        b2_scalars,
+    )
+    .await
+}
+
+#[allow(clippy::type_complexity)]
+async fn gpu_msm_batch_bytes<G: GpuCurve>(
+    gpu: &GpuContext<G>,
+    a_bytes: &[u8],
+    a_scalars: &[G::Scalar],
+    b1_bytes: &[u8],
+    b_scalars: &[G::Scalar],
+    l_bytes: &[u8],
+    l_scalars: &[G::Scalar],
+    h_bytes: &[u8],
+    h_scalars: &[G::Scalar],
+    b2_bytes: &[u8],
+    b2_scalars: &[G::Scalar],
+) -> Result<(G::G1, G::G1, G::G1, G::G1, G::G2)> {
     struct G1Pending {
         sums_buf: wgpu::Buffer,
         num_windows: u32,
@@ -337,18 +415,13 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
     }
 
     let enqueue_g1 =
-        |name: &str, bases: &[G::G1Affine], scalars: &[G::Scalar]| -> Result<Option<G1Pending>> {
+        |name: &str, bases_bytes: &[u8], scalars: &[G::Scalar]| -> Result<Option<G1Pending>> {
             let bd: BucketData = compute_bucket_sorting::<G>(scalars);
             if bd.num_active_buckets == 0 {
                 return Ok(None);
             }
 
-            let mut bases_bytes = Vec::with_capacity(bases.len() * 144);
-            for base in bases {
-                bases_bytes.extend_from_slice(&G::serialize_g1(base));
-            }
-
-            let bases_buf = gpu.create_storage_buffer(&format!("{name}_bases"), &bases_bytes);
+            let bases_buf = gpu.create_storage_buffer(&format!("{name}_bases"), bases_bytes);
             let indices_buf = gpu.create_storage_buffer(
                 &format!("{name}_indices"),
                 bytemuck::cast_slice(&bd.base_indices),
@@ -399,18 +472,13 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
             }))
         };
 
-    let enqueue_g2 = |bases: &[G::G2Affine], scalars: &[G::Scalar]| -> Result<Option<G2Pending>> {
+    let enqueue_g2 = |bases_bytes: &[u8], scalars: &[G::Scalar]| -> Result<Option<G2Pending>> {
         let bd: BucketData = compute_bucket_sorting_with_width::<G>(scalars, G::g2_bucket_width());
         if bd.num_active_buckets == 0 {
             return Ok(None);
         }
 
-        let mut bases_bytes = Vec::with_capacity(bases.len() * 288);
-        for base in bases {
-            bases_bytes.extend_from_slice(&G::serialize_g2(base));
-        }
-
-        let bases_buf = gpu.create_storage_buffer("b2_bases", &bases_bytes);
+        let bases_buf = gpu.create_storage_buffer("b2_bases", bases_bytes);
         let indices_buf =
             gpu.create_storage_buffer("b2_indices", bytemuck::cast_slice(&bd.base_indices));
         let ptrs_buf =
@@ -447,11 +515,11 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
         }))
     };
 
-    let a_job = enqueue_g1("a", a_bases, a_scalars)?;
-    let b1_job = enqueue_g1("b1", b1_bases, b_scalars)?;
-    let l_job = enqueue_g1("l", l_bases, l_scalars)?;
-    let h_job = enqueue_g1("h", h_bases, h_scalars)?;
-    let b2_job = enqueue_g2(b2_bases, b2_scalars)?;
+    let a_job = enqueue_g1("a", a_bytes, a_scalars)?;
+    let b1_job = enqueue_g1("b1", b1_bytes, b_scalars)?;
+    let l_job = enqueue_g1("l", l_bytes, l_scalars)?;
+    let h_job = enqueue_g1("h", h_bytes, h_scalars)?;
+    let b2_job = enqueue_g2(b2_bytes, b2_scalars)?;
 
     let mut read_targets: Vec<(&wgpu::Buffer, wgpu::BufferAddress)> = Vec::new();
     if let Some(job) = &a_job {
@@ -602,6 +670,7 @@ pub async fn compute_h_poly<G: GpuCurve>(
 async fn create_proof_with_fixed_randomness<E, G, C>(
     circuit: C,
     pk: &bellman::groth16::Parameters<E>,
+    ppk: &PreparedProvingKey<G>,
     gpu: &GpuContext<G>,
     r: G::Scalar,
     s: G::Scalar,
@@ -656,17 +725,17 @@ where
     let b_assignment =
         dense_assignment_from_masks(&cs.inputs, &cs.aux, &cs.b_input_density, &cs.b_aux_density);
 
-    let (a_msm, b_g1_msm, l_msm, h_msm, b_g2_msm) = gpu_msm_batch(
+    let (a_msm, b_g1_msm, l_msm, h_msm, b_g2_msm) = gpu_msm_batch_bytes::<G>(
         gpu,
-        &pk.a,
+        &ppk.a_bytes,
         &a_assignment,
-        &pk.b_g1,
+        &ppk.b_g1_bytes,
         &b_assignment,
-        &pk.l,
+        &ppk.l_bytes,
         &cs.aux,
-        &pk.h,
+        &ppk.h_bytes,
         &h_coeffs[..pk.h.len()],
-        &pk.b_g2,
+        &ppk.b_g2_bytes,
         &b_assignment,
     )
     .await?;
@@ -702,6 +771,7 @@ where
 pub async fn create_proof<E, G, C, R>(
     circuit: C,
     pk: &bellman::groth16::Parameters<E>,
+    ppk: &PreparedProvingKey<G>,
     gpu: &GpuContext<G>,
     rng: &mut R,
 ) -> Result<bellman::groth16::Proof<E>>
@@ -720,7 +790,7 @@ where
 {
     let r = G::Scalar::random(&mut *rng);
     let s = G::Scalar::random(&mut *rng);
-    create_proof_with_fixed_randomness::<E, G, C>(circuit, pk, gpu, r, s).await
+    create_proof_with_fixed_randomness::<E, G, C>(circuit, pk, ppk, gpu, r, s).await
 }
 
 #[cfg(test)]
@@ -814,7 +884,8 @@ mod tests {
         };
 
         // Pass Bls12 for both the E and G generic parameters
-        let proof = create_proof::<Bls12, Bls12, _, _>(circuit, &params, &gpu_ctx, &mut rng)
+        let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
+        let proof = create_proof::<Bls12, Bls12, _, _>(circuit, &params, &ppk, &gpu_ctx, &mut rng)
             .await
             .expect("Failed to generate Groth16 proof on GPU");
 
@@ -966,8 +1037,9 @@ mod tests {
             .expect("failed to initialize gpu");
 
         let circuit = sample_sapling_output_circuit();
+        let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
         let t0 = Instant::now();
-        let _proof = create_proof::<Bls12, Bls12, _, _>(circuit, &params, &gpu_ctx, &mut rng)
+        let _proof = create_proof::<Bls12, Bls12, _, _>(circuit, &params, &ppk, &gpu_ctx, &mut rng)
             .await
             .expect("gpu sapling output proof failed");
         let dt = t0.elapsed();
@@ -1037,12 +1109,14 @@ mod tests {
         let r = Scalar::ZERO;
         let s = Scalar::ZERO;
 
+        let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
         let gpu_proof = create_proof_with_fixed_randomness::<Bls12, Bls12, _>(
             DummyCircuit {
                 x: Some(x_value),
                 y: Some(y_value),
             },
             &params,
+            &ppk,
             &gpu_ctx,
             r,
             s,
