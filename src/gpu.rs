@@ -2,6 +2,8 @@ pub mod curve;
 
 use std::borrow::Cow;
 use std::marker::PhantomData;
+#[cfg(feature = "profiling")]
+use std::sync::Mutex;
 
 use anyhow::Context;
 use futures::channel::oneshot;
@@ -29,6 +31,8 @@ pub struct GpuContext<C> {
     pub msm_sum_g2_pipeline: wgpu::ComputePipeline,
     pub msm_to_mont_g1_pipeline: wgpu::ComputePipeline,
     pub msm_to_mont_g2_pipeline: wgpu::ComputePipeline,
+    pub msm_subsum_phase1_g1_pipeline: wgpu::ComputePipeline,
+    pub msm_subsum_phase2_g1_pipeline: wgpu::ComputePipeline,
 
     // Bind Group Layouts
     pub ntt_bind_group_layout: wgpu::BindGroupLayout,
@@ -38,8 +42,13 @@ pub struct GpuContext<C> {
     pub montgomery_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_agg_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_sum_bind_group_layout: wgpu::BindGroupLayout,
+    pub msm_subsum_phase1_bind_group_layout: wgpu::BindGroupLayout,
+    pub msm_subsum_phase2_bind_group_layout: wgpu::BindGroupLayout,
 
     _marker: PhantomData<C>,
+
+    #[cfg(feature = "profiling")]
+    pub profiler: Mutex<wgpu_profiler::GpuProfiler>,
 }
 
 impl<C: GpuCurve> GpuContext<C> {
@@ -55,11 +64,18 @@ impl<C: GpuCurve> GpuContext<C> {
             .await
             .context("Failed to find a compatible WebGPU adapter")?;
 
+        #[cfg(feature = "profiling")]
+        let required_features =
+            adapter.features() & wgpu_profiler::GpuProfiler::ALL_WGPU_TIMER_FEATURES;
+        #[cfg(not(feature = "profiling"))]
+        let required_features = wgpu::Features::empty();
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Groth16 Prover Device"),
                 // Use adapter.limits() directly to support large buffers (>128MB) for WebAssembly
                 required_limits: adapter.limits(),
+                required_features,
                 ..Default::default()
             })
             .await
@@ -369,6 +385,103 @@ impl<C: GpuCurve> GpuContext<C> {
                 ],
             });
 
+        // Phase1: [agg_buckets(read), window_starts(read), window_counts(read),
+        //          partial_sums(rw), subsum_params(uniform)]
+        let msm_subsum_phase1_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("MSM Subsum Phase1 Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        // Phase2: [partial_sums(read), window_sums(rw), subsum_params(uniform)]
+        let msm_subsum_phase2_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("MSM Subsum Phase2 Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
         // 3. Create Compute Pipelines
         let ntt_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("NTT Compute Pipeline"),
@@ -555,6 +668,47 @@ impl<C: GpuCurve> GpuContext<C> {
                 cache: None,
             });
 
+        let msm_subsum_phase1_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("MSM Subsum Phase1 Pipeline Layout"),
+                bind_group_layouts: &[&msm_subsum_phase1_bind_group_layout],
+                immediate_size: 0,
+            });
+        let msm_subsum_phase2_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("MSM Subsum Phase2 Pipeline Layout"),
+                bind_group_layouts: &[&msm_subsum_phase2_bind_group_layout],
+                immediate_size: 0,
+            });
+
+        let msm_subsum_phase1_g1_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("MSM Subsum Phase1 G1"),
+                layout: Some(&msm_subsum_phase1_layout),
+                module: &msm_module,
+                entry_point: Some("subsum_phase1_g1"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let msm_subsum_phase2_g1_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("MSM Subsum Phase2 G1"),
+                layout: Some(&msm_subsum_phase2_layout),
+                module: &msm_module,
+                entry_point: Some("subsum_phase2_g1"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        #[cfg(feature = "profiling")]
+        let profiler = Mutex::new(wgpu_profiler::GpuProfiler::new(
+            &device,
+            wgpu_profiler::GpuProfilerSettings {
+                enable_timer_queries: true,
+                ..Default::default()
+            },
+        )?);
+
         Ok(Self {
             device,
             queue,
@@ -571,6 +725,8 @@ impl<C: GpuCurve> GpuContext<C> {
             msm_sum_g2_pipeline,
             msm_to_mont_g1_pipeline,
             msm_to_mont_g2_pipeline,
+            msm_subsum_phase1_g1_pipeline,
+            msm_subsum_phase2_g1_pipeline,
             ntt_bind_group_layout,
             ntt_params_bind_group_layout,
             coset_shift_bind_group_layout,
@@ -578,8 +734,28 @@ impl<C: GpuCurve> GpuContext<C> {
             montgomery_bind_group_layout,
             msm_agg_bind_group_layout,
             msm_sum_bind_group_layout,
+            msm_subsum_phase1_bind_group_layout,
+            msm_subsum_phase2_bind_group_layout,
             _marker: PhantomData,
+            #[cfg(feature = "profiling")]
+            profiler,
         })
+    }
+
+    #[cfg(feature = "profiling")]
+    pub fn end_profiler_frame(&self) {
+        // Ensure all GPU work and timestamp query readbacks are complete
+        // before ending the frame. Without this, Metal may return stale or
+        // uninitialized timestamp data (causing negative durations).
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let mut profiler = self.profiler.lock().unwrap();
+        profiler.end_frame().expect("end_frame failed");
+    }
+
+    #[cfg(feature = "profiling")]
+    pub fn process_profiler_results(&self) -> Option<Vec<wgpu_profiler::GpuTimerQueryResult>> {
+        let mut profiler = self.profiler.lock().unwrap();
+        profiler.process_finished_frame(self.queue.get_timestamp_period())
     }
 
     pub fn create_storage_buffer(&self, label: &str, data: &[u8]) -> wgpu::Buffer {
@@ -964,6 +1140,11 @@ impl<C: GpuCurve> GpuContext<C> {
             ],
         });
 
+        #[cfg(feature = "profiling")]
+        let mut profiler_guard = self.profiler.lock().unwrap();
+        #[cfg(feature = "profiling")]
+        let mut scope = profiler_guard.scope("h_pipeline", &mut encoder);
+
         // To Montgomery: a, b, c, twiddles (inv/fwd), shifts (fwd/inv), z_inv.
         for bg in [
             mont_bg(a_buf),
@@ -975,6 +1156,9 @@ impl<C: GpuCurve> GpuContext<C> {
             mont_bg(inv_shifts_buf),
             mont_bg(z_invs_buf),
         ] {
+            #[cfg(feature = "profiling")]
+            let mut pass = scope.scoped_compute_pass("to_montgomery");
+            #[cfg(not(feature = "profiling"))]
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("To Montgomery Pass"),
                 timestamp_writes: None,
@@ -990,6 +1174,9 @@ impl<C: GpuCurve> GpuContext<C> {
             ntt_bg(b_buf, tw_inv_n_buf),
             ntt_bg(c_buf, tw_inv_n_buf),
         ] {
+            #[cfg(feature = "profiling")]
+            let mut pass = scope.scoped_compute_pass("intt_abc");
+            #[cfg(not(feature = "profiling"))]
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("iNTT ABC Pass"),
                 timestamp_writes: None,
@@ -1005,6 +1192,9 @@ impl<C: GpuCurve> GpuContext<C> {
             shift_bg(b_buf, shifts_buf),
             shift_bg(c_buf, shifts_buf),
         ] {
+            #[cfg(feature = "profiling")]
+            let mut pass = scope.scoped_compute_pass("coset_shift_abc");
+            #[cfg(not(feature = "profiling"))]
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Coset Shift ABC Pass"),
                 timestamp_writes: None,
@@ -1020,6 +1210,9 @@ impl<C: GpuCurve> GpuContext<C> {
             ntt_bg(b_buf, tw_fwd_n_buf),
             ntt_bg(c_buf, tw_fwd_n_buf),
         ] {
+            #[cfg(feature = "profiling")]
+            let mut pass = scope.scoped_compute_pass("ntt_abc");
+            #[cfg(not(feature = "profiling"))]
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("NTT ABC Pass"),
                 timestamp_writes: None,
@@ -1031,6 +1224,9 @@ impl<C: GpuCurve> GpuContext<C> {
 
         // Pointwise H = (A*B-C)/Z.
         {
+            #[cfg(feature = "profiling")]
+            let mut pass = scope.scoped_compute_pass("pointwise_poly");
+            #[cfg(not(feature = "profiling"))]
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Pointwise Poly Pass"),
                 timestamp_writes: None,
@@ -1043,6 +1239,9 @@ impl<C: GpuCurve> GpuContext<C> {
         // iNTT(H).
         {
             let bg = ntt_bg(h_buf, tw_inv_n_buf);
+            #[cfg(feature = "profiling")]
+            let mut pass = scope.scoped_compute_pass("intt_h");
+            #[cfg(not(feature = "profiling"))]
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("iNTT H Pass"),
                 timestamp_writes: None,
@@ -1055,6 +1254,9 @@ impl<C: GpuCurve> GpuContext<C> {
         // Inverse coset shift on H.
         {
             let bg = shift_bg(h_buf, inv_shifts_buf);
+            #[cfg(feature = "profiling")]
+            let mut pass = scope.scoped_compute_pass("inv_coset_shift_h");
+            #[cfg(not(feature = "profiling"))]
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Inv Coset Shift H Pass"),
                 timestamp_writes: None,
@@ -1067,6 +1269,9 @@ impl<C: GpuCurve> GpuContext<C> {
         // From Montgomery on H.
         {
             let bg = mont_bg(h_buf);
+            #[cfg(feature = "profiling")]
+            let mut pass = scope.scoped_compute_pass("from_montgomery_h");
+            #[cfg(not(feature = "profiling"))]
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("From Montgomery H Pass"),
                 timestamp_writes: None,
@@ -1074,6 +1279,12 @@ impl<C: GpuCurve> GpuContext<C> {
             pass.set_pipeline(&self.from_montgomery_pipeline);
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups(n.div_ceil(256), 1, 1);
+        }
+
+        #[cfg(feature = "profiling")]
+        {
+            drop(scope);
+            profiler_guard.resolve_queries(&mut encoder);
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -1159,6 +1370,14 @@ impl<C: GpuCurve> GpuContext<C> {
                 label: Some("MSM Encoder"),
             });
 
+        #[cfg(feature = "profiling")]
+        let mut profiler_guard = self.profiler.lock().unwrap();
+        #[cfg(feature = "profiling")]
+        let mut scope = profiler_guard.scope(
+            if is_g2 { "msm_g2" } else { "msm_g1" },
+            &mut encoder,
+        );
+
         // Pre-pass: convert bases to Montgomery form in-place so aggregate
         // can skip per-point to_montgomery calls (saves 3 muls/load for G1, 6 for G2).
         {
@@ -1172,6 +1391,9 @@ impl<C: GpuCurve> GpuContext<C> {
             });
             let point_size: u64 = if is_g2 { 288 } else { 144 };
             let num_bases = (bases_buf.size() / point_size) as u32;
+            #[cfg(feature = "profiling")]
+            let mut cpass = scope.scoped_compute_pass("to_montgomery_bases");
+            #[cfg(not(feature = "profiling"))]
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("MSM To Montgomery"),
                 timestamp_writes: None,
@@ -1186,6 +1408,9 @@ impl<C: GpuCurve> GpuContext<C> {
         }
 
         {
+            #[cfg(feature = "profiling")]
+            let mut cpass = scope.scoped_compute_pass("bucket_aggregation");
+            #[cfg(not(feature = "profiling"))]
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("MSM Pass 1"),
                 timestamp_writes: None,
@@ -1199,18 +1424,117 @@ impl<C: GpuCurve> GpuContext<C> {
             cpass.dispatch_workgroups(num_active_buckets.div_ceil(64).max(1), 1, 1);
         }
 
-        {
+        if is_g2 {
+            // G2: single-pass subsum (running sum, blocked by Metal double_g2 bug).
+            #[cfg(feature = "profiling")]
+            let mut cpass = scope.scoped_compute_pass("tree_reduction");
+            #[cfg(not(feature = "profiling"))]
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("MSM Pass 2"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(if is_g2 {
-                &self.msm_sum_g2_pipeline
-            } else {
-                &self.msm_sum_g1_pipeline
-            });
+            cpass.set_pipeline(&self.msm_sum_g2_pipeline);
             cpass.set_bind_group(0, &sum_bind_group, &[]);
             cpass.dispatch_workgroups(num_windows, 1, 1);
+        } else {
+            // G1: two-pass multi-workgroup reduction for better GPU utilization.
+            const CHUNKS_PER_WINDOW: u32 = 32;
+            let partial_sums_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("MSM Partial Sums"),
+                size: (num_windows * CHUNKS_PER_WINDOW * 144) as u64,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+            let subsum_params: [u32; 4] = [CHUNKS_PER_WINDOW, 0, 0, 0];
+            let subsum_params_buf = self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("Subsum Params"),
+                    contents: bytemuck::cast_slice(&subsum_params),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                },
+            );
+
+            let phase1_bind_group =
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("MSM Subsum Phase1 BG"),
+                    layout: &self.msm_subsum_phase1_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: aggregated_buckets_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: window_starts_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: window_counts_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: partial_sums_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: subsum_params_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+            let phase2_bind_group =
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("MSM Subsum Phase2 BG"),
+                    layout: &self.msm_subsum_phase2_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: partial_sums_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: window_sums_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: subsum_params_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+            // Phase 1: many workgroups per window → partial sums.
+            {
+                #[cfg(feature = "profiling")]
+                let mut cpass = scope.scoped_compute_pass("tree_reduction_ph1");
+                #[cfg(not(feature = "profiling"))]
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("MSM Subsum Phase1"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.msm_subsum_phase1_g1_pipeline);
+                cpass.set_bind_group(0, &phase1_bind_group, &[]);
+                cpass.dispatch_workgroups(num_windows * CHUNKS_PER_WINDOW, 1, 1);
+            }
+
+            // Phase 2: reduce partial sums → final window sums.
+            {
+                #[cfg(feature = "profiling")]
+                let mut cpass = scope.scoped_compute_pass("tree_reduction_ph2");
+                #[cfg(not(feature = "profiling"))]
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("MSM Subsum Phase2"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.msm_subsum_phase2_g1_pipeline);
+                cpass.set_bind_group(0, &phase2_bind_group, &[]);
+                cpass.dispatch_workgroups(num_windows, 1, 1);
+            }
+        }
+
+        #[cfg(feature = "profiling")]
+        {
+            drop(scope);
+            profiler_guard.resolve_queries(&mut encoder);
         }
 
         self.queue.submit(Some(encoder.finish()));

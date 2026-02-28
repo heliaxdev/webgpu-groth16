@@ -11,6 +11,7 @@ default = ["bellman-provider-nam-bellperson"]
 bellman-provider-bellman = ["dep:bellman"]
 bellman-provider-nam-bellperson = ["dep:nam-bellperson"]
 timing = []
+profiling = ["dep:wgpu-profiler", "dep:puffin", "dep:puffin_http"]
 
 [dependencies]
 anyhow = "1.0.102"
@@ -22,10 +23,13 @@ futures = "0.3.32"
 group = "0.13"
 nam-bellperson = { version = "0.26.6-nam.1", optional = true }
 pairing = "0.23.0"
+puffin = { version = "0.19", optional = true }
+puffin_http = { version = "0.16", optional = true }
 rand_core = "0.6.4"
 subtle = "2.5"
 wasm-bindgen = "0.2.113"
 wgpu = "28.0.0"
+wgpu-profiler = { version = "0.26", optional = true, features = ["puffin"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
@@ -37,3 +41,6 @@ tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
 [[bench]]
 name = "groth16_bench"
 harness = false
+
+[profile.release]
+debug = true

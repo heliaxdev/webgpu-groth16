@@ -1349,6 +1349,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
+name = "lz4_flex"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ab2867e3eeeca90e844d1940eab391c9dc5228783db2ed999acbc0a9ed375a"
+
+[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1936,6 +1942,36 @@ name = "profiling"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eb8486b569e12e2c32ad3e204dbaba5e4b5b216e9367044f25f1dba42341773"
+
+[[package]]
+name = "puffin"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa9dae7b05c02ec1a6bc9bcf20d8bc64a7dcbf57934107902a872014899b741f"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "byteorder",
+ "cfg-if",
+ "itertools 0.10.5",
+ "lz4_flex",
+ "once_cell",
+ "parking_lot",
+ "serde",
+]
+
+[[package]]
+name = "puffin_http"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "739a3c7f56604713b553d7addd7718c226e88d598979ae3450320800bd0e9810"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "log",
+ "parking_lot",
+ "puffin",
+]
 
 [[package]]
 name = "quote"
@@ -2627,11 +2663,14 @@ dependencies = [
  "nam-bellperson",
  "nam-blstrs",
  "pairing",
+ "puffin",
+ "puffin_http",
  "rand_core",
  "subtle",
  "tokio",
  "wasm-bindgen",
  "wgpu",
+ "wgpu-profiler",
 ]
 
 [[package]]
@@ -2769,6 +2808,18 @@ dependencies = [
  "wgpu-types",
  "windows",
  "windows-core",
+]
+
+[[package]]
+name = "wgpu-profiler"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54a5d746c6ee80bda321bf99d57cde941fadb69a99b3b1593c2354e5ef4aaa58"
+dependencies = [
+ "parking_lot",
+ "puffin",
+ "thiserror 2.0.18",
+ "wgpu",
 ]
 
 [[package]]

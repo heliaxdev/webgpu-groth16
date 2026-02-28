@@ -322,6 +322,116 @@ fn subsum_accumulation_g1(
     }
 }
 
+// ==== Multi-Workgroup G1 Tree Reduction ====
+//
+// Splits the single-workgroup subsum into two passes:
+// Phase 1: num_windows * chunks_per_window workgroups, each reduces a chunk of
+//          pre-weighted buckets → writes one partial sum per workgroup.
+// Phase 2: num_windows workgroups, each reduces chunks_per_window partial sums
+//          → writes one final window sum.
+
+struct SubsumParams {
+    chunks_per_window: u32,
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
+}
+
+@group(0) @binding(0) var<storage, read> agg_ph1_g1: array<PointG1>;
+@group(0) @binding(1) var<storage, read> win_starts_ph1: array<u32>;
+@group(0) @binding(2) var<storage, read> win_counts_ph1: array<u32>;
+@group(0) @binding(3) var<storage, read_write> partial_sums_g1: array<PointG1>;
+@group(0) @binding(4) var<uniform> subsum_params_ph1: SubsumParams;
+
+var<workgroup> shared_ph1_g1: array<PointG1, 64>;
+
+@compute @workgroup_size(64)
+fn subsum_phase1_g1(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) wg_id: vec3<u32>,
+) {
+    let chunks = subsum_params_ph1.chunks_per_window;
+    let window_id = wg_id.x / chunks;
+    let chunk_id = wg_id.x % chunks;
+    let tid = local_id.x;
+
+    if window_id >= arrayLength(&win_starts_ph1) { return; }
+
+    let start = win_starts_ph1[window_id];
+    let count = win_counts_ph1[window_id];
+
+    // Determine this chunk's range within the window's buckets.
+    let chunk_size = (count + chunks - 1u) / chunks;
+    let chunk_begin = chunk_id * chunk_size;
+    let chunk_end = min(chunk_begin + chunk_size, count);
+
+    // Each thread sums its strided portion of this chunk.
+    var local_sum = G1_INFINITY;
+    var idx = chunk_begin + tid;
+    for (var iter = 0u; iter < 1024u; iter = iter + 1u) {
+        if idx >= chunk_end { break; }
+        local_sum = add_g1_safe(local_sum, agg_ph1_g1[start + idx]);
+        idx = idx + 64u;
+    }
+    shared_ph1_g1[tid] = local_sum;
+    workgroupBarrier();
+
+    // Tree reduction in shared memory.
+    if tid < 32u { shared_ph1_g1[tid] = add_g1_safe(shared_ph1_g1[tid], shared_ph1_g1[tid + 32u]); }
+    workgroupBarrier();
+    if tid < 16u { shared_ph1_g1[tid] = add_g1_safe(shared_ph1_g1[tid], shared_ph1_g1[tid + 16u]); }
+    workgroupBarrier();
+    if tid < 8u { shared_ph1_g1[tid] = add_g1_safe(shared_ph1_g1[tid], shared_ph1_g1[tid + 8u]); }
+    workgroupBarrier();
+    if tid < 4u { shared_ph1_g1[tid] = add_g1_safe(shared_ph1_g1[tid], shared_ph1_g1[tid + 4u]); }
+    workgroupBarrier();
+    if tid < 2u { shared_ph1_g1[tid] = add_g1_safe(shared_ph1_g1[tid], shared_ph1_g1[tid + 2u]); }
+    workgroupBarrier();
+    if tid == 0u {
+        partial_sums_g1[window_id * chunks + chunk_id] = add_g1_safe(shared_ph1_g1[0], shared_ph1_g1[1]);
+    }
+}
+
+@group(0) @binding(0) var<storage, read> partial_sums_ph2_g1: array<PointG1>;
+@group(0) @binding(1) var<storage, read_write> win_sums_ph2_g1: array<PointG1>;
+@group(0) @binding(2) var<uniform> subsum_params_ph2: SubsumParams;
+
+var<workgroup> shared_ph2_g1: array<PointG1, 64>;
+
+@compute @workgroup_size(64)
+fn subsum_phase2_g1(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) wg_id: vec3<u32>,
+) {
+    let window_id = wg_id.x;
+    let tid = local_id.x;
+    let chunks = subsum_params_ph2.chunks_per_window;
+
+    // Each thread loads one partial sum (if tid < chunks), else identity.
+    var val = G1_INFINITY;
+    if tid < chunks {
+        val = partial_sums_ph2_g1[window_id * chunks + tid];
+    }
+    shared_ph2_g1[tid] = val;
+    workgroupBarrier();
+
+    // Tree reduction in shared memory.
+    if tid < 32u { shared_ph2_g1[tid] = add_g1_safe(shared_ph2_g1[tid], shared_ph2_g1[tid + 32u]); }
+    workgroupBarrier();
+    if tid < 16u { shared_ph2_g1[tid] = add_g1_safe(shared_ph2_g1[tid], shared_ph2_g1[tid + 16u]); }
+    workgroupBarrier();
+    if tid < 8u { shared_ph2_g1[tid] = add_g1_safe(shared_ph2_g1[tid], shared_ph2_g1[tid + 8u]); }
+    workgroupBarrier();
+    if tid < 4u { shared_ph2_g1[tid] = add_g1_safe(shared_ph2_g1[tid], shared_ph2_g1[tid + 4u]); }
+    workgroupBarrier();
+    if tid < 2u { shared_ph2_g1[tid] = add_g1_safe(shared_ph2_g1[tid], shared_ph2_g1[tid + 2u]); }
+    workgroupBarrier();
+    if tid == 0u {
+        let result = add_g1_safe(shared_ph2_g1[0], shared_ph2_g1[1]);
+        win_sums_ph2_g1[window_id] = store_g1(result);
+    }
+}
+
 // ==== G2 Pipelines ====
 
 @group(0) @binding(0) var<storage, read> bases_g2: array<PointG2>;

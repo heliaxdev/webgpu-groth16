@@ -314,7 +314,7 @@ impl GpuCurve for blstrs::Bls12 {
     }
 
     fn bucket_width() -> usize {
-        15
+        13
     }
 
     fn g1_identity() -> Self::G1 {
