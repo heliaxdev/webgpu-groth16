@@ -5,6 +5,7 @@
 // this will be the ultimate test of correctness.
 
 pub mod bucket;
+pub mod glv;
 pub mod gpu;
 pub mod prover;
 

@@ -161,6 +161,21 @@ buckets have an average size of only 1-2 points — there is no meaningful varia
 to sort. The sorting overhead (Vec allocation + sort) outweighed any divergence
 reduction.
 
+### GLV endomorphism for G1 MSM
+**Idea:** Use the BLS12-381 GLV endomorphism φ(x,y) = (β·x, y) to decompose each
+256-bit scalar k into two ~128-bit halves k1, k2 such that k·P = k1·P + k2·φ(P).
+This halves the Pippenger window count from 18 to 9 (ceil(128/15) vs ceil(256/15)),
+reducing subsum accumulation dispatches by 50% and CPU fold doublings from 255 to 120.
+
+**Why discarded:** Bucket aggregation work is unchanged — 18 windows × N points =
+9 windows × 2N points. Since bucket aggregation dominates the MSM cost (~97% of
+msm_batch time), the subsum and fold savings are negligible. The per-proof CPU
+overhead of GLV decomposition + building the 2N×144-byte combined bases buffer with
+conditional point negation adds ~2% regression at n=100K.
+
+The GLV module (`src/glv.rs`) is retained for potential future use if the aggregation
+bottleneck is resolved (e.g. via signed-digit decomposition that reduces bucket count).
+
 ### G2 tree reduction (parallel subsum)
 **Idea:** Apply the same 64-thread parallel tree reduction used for G1 subsum to G2.
 This requires pre-weighting buckets with `scalar_mul_g2` (v * B[v]) in the aggregate
