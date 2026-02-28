@@ -357,3 +357,77 @@ fn add_g2(p1: PointG2, p2: PointG2) -> PointG2 {
 
     return PointG2(x3, y3, z3);
 }
+
+// Mixed addition: P1 (projective, arbitrary Z) + P2 (affine in Montgomery form, Z2 = (R,0)).
+// When Z2 = (R,0) (Montgomery representation of (1,0) in Fq2), several terms simplify:
+//   z2z2 = (R,0), u1 = X1, s1 = Y1, and z1z2_factor = 2*Z1.
+// This saves 5 Fq2 multiplications compared to the full Jacobian addition
+// (11 mul_fp2 vs 16 mul_fp2).
+fn add_g2_mixed(p1: PointG2, p2: PointG2) -> PointG2 {
+    // Z1Z1 = Z1^2
+    let z1z1 = mul_fp2(p1.z, p1.z);
+
+    // u1 = X1 (since Z2 = (R,0): X1 * z2z2 = X1)
+    // u2 = X2 * Z1Z1
+    let u2 = mul_fp2(p2.x, z1z1);
+
+    // s1 = Y1 (since Z2 = (R,0): Y1 * Z2 * z2z2 = Y1)
+    // s2 = Y2 * Z1 * Z1Z1
+    let s2 = mul_fp2(mul_fp2(p2.y, p1.z), z1z1);
+
+    // Check if U1 == U2 (doubling or cancellation)
+    var u_eq = true;
+    for (var i = 0u; i < 12u; i = i + 1u) {
+        if p1.x.c0.limbs[i] != u2.c0.limbs[i] || p1.x.c1.limbs[i] != u2.c1.limbs[i] {
+            u_eq = false;
+            break;
+        }
+    }
+    if u_eq {
+        var s_eq = true;
+        for (var i = 0u; i < 12u; i = i + 1u) {
+            if p1.y.c0.limbs[i] != s2.c0.limbs[i] || p1.y.c1.limbs[i] != s2.c1.limbs[i] {
+                s_eq = false;
+                break;
+            }
+        }
+        if s_eq { return double_g2(p1); }
+        else {
+            return PointG2(
+                Fq2(U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)),
+                    U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))),
+                Fq2(U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)),
+                    U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))),
+                Fq2(U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)),
+                    U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)))
+            );
+        }
+    }
+
+    // H = U2 - U1 = U2 - X1
+    let h = sub_fp2(u2, p1.x);
+    let two_h = add_fp2(h, h);
+    let i_val = mul_fp2(two_h, two_h);
+    let j = mul_fp2(h, i_val);
+    // r = 2*(S2 - S1) = 2*(S2 - Y1)
+    let s2_minus_s1 = sub_fp2(s2, p1.y);
+    let r = add_fp2(s2_minus_s1, s2_minus_s1);
+    // V = U1 * I = X1 * I
+    let v = mul_fp2(p1.x, i_val);
+
+    let r_sq = mul_fp2(r, r);
+    var x3 = sub_fp2(r_sq, j);
+    x3 = sub_fp2(x3, add_fp2(v, v));
+
+    let v_minus_x3 = sub_fp2(v, x3);
+    let r_times_v_minus_x3 = mul_fp2(r, v_minus_x3);
+    let two_s1 = add_fp2(p1.y, p1.y);
+    let two_s1_j = mul_fp2(two_s1, j);
+    let y3 = sub_fp2(r_times_v_minus_x3, two_s1_j);
+
+    // Z3: since Z2=(R,0), 2*Z1*Z2 = 2*Z1 in Montgomery
+    let two_z1 = add_fp2(p1.z, p1.z);
+    let z3 = mul_fp2(two_z1, h);
+
+    return PointG2(x3, y3, z3);
+}

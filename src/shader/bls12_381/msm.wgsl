@@ -126,6 +126,13 @@ fn add_g2_safe(p1: PointG2, p2: PointG2) -> PointG2 {
     return add_g2(p1, p2);
 }
 
+// Mixed safe: P1 projective + P2 affine (Z2 = (R,0) in Montgomery form).
+// P2 is never infinity (bucket sorting filters zeros), so only check P1.
+fn add_g2_mixed_safe(p1: PointG2, p2_affine: PointG2) -> PointG2 {
+    if is_inf_g2(p1) { return p2_affine; }
+    return add_g2_mixed(p1, p2_affine);
+}
+
 // Load Standard Affine -> Montgomery Jacobian
 fn load_g1(p: PointG1) -> PointG1 {
     if p.x.limbs[0] == 0u && p.y.limbs[0] == 0u && p.z.limbs[0] == 0u { return G1_INFINITY; }
@@ -194,6 +201,29 @@ fn to_montgomery_bases_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
 // Load a base point that is already in Montgomery form (skip conversion).
 fn load_g1_mont(p: PointG1) -> PointG1 {
     if p.x.limbs[0] == 0u && p.y.limbs[0] == 0u && p.z.limbs[0] == 0u { return G1_INFINITY; }
+    return p;
+}
+
+// G2 base pre-conversion: standard affine -> Montgomery form (in-place).
+// Same pattern as to_montgomery_bases_g1, but for PointG2 (288 bytes).
+@group(0) @binding(0) var<storage, read_write> bases_preconv_g2: array<PointG2>;
+
+@compute @workgroup_size(64)
+fn to_montgomery_bases_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    if i >= arrayLength(&bases_preconv_g2) { return; }
+    let p = bases_preconv_g2[i];
+    if p.x.c0.limbs[0] == 0u && p.x.c1.limbs[0] == 0u && p.z.c0.limbs[0] == 0u { return; }
+    bases_preconv_g2[i] = PointG2(
+        to_montgomery_fp2(p.x),
+        to_montgomery_fp2(p.y),
+        to_montgomery_fp2(p.z)
+    );
+}
+
+// Load a G2 base point that is already in Montgomery form (skip conversion).
+fn load_g2_mont(p: PointG2) -> PointG2 {
+    if p.x.c0.limbs[0] == 0u && p.x.c1.limbs[0] == 0u && p.z.c0.limbs[0] == 0u { return G2_INFINITY; }
     return p;
 }
 
@@ -310,7 +340,7 @@ fn aggregate_buckets_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let size = bucket_sizes_g2[bucket_idx];
     var sum = G2_INFINITY;
     for (var i = 0u; i < size; i = i + 1u) {
-        sum = add_g2_safe(sum, load_g2(bases_g2[base_indices_g2[start + i]]));
+        sum = add_g2_mixed_safe(sum, load_g2_mont(bases_g2[base_indices_g2[start + i]]));
     }
     aggregated_buckets_g2[bucket_idx] = sum;
 }

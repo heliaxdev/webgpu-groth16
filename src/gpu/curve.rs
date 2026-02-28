@@ -33,7 +33,7 @@ pub trait GpuCurve: 'static {
 
     // Smaller bucket width for G2 MSM (avoids O(2^c) subsum without gap-skipping)
     fn g2_bucket_width() -> usize {
-        4
+        8
     }
 
     // NTT support

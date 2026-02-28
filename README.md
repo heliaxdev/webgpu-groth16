@@ -114,6 +114,24 @@ sorting data for the 4 non-H MSMs (a, b1, l, b2) in parallel. The H bucket data 
 computed after the GPU result is read back. This hides ~74ms of CPU bucket sorting
 behind the GPU wait.
 
+### 11. Mixed affine + projective G2 addition
+Added `add_g2_mixed()` that exploits Z₂ = (R,0) (affine points in Fq2 Montgomery form)
+to save 5 Fq2 multiplications per point addition (11 vs 16 mul_fp2). Combined with a
+`to_montgomery_bases_g2` pre-pass that converts G2 base points to Montgomery form
+once per MSM, eliminating 6 redundant Montgomery conversions per point per window.
+- **msm_batch/5x100K:** 37.7s → 25.3s (1.49x)
+- **full_proof/n=100K:** 38.1s → 25.9s (1.47x)
+
+### 12. Larger G2 bucket width (c=4 → c=8)
+Increased G2 MSM bucket width from c=4 to c=8, reducing the number of windows from
+64 to 32 and improving GPU parallelism. With c=4, only 960 active buckets were
+dispatched (15 per window × 64 windows), each processing ~6,667 points sequentially.
+With c=8, 8,160 active buckets (255 per window × 32 windows) process ~392 points
+each, achieving much better GPU utilization. Profiled c=4,6,8,10 — c=8 was the
+clear winner; c=10 regressed due to O(2^c) single-threaded subsum cost.
+- **msm_batch/5x100K:** 25.3s → 6.98s (3.6x)
+- **full_proof/n=100K:** 25.9s → 7.7s (3.4x)
+
 ## Discarded optimizations
 
 The following optimizations were investigated but ultimately discarded because they
