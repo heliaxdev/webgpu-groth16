@@ -155,68 +155,69 @@ fn mul_u32(a: u32, b: u32) -> vec2<u32> {
 // ============================================================================
 
 fn mul_montgomery_u256(a: U256, b: U256) -> U256 {
-    var t = array<u32, 16>(
+    // CIOS Montgomery multiplication for F_r (n=8, t shrinks from 16 to 10)
+    var t = array<u32, 10>(
         0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
-        0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+        0u, 0u
     );
 
     for (var i: u32 = 0u; i < 8u; i = i + 1u) {
-        var carry: u32 = 0u;
-        for (var j: u32 = 0u; j < 8u; j = j + 1u) {
-            let prod = mul_u32(a.limbs[i], b.limbs[j]);
-            let idx = i + j;
-            let s1 = t[idx] + prod.x;
-            let c1 = u32(s1 < t[idx]);
-            let s2 = s1 + carry;
-            let c2 = u32(s2 < s1);
-            t[idx] = s2;
-            carry = prod.y + c1 + c2;
-        }
+        let ai = a.limbs[i];
 
-        var k = i + 8u;
-        var c = carry;
-        while c > 0u && k < 16u {
-            let s = t[k] + c;
-            c = u32(s < t[k]);
-            t[k] = s;
-            k = k + 1u;
-        }
-    }
-
-    for (var i: u32 = 0u; i < 8u; i = i + 1u) {
-        let m = t[i] * INV_R;
-        var carry: u32 = 0u;
+        // Multiply: accumulate a[i] * b[j] into t
+        var C: u32 = 0u;
         for (var j: u32 = 0u; j < 8u; j = j + 1u) {
+            let prod = mul_u32(ai, b.limbs[j]);
+            let sum1 = t[j] + prod.x;
+            let c1 = u32(sum1 < t[j]);
+            let sum2 = sum1 + C;
+            let c2 = u32(sum2 < sum1);
+            t[j] = sum2;
+            C = prod.y + c1 + c2;
+        }
+        let add_n = t[8u] + C;
+        let cn = u32(add_n < t[8u]);
+        t[8u] = add_n;
+        t[9u] = t[9u] + cn;
+
+        // Reduce: m * r with built-in shift
+        let m = t[0u] * INV_R;
+
+        let prod0 = mul_u32(m, R_MODULUS[0u]);
+        let s0 = t[0u] + prod0.x;
+        let c0 = u32(s0 < t[0u]);
+        C = prod0.y + c0;
+
+        for (var j: u32 = 1u; j < 8u; j = j + 1u) {
             let prod = mul_u32(m, R_MODULUS[j]);
-            let idx = i + j;
-            let s1 = t[idx] + prod.x;
-            let c1 = u32(s1 < t[idx]);
-            let s2 = s1 + carry;
-            let c2 = u32(s2 < s1);
-            t[idx] = s2;
-            carry = prod.y + c1 + c2;
+            let sum1 = t[j] + prod.x;
+            let c1 = u32(sum1 < t[j]);
+            let sum2 = sum1 + C;
+            let c2 = u32(sum2 < sum1);
+            t[j - 1u] = sum2;
+            C = prod.y + c1 + c2;
         }
-
-        var k = i + 8u;
-        var c = carry;
-        while c > 0u && k < 16u {
-            let s = t[k] + c;
-            c = u32(s < t[k]);
-            t[k] = s;
-            k = k + 1u;
-        }
+        let add_n2 = t[8u] + C;
+        let cn2 = u32(add_n2 < t[8u]);
+        t[7u] = add_n2;
+        t[8u] = t[9u] + cn2;
+        t[9u] = 0u;
     }
 
     var result: U256;
     for (var i: u32 = 0u; i < 8u; i = i + 1u) {
-        result.limbs[i] = t[i + 8u];
+        result.limbs[i] = t[i];
     }
 
     var is_gte = true;
-    for (var i: u32 = 7u; i < 8u; i = i - 1u) {
-        if result.limbs[i] > R_MODULUS[i] { break; }
-        if result.limbs[i] < R_MODULUS[i] { is_gte = false; break; }
-        if i == 0u { break; }
+    if t[8u] > 0u {
+        is_gte = true;
+    } else {
+        for (var i: u32 = 7u; i < 8u; i = i - 1u) {
+            if result.limbs[i] > R_MODULUS[i] { break; }
+            if result.limbs[i] < R_MODULUS[i] { is_gte = false; break; }
+            if i == 0u { break; }
+        }
     }
     if is_gte {
         result = sub_u256(result, U256(R_MODULUS));
@@ -229,69 +230,76 @@ fn mul_montgomery_u256(a: U256, b: U256) -> U256 {
 // ============================================================================
 
 fn mul_montgomery_u384(a: U384, b: U384) -> U384 {
-    var t = array<u32, 24>(
+    // CIOS (Coarsely Integrated Operand Scanning) Montgomery multiplication.
+    // Interleaves multiply and reduce in each outer iteration with a built-in
+    // shift, reducing the accumulator from 2n=24 to n+2=14 limbs.
+    var t = array<u32, 14>(
         0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
-        0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
-        0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+        0u, 0u, 0u, 0u, 0u, 0u
     );
 
     for (var i: u32 = 0u; i < 12u; i = i + 1u) {
-        var carry: u32 = 0u;
-        for (var j: u32 = 0u; j < 12u; j = j + 1u) {
-            let prod = mul_u32(a.limbs[i], b.limbs[j]);
-            let idx = i + j;
-            let s1 = t[idx] + prod.x;
-            let c1 = u32(s1 < t[idx]);
-            let s2 = s1 + carry;
-            let c2 = u32(s2 < s1);
-            t[idx] = s2;
-            carry = prod.y + c1 + c2;
-        }
+        let ai = a.limbs[i];
 
-        var k = i + 12u;
-        var c = carry;
-        while c > 0u && k < 24u {
-            let s = t[k] + c;
-            c = u32(s < t[k]);
-            t[k] = s;
-            k = k + 1u;
-        }
-    }
-
-    for (var i: u32 = 0u; i < 12u; i = i + 1u) {
-        let m = t[i] * INV_Q;
-        var carry: u32 = 0u;
+        // Multiply: accumulate a[i] * b[j] into t
+        var C: u32 = 0u;
         for (var j: u32 = 0u; j < 12u; j = j + 1u) {
+            let prod = mul_u32(ai, b.limbs[j]);
+            let sum1 = t[j] + prod.x;
+            let c1 = u32(sum1 < t[j]);
+            let sum2 = sum1 + C;
+            let c2 = u32(sum2 < sum1);
+            t[j] = sum2;
+            C = prod.y + c1 + c2;
+        }
+        let add_n = t[12u] + C;
+        let cn = u32(add_n < t[12u]);
+        t[12u] = add_n;
+        t[13u] = t[13u] + cn;
+
+        // Reduce: m * q with built-in shift (write to j-1)
+        let m = t[0u] * INV_Q;
+
+        // j=0: t[0] + m*q[0] is zero by construction, just compute carry
+        let prod0 = mul_u32(m, Q_MODULUS[0u]);
+        let s0 = t[0u] + prod0.x;
+        let c0 = u32(s0 < t[0u]);
+        C = prod0.y + c0;
+
+        // j=1..11: accumulate and shift (write to j-1)
+        for (var j: u32 = 1u; j < 12u; j = j + 1u) {
             let prod = mul_u32(m, Q_MODULUS[j]);
-            let idx = i + j;
-            let s1 = t[idx] + prod.x;
-            let c1 = u32(s1 < t[idx]);
-            let s2 = s1 + carry;
-            let c2 = u32(s2 < s1);
-            t[idx] = s2;
-            carry = prod.y + c1 + c2;
+            let sum1 = t[j] + prod.x;
+            let c1 = u32(sum1 < t[j]);
+            let sum2 = sum1 + C;
+            let c2 = u32(sum2 < sum1);
+            t[j - 1u] = sum2;
+            C = prod.y + c1 + c2;
         }
-
-        var k = i + 12u;
-        var c = carry;
-        while c > 0u && k < 24u {
-            let s = t[k] + c;
-            c = u32(s < t[k]);
-            t[k] = s;
-            k = k + 1u;
-        }
+        // Shift the top words
+        let add_n2 = t[12u] + C;
+        let cn2 = u32(add_n2 < t[12u]);
+        t[11u] = add_n2;
+        t[12u] = t[13u] + cn2;
+        t[13u] = 0u;
     }
 
+    // Result is in t[0..11]
     var result: U384;
     for (var i: u32 = 0u; i < 12u; i = i + 1u) {
-        result.limbs[i] = t[i + 12u];
+        result.limbs[i] = t[i];
     }
 
+    // Conditional subtraction if result >= Q
     var is_gte = true;
-    for (var i: u32 = 11u; i < 12u; i = i - 1u) {
-        if result.limbs[i] > Q_MODULUS[i] { break; }
-        if result.limbs[i] < Q_MODULUS[i] { is_gte = false; break; }
-        if i == 0u { break; }
+    if t[12u] > 0u {
+        is_gte = true;
+    } else {
+        for (var i: u32 = 11u; i < 12u; i = i - 1u) {
+            if result.limbs[i] > Q_MODULUS[i] { break; }
+            if result.limbs[i] < Q_MODULUS[i] { is_gte = false; break; }
+            if i == 0u { break; }
+        }
     }
     if is_gte {
         result = sub_u384(result, U384(Q_MODULUS));

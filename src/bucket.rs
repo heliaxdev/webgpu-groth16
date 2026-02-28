@@ -477,6 +477,253 @@ mod tests {
         }
     }
 
+    /// GLV bucket sorting: structural invariants hold for random scalars.
+    #[test]
+    fn glv_bucket_sorting_structural_invariants() {
+        use crate::glv;
+        use blstrs::G1Affine;
+        use group::prime::PrimeCurveAffine;
+
+        let c = 15usize;
+        let g = G1Affine::generator();
+
+        for &n in &[1, 2, 10, 50] {
+            let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(OsRng)).collect();
+
+            let bases_bytes: Vec<u8> = (0..n)
+                .flat_map(|_| <Bls12 as GpuCurve>::serialize_g1(&g))
+                .collect();
+            let phi_bases_bytes: Vec<u8> = (0..n)
+                .flat_map(|_| {
+                    let phi = glv::endomorphism_g1(&g);
+                    <Bls12 as GpuCurve>::serialize_g1(&phi)
+                })
+                .collect();
+
+            let (combined, bd) =
+                compute_glv_bucket_sorting::<Bls12>(&scalars, &bases_bytes, &phi_bases_bytes, c);
+
+            // Combined bases should have 2*n points of 144 bytes each
+            assert_eq!(combined.len(), n * 2 * 144);
+
+            // Window/bucket parallel array lengths
+            assert_eq!(bd.bucket_pointers.len(), bd.num_active_buckets as usize);
+            assert_eq!(bd.bucket_sizes.len(), bd.num_active_buckets as usize);
+            assert_eq!(bd.bucket_values.len(), bd.num_active_buckets as usize);
+            assert_eq!(bd.window_starts.len(), bd.num_windows as usize);
+            assert_eq!(bd.window_counts.len(), bd.num_windows as usize);
+
+            // Sum invariants
+            let total_active: u32 = bd.window_counts.iter().sum();
+            assert_eq!(total_active, bd.num_active_buckets);
+            let total_entries: u32 = bd.bucket_sizes.iter().sum();
+            assert_eq!(total_entries as usize, bd.base_indices.len());
+
+            // Bucket values in [1, 2^c - 1] (unsigned decomposition for GLV)
+            for &v in &bd.bucket_values {
+                assert!(v >= 1);
+                assert!(v < (1 << c));
+            }
+
+            // All base indices must be < 2*n (no sign bit in GLV path)
+            for &idx in &bd.base_indices {
+                assert!((idx as usize) < 2 * n, "GLV index {idx} out of range for 2*n={}", 2 * n);
+            }
+        }
+    }
+
+    /// GLV bucket sorting with all-zero scalars produces no buckets.
+    #[test]
+    fn glv_bucket_sorting_all_zero_scalars() {
+        use crate::glv;
+        use blstrs::G1Affine;
+        use group::prime::PrimeCurveAffine;
+
+        let c = 15usize;
+        let g = G1Affine::generator();
+        let n = 5;
+
+        let scalars = vec![Scalar::ZERO; n];
+        let bases_bytes: Vec<u8> = (0..n)
+            .flat_map(|_| <Bls12 as GpuCurve>::serialize_g1(&g))
+            .collect();
+        let phi_bases_bytes: Vec<u8> = (0..n)
+            .flat_map(|_| {
+                let phi = glv::endomorphism_g1(&g);
+                <Bls12 as GpuCurve>::serialize_g1(&phi)
+            })
+            .collect();
+
+        let (combined, bd) =
+            compute_glv_bucket_sorting::<Bls12>(&scalars, &bases_bytes, &phi_bases_bytes, c);
+
+        assert_eq!(combined.len(), n * 2 * 144);
+        assert_eq!(bd.num_active_buckets, 0);
+        assert_eq!(bd.base_indices.len(), 0);
+    }
+
+    /// GLV bucket sorting: every scalar's windows land in the correct bucket.
+    #[test]
+    fn glv_bucket_sorting_window_correctness() {
+        use crate::glv;
+        use blstrs::G1Affine;
+        use group::prime::PrimeCurveAffine;
+
+        let c = 15usize;
+        let g = G1Affine::generator();
+        let n = 20;
+
+        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(OsRng)).collect();
+        let bases_bytes: Vec<u8> = (0..n)
+            .flat_map(|_| <Bls12 as GpuCurve>::serialize_g1(&g))
+            .collect();
+        let phi_bases_bytes: Vec<u8> = (0..n)
+            .flat_map(|_| {
+                let phi = glv::endomorphism_g1(&g);
+                <Bls12 as GpuCurve>::serialize_g1(&phi)
+            })
+            .collect();
+
+        let (_combined, bd) =
+            compute_glv_bucket_sorting::<Bls12>(&scalars, &bases_bytes, &phi_bases_bytes, c);
+
+        // Recompute the expected windows
+        let mut expected_windows: Vec<Vec<u32>> = Vec::new();
+        for s in &scalars {
+            let (k1, _k1_neg, k2, _k2_neg) = glv::glv_decompose(s);
+            expected_windows.push(glv::u128_to_windows(k1, c));
+            expected_windows.push(glv::u128_to_windows(k2, c));
+        }
+
+        // Verify each window
+        for w in 0..bd.num_windows as usize {
+            let w_start = bd.window_starts[w] as usize;
+            let w_count = bd.window_counts[w] as usize;
+
+            let mut found: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+            for b in 0..w_count {
+                let bucket_idx = w_start + b;
+                let val = bd.bucket_values[bucket_idx];
+                let ptr = bd.bucket_pointers[bucket_idx] as usize;
+                let size = bd.bucket_sizes[bucket_idx] as usize;
+                for k in 0..size {
+                    let idx = bd.base_indices[ptr + k];
+                    found.insert(idx, val);
+                }
+            }
+
+            // Every expected non-zero window must appear in found
+            for (i, windows) in expected_windows.iter().enumerate() {
+                if w < windows.len() {
+                    let val = windows[w];
+                    if val != 0 {
+                        assert_eq!(
+                            found.get(&(i as u32)),
+                            Some(&val),
+                            "point {i} window {w}: expected bucket {val}, got {:?}",
+                            found.get(&(i as u32))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bucket pointers form contiguous, non-overlapping spans in base_indices.
+    #[test]
+    fn bucket_pointers_are_contiguous() {
+        let scalars: Vec<Scalar> = (0..500).map(|_| Scalar::random(OsRng)).collect();
+        let bd = compute_bucket_sorting::<Bls12>(&scalars);
+
+        if bd.num_active_buckets == 0 {
+            return;
+        }
+
+        // Verify bucket spans are consecutive and cover base_indices exactly.
+        let mut expected_ptr = 0u32;
+        for i in 0..bd.num_active_buckets as usize {
+            assert_eq!(
+                bd.bucket_pointers[i], expected_ptr,
+                "bucket {i} pointer gap: expected {expected_ptr}, got {}",
+                bd.bucket_pointers[i]
+            );
+            expected_ptr += bd.bucket_sizes[i];
+        }
+        assert_eq!(expected_ptr as usize, bd.base_indices.len());
+    }
+
+    /// Each scalar appears at most once per window in the bucket data.
+    #[test]
+    fn no_duplicate_scalars_in_window() {
+        let scalars: Vec<Scalar> = (0..200).map(|_| Scalar::random(OsRng)).collect();
+        let bd = compute_bucket_sorting::<Bls12>(&scalars);
+
+        for w in 0..bd.num_windows as usize {
+            let w_start = bd.window_starts[w] as usize;
+            let w_count = bd.window_counts[w] as usize;
+            let mut seen = std::collections::HashSet::new();
+
+            for b in 0..w_count {
+                let bucket_idx = w_start + b;
+                let ptr = bd.bucket_pointers[bucket_idx] as usize;
+                let size = bd.bucket_sizes[bucket_idx] as usize;
+                for k in 0..size {
+                    let idx = bd.base_indices[ptr + k] & INDEX_MASK;
+                    assert!(
+                        seen.insert(idx),
+                        "scalar {idx} appears more than once in window {w}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Bucket values within each window have no duplicates (each value is unique).
+    #[test]
+    fn bucket_values_unique_per_window() {
+        let scalars: Vec<Scalar> = (0..300).map(|_| Scalar::random(OsRng)).collect();
+        let bd = compute_bucket_sorting::<Bls12>(&scalars);
+
+        for w in 0..bd.num_windows as usize {
+            let w_start = bd.window_starts[w] as usize;
+            let w_count = bd.window_counts[w] as usize;
+            let mut seen_vals = std::collections::HashSet::new();
+            for b in 0..w_count {
+                let val = bd.bucket_values[w_start + b];
+                assert!(
+                    seen_vals.insert(val),
+                    "duplicate bucket value {val} in window {w}"
+                );
+            }
+        }
+    }
+
+    /// Various small constant scalars produce expected window patterns.
+    #[test]
+    fn bucket_sorting_small_constants() {
+        let c = <Bls12 as GpuCurve>::bucket_width();
+        let half = 1u64 << (c - 1);
+
+        // Scalar = 1 should land in bucket 1, window 0, positive
+        let bd = compute_bucket_sorting::<Bls12>(&[Scalar::from(1u64)]);
+        assert_eq!(bd.num_active_buckets, 1);
+        assert_eq!(bd.bucket_values[0], 1);
+        assert_eq!(bd.base_indices[0] & SIGN_BIT_MASK, 0);
+
+        // Scalar = half-1 should be positive in window 0
+        let bd = compute_bucket_sorting::<Bls12>(&[Scalar::from(half - 1)]);
+        assert_eq!(bd.num_active_buckets, 1);
+        assert_eq!(bd.bucket_values[0], (half - 1) as u32);
+        assert_eq!(bd.base_indices[0] & SIGN_BIT_MASK, 0);
+
+        // Scalar = half should be negative (boundary): abs=half, neg=true, carry=1
+        let bd = compute_bucket_sorting::<Bls12>(&[Scalar::from(half)]);
+        assert!(bd.num_active_buckets >= 1);
+        // The first window should have the sign bit set
+        let has_neg = bd.base_indices.iter().any(|&r| r & SIGN_BIT_MASK != 0);
+        assert!(has_neg, "scalar=2^(c-1) should produce a negated entry");
+    }
+
     /// Verify no window has abs == 2^(c-1) AND neg==false simultaneously
     /// (values at the boundary should always be negative to maintain the
     /// invariant that bucket values are in [1, 2^(c-1)]).

@@ -567,7 +567,234 @@ mod tests {
         out
     }
 
-    /// Verify GLV decomposition for k=0.
+    /// Verify β² + β + 1 = 0 (characteristic polynomial of cube root of unity).
+    #[test]
+    fn beta_satisfies_minimal_polynomial() {
+        let beta: Fp = Fp::from_bytes_le(&BETA_LE_BYTES).unwrap();
+        // β² + β + 1 should be 0 in Fq
+        let beta_sq = beta * beta;
+        let sum = beta_sq + beta + Fp::ONE;
+        assert_eq!(sum, Fp::ZERO, "β should satisfy β² + β + 1 = 0");
+    }
+
+    /// Verify GLV decomposition for k=1 (simplest non-trivial case).
+    #[test]
+    fn glv_decompose_one() {
+        let lambda = Scalar::from_repr_vartime([
+            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff,
+            0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00, 0x78, 0xa7,
+            0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33,
+            0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
+        ]).unwrap();
+
+        let (k1, k1_neg, k2, k2_neg) = glv_decompose(&Scalar::ONE);
+        let k1_s = scalar_from_u128(k1, k1_neg);
+        let k2_s = scalar_from_u128(k2, k2_neg);
+        let reconstructed = k1_s + k2_s * lambda;
+        assert_eq!(reconstructed, Scalar::ONE, "decomposition of 1 failed");
+    }
+
+    /// Verify GLV decomposition for r-1 (largest scalar).
+    #[test]
+    fn glv_decompose_r_minus_one() {
+        let lambda = Scalar::from_repr_vartime([
+            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff,
+            0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00, 0x78, 0xa7,
+            0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33,
+            0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
+        ]).unwrap();
+
+        let k = -Scalar::ONE; // r - 1
+        let (k1, k1_neg, k2, k2_neg) = glv_decompose(&k);
+
+        // Verify reconstruction
+        let k1_s = scalar_from_u128(k1, k1_neg);
+        let k2_s = scalar_from_u128(k2, k2_neg);
+        let reconstructed = k1_s + k2_s * lambda;
+        assert_eq!(reconstructed, k, "decomposition of r-1 failed");
+
+        // Both halves should fit in ~128 bits
+        assert!(k1 < (1u128 << 127) + (1u128 << 126), "k1 too large for r-1");
+        assert!(k2 < (1u128 << 127) + (1u128 << 126), "k2 too large for r-1");
+    }
+
+    /// Verify GLV decomposition for λ itself: k=λ should give k1=0, k2=1.
+    #[test]
+    fn glv_decompose_lambda() {
+        let lambda = Scalar::from_repr_vartime([
+            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff,
+            0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00, 0x78, 0xa7,
+            0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33,
+            0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
+        ]).unwrap();
+
+        let (k1, k1_neg, k2, k2_neg) = glv_decompose(&lambda);
+        let k1_s = scalar_from_u128(k1, k1_neg);
+        let k2_s = scalar_from_u128(k2, k2_neg);
+        let reconstructed = k1_s + k2_s * lambda;
+        assert_eq!(reconstructed, lambda, "decomposition of λ failed");
+    }
+
+    /// Verify multi-precision arithmetic: mul_u128_u128.
+    #[test]
+    fn mul_u128_u128_known_values() {
+        // 0 * 0 = 0
+        let r = mul_u128_u128(0, 0);
+        assert_eq!(r, [0, 0, 0, 0]);
+
+        // 1 * 1 = 1
+        let r = mul_u128_u128(1, 1);
+        assert_eq!(r, [1, 0, 0, 0]);
+
+        // (2^64) * (2^64) = 2^128
+        let a: u128 = 1u128 << 64;
+        let b: u128 = 1u128 << 64;
+        let r = mul_u128_u128(a, b);
+        // 2^128 = [0, 0, 1, 0]
+        assert_eq!(r, [0, 0, 1, 0]);
+
+        // (2^128 - 1) * 2 = 2^129 - 2
+        let max = u128::MAX;
+        let r = mul_u128_u128(max, 2);
+        // max * 2 = 2^129 - 2 = [0xFFFF...FFFE, 0xFFFF...FFFF, 1, 0]
+        assert_eq!(r[0], u64::MAX - 1); // 0xFFFFFFFFFFFFFFFE
+        assert_eq!(r[1], u64::MAX);
+        assert_eq!(r[2], 1);
+        assert_eq!(r[3], 0);
+    }
+
+    /// Verify multi-precision arithmetic: sub_u256.
+    #[test]
+    fn sub_u256_known_values() {
+        // a - 0 = a
+        let a = [42u64, 0, 0, 0];
+        let (r, borrow) = sub_u256(&a, &[0, 0, 0, 0]);
+        assert_eq!(r, a);
+        assert!(!borrow);
+
+        // 0 - 1 borrows (underflow)
+        let (r, borrow) = sub_u256(&[0, 0, 0, 0], &[1, 0, 0, 0]);
+        assert!(borrow);
+        assert_eq!(r[0], u64::MAX); // wraps around
+
+        // a - a = 0
+        let a = [0x1234, 0x5678, 0x9abc, 0xdef0];
+        let (r, borrow) = sub_u256(&a, &a);
+        assert_eq!(r, [0, 0, 0, 0]);
+        assert!(!borrow);
+    }
+
+    /// Verify multi-precision arithmetic: negate_u256.
+    #[test]
+    fn negate_u256_known_values() {
+        // -0 = 0
+        let r = negate_u256(&[0, 0, 0, 0]);
+        assert_eq!(r, [0, 0, 0, 0]);
+
+        // -1 = MAX (two's complement)
+        let r = negate_u256(&[1, 0, 0, 0]);
+        assert_eq!(r, [u64::MAX, u64::MAX, u64::MAX, u64::MAX]);
+
+        // double negation: -(-x) = x
+        let x = [0xdeadbeef, 0xcafebabe, 0x12345678, 0x9abcdef0];
+        let neg = negate_u256(&x);
+        let double_neg = negate_u256(&neg);
+        assert_eq!(double_neg, x);
+    }
+
+    /// Verify gt_u256 comparison.
+    #[test]
+    fn gt_u256_comparison() {
+        // Equal values: not greater than
+        let a = [1, 2, 3, 4];
+        assert!(!gt_u256(&a, &a));
+
+        // Differ in highest limb
+        assert!(gt_u256(&[0, 0, 0, 5], &[0, 0, 0, 4]));
+        assert!(!gt_u256(&[0, 0, 0, 4], &[0, 0, 0, 5]));
+
+        // Differ in lowest limb only
+        assert!(gt_u256(&[2, 0, 0, 0], &[1, 0, 0, 0]));
+        assert!(!gt_u256(&[1, 0, 0, 0], &[2, 0, 0, 0]));
+
+        // Higher limbs dominate
+        assert!(gt_u256(&[0, 0, 0, 1], &[u64::MAX, u64::MAX, u64::MAX, 0]));
+    }
+
+    /// Verify bytes_to_u64x4 with known input.
+    #[test]
+    fn bytes_to_u64x4_roundtrip() {
+        let limbs = [0x0102030405060708u64, 0x090a0b0c0d0e0f10, 0x1112131415161718, 0x191a1b1c1d1e1f20];
+        let mut bytes = Vec::new();
+        for l in &limbs {
+            bytes.extend_from_slice(&l.to_le_bytes());
+        }
+        let parsed = bytes_to_u64x4(&bytes);
+        assert_eq!(parsed, limbs);
+    }
+
+    /// Verify u128_to_windows for various window sizes.
+    #[test]
+    fn u128_to_windows_various_widths() {
+        for c in [8, 13, 15, 16] {
+            let vals = [0u128, 1, u128::MAX, 1u128 << 127, (1u128 << 64) - 1];
+            for val in vals {
+                let windows = u128_to_windows(val, c);
+                let expected = reference_u128_windows(val, c);
+                assert_eq!(windows, expected, "mismatch for val={val:#x} c={c}");
+            }
+        }
+    }
+
+    /// Endomorphism applied twice is not identity but applying three times is.
+    #[test]
+    fn endomorphism_g1_order_three() {
+        let g = G1Affine::generator();
+        let phi1 = endomorphism_g1(&g);
+        let phi2 = endomorphism_g1(&phi1);
+        let phi3 = endomorphism_g1(&phi2);
+
+        assert_ne!(phi1, g, "φ(G) should not equal G");
+        assert_ne!(phi2, g, "φ²(G) should not equal G");
+        assert_eq!(phi3, g, "φ³(G) should equal G (order 3)");
+    }
+
+    /// Point negation on identity is a no-op.
+    #[test]
+    fn negate_g1_bytes_identity() {
+        let mut zero_bytes = vec![0u8; 144];
+        let original = zero_bytes.clone();
+        negate_g1_bytes(&mut zero_bytes);
+        assert_eq!(zero_bytes, original, "negating identity should be a no-op");
+    }
+
+    /// Endomorphism and negation commute: φ(-P) = -φ(P).
+    #[test]
+    fn endomorphism_negation_commute() {
+        use crate::gpu::curve::GpuCurve;
+
+        let g = G1Affine::generator();
+        let g_bytes = <blstrs::Bls12 as GpuCurve>::serialize_g1(&g);
+
+        // φ(-P)
+        let mut neg_bytes = g_bytes.clone();
+        negate_g1_bytes(&mut neg_bytes);
+        let phi_neg = endomorphism_g1_bytes(&neg_bytes);
+
+        // -φ(P)
+        let phi_bytes = endomorphism_g1_bytes(&g_bytes);
+        let mut neg_phi = phi_bytes.clone();
+        negate_g1_bytes(&mut neg_phi);
+
+        // They should be equal (endomorphism is a group homomorphism)
+        assert_eq!(
+            phi_neg.to_vec(),
+            neg_phi.to_vec(),
+            "φ(-P) should equal -φ(P)"
+        );
+    }
+
+    /// GLV decomposition for k=0.
     #[test]
     fn glv_decompose_zero() {
         let (k1, k1_neg, k2, k2_neg) = glv_decompose(&Scalar::ZERO);

@@ -541,11 +541,21 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
         }))
     };
 
+    let t_msm_enqueue = std::time::Instant::now();
     let a_job = enqueue_g1("a", a_bytes, a_bd)?;
+    eprintln!("[msm] enqueue a: {:?} ({} bases)", t_msm_enqueue.elapsed(), a_bytes.len() / 144);
+    let t_msm_enqueue = std::time::Instant::now();
     let b1_job = enqueue_g1("b1", b1_bytes, b1_bd)?;
+    eprintln!("[msm] enqueue b1: {:?} ({} bases)", t_msm_enqueue.elapsed(), b1_bytes.len() / 144);
+    let t_msm_enqueue = std::time::Instant::now();
     let l_job = enqueue_g1("l", l_bytes, l_bd)?;
+    eprintln!("[msm] enqueue l: {:?} ({} bases)", t_msm_enqueue.elapsed(), l_bytes.len() / 144);
+    let t_msm_enqueue = std::time::Instant::now();
     let h_job = enqueue_g1("h", h_bytes, h_bd)?;
+    eprintln!("[msm] enqueue h: {:?} ({} bases)", t_msm_enqueue.elapsed(), h_bytes.len() / 144);
+    let t_msm_enqueue = std::time::Instant::now();
     let b2_job = enqueue_g2(b2_bytes, b2_bd)?;
+    eprintln!("[msm] enqueue b2: {:?} ({} bases)", t_msm_enqueue.elapsed(), b2_bytes.len() / 288);
 
     let mut read_targets: Vec<(&wgpu::Buffer, wgpu::BufferAddress)> = Vec::new();
     if let Some(job) = &a_job {
@@ -564,7 +574,9 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
         read_targets.push((&job.sums_buf, (job.num_windows * 288) as u64));
     }
 
+    let t_readback = std::time::Instant::now();
     let mut read_results = gpu.read_buffers_batch(&read_targets).await?.into_iter();
+    eprintln!("[msm] readback: {:?}", t_readback.elapsed());
 
     let a = if let Some(job) = &a_job {
         fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, G::bucket_width())?
@@ -737,6 +749,7 @@ where
             G2Affine = E::G2Affine,
         > + Send,
 {
+    let t_phase = std::time::Instant::now();
     let mut cs = GpuConstraintSystem::<G>::new();
     circuit
         .synthesize(&mut cs)
@@ -753,7 +766,10 @@ where
 
     let num_constraints = cs.a_lcs.len();
     let n = num_constraints.next_power_of_two();
+    eprintln!("[proof] synthesis: {:?} (constraints={num_constraints}, n={n}, inputs={}, aux={})",
+        t_phase.elapsed(), cs.inputs.len(), cs.aux.len());
 
+    let t_phase = std::time::Instant::now();
     let mut a_values = vec![G::Scalar::ZERO; n];
     let mut b_values = vec![G::Scalar::ZERO; n];
     let mut c_values = vec![G::Scalar::ZERO; n];
@@ -763,9 +779,11 @@ where
         b_values[i] = eval_lc(&cs.b_lcs[i], &cs.inputs, &cs.aux);
         c_values[i] = eval_lc(&cs.c_lcs[i], &cs.inputs, &cs.aux);
     }
+    eprintln!("[proof] eval_lc: {:?}", t_phase.elapsed());
 
     // Build assignments before H poly so we can pre-compute bucket data
     // while the GPU processes the H polynomial pipeline.
+    let t_phase = std::time::Instant::now();
     let mut a_assignment = cs.inputs.clone();
     for (i, v) in cs.aux.iter().enumerate() {
         if cs.a_aux_density[i] {
@@ -774,31 +792,33 @@ where
     }
     let b_assignment =
         dense_assignment_from_masks(&cs.inputs, &cs.aux, &cs.b_input_density, &cs.b_aux_density);
+    eprintln!("[proof] assignments: {:?} (a_assign={}, b_assign={})",
+        t_phase.elapsed(), a_assignment.len(), b_assignment.len());
 
-    #[cfg(feature = "timing")]
-    let t_h_start = std::time::Instant::now();
-
+    let t_phase = std::time::Instant::now();
     // Submit H polynomial to GPU (non-blocking — GPU processes asynchronously)
     let h_pending = submit_h_poly::<G>(gpu, &a_values, &b_values, &c_values)?;
+    eprintln!("[proof] h_poly submit: {:?}", t_phase.elapsed());
 
+    let t_phase = std::time::Instant::now();
     // Pre-compute bucket data for non-H MSMs while GPU computes H
     let a_bd = compute_bucket_sorting::<G>(&a_assignment);
     let b1_bd = compute_bucket_sorting::<G>(&b_assignment);
     let l_bd = compute_bucket_sorting::<G>(&cs.aux);
     let b2_bd = compute_bucket_sorting_with_width::<G>(&b_assignment, G::g2_bucket_width());
+    eprintln!("[proof] bucket sorting (4x): {:?}", t_phase.elapsed());
 
+    let t_phase = std::time::Instant::now();
     // Await H result (GPU likely already done by now)
     let h_coeffs = read_h_poly_result::<G>(gpu, h_pending).await?;
-
-    #[cfg(feature = "timing")]
-    eprintln!("[timing] h_poly: {:?}", t_h_start.elapsed());
+    eprintln!("[proof] h_poly read: {:?}", t_phase.elapsed());
 
     // H bucket data depends on h_coeffs
+    let t_phase = std::time::Instant::now();
     let h_bd = compute_bucket_sorting::<G>(&h_coeffs[..pk.h.len()]);
+    eprintln!("[proof] h bucket sorting: {:?}", t_phase.elapsed());
 
-    #[cfg(feature = "timing")]
-    let t_msm_start = std::time::Instant::now();
-
+    let t_phase = std::time::Instant::now();
     let (a_msm, b_g1_msm, l_msm, h_msm, b_g2_msm) = gpu_msm_batch_bytes::<G>(
         gpu,
         &ppk.a_bytes,
@@ -813,10 +833,9 @@ where
         b2_bd,
     )
     .await?;
+    eprintln!("[proof] msm_batch: {:?}", t_phase.elapsed());
 
-    #[cfg(feature = "timing")]
-    eprintln!("[timing] msm_batch: {:?}", t_msm_start.elapsed());
-
+    let t_phase = std::time::Instant::now();
     let mut proof_a = G::add_g1_proj(&G::affine_to_proj_g1(&pk.vk.alpha_g1), &a_msm);
     proof_a = G::add_g1_proj(&proof_a, &G::mul_g1_scalar(&pk.vk.delta_g1, &r));
 
@@ -837,6 +856,7 @@ where
     rs *= s;
     let rs_delta = G::mul_g1_scalar(&pk.vk.delta_g1, &rs);
     proof_c = G::sub_g1_proj(&proof_c, &rs_delta);
+    eprintln!("[proof] final assembly: {:?}", t_phase.elapsed());
 
     Ok(bellman::groth16::Proof {
         a: G::proj_to_affine_g1(&proof_a),
@@ -1107,20 +1127,337 @@ mod tests {
             commitment_randomness: None,
             esk: None,
         };
+
+        let t = Instant::now();
         let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup, &mut rng)
             .expect("failed to generate sapling output parameters");
+        eprintln!("[diag] param gen: {:?}", t.elapsed());
+        eprintln!(
+            "[diag] params sizes: a={}, b_g1={}, l={}, h={}, b_g2={}",
+            params.a.len(),
+            params.b_g1.len(),
+            params.l.len(),
+            params.h.len(),
+            params.b_g2.len()
+        );
+
+        let t = Instant::now();
         let gpu_ctx = GpuContext::<Bls12>::new()
             .await
             .expect("failed to initialize gpu");
+        eprintln!("[diag] gpu init: {:?}", t.elapsed());
 
         let circuit = sample_sapling_output_circuit();
+
+        let t = Instant::now();
         let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
+        eprintln!("[diag] ppk serialization: {:?}", t.elapsed());
+
         let t0 = Instant::now();
         let _proof = create_proof::<Bls12, Bls12, _, _>(circuit, &params, &ppk, &gpu_ctx, &mut rng)
             .await
             .expect("gpu sapling output proof failed");
         let dt = t0.elapsed();
-        eprintln!("GPU Sapling Output proof took {:?}", dt);
+        eprintln!("[diag] total proof: {:?}", dt);
+    }
+
+    /// eval_lc with an empty linear combination returns zero.
+    #[test]
+    fn eval_lc_empty() {
+        let inputs = vec![Scalar::from(10u64)];
+        let aux = vec![Scalar::from(20u64)];
+        let lc: Vec<(bellman::Variable, Scalar)> = vec![];
+        assert_eq!(eval_lc(&lc, &inputs, &aux), Scalar::ZERO);
+    }
+
+    /// eval_lc computes the correct linear combination.
+    #[test]
+    fn eval_lc_known_value() {
+        let inputs = vec![Scalar::from(1u64), Scalar::from(5u64)];
+        let aux = vec![Scalar::from(7u64), Scalar::from(11u64)];
+
+        // 3 * input[1] + 2 * aux[0] = 3*5 + 2*7 = 15 + 14 = 29
+        let lc = vec![
+            (
+                bellman::Variable::new_unchecked(bellman::Index::Input(1)),
+                Scalar::from(3u64),
+            ),
+            (
+                bellman::Variable::new_unchecked(bellman::Index::Aux(0)),
+                Scalar::from(2u64),
+            ),
+        ];
+        let result = eval_lc(&lc, &inputs, &aux);
+        assert_eq!(result, Scalar::from(29u64));
+    }
+
+    /// dense_assignment_from_masks with all-false masks returns empty.
+    #[test]
+    fn dense_assignment_all_false() {
+        let inputs = vec![Scalar::from(1u64), Scalar::from(2u64)];
+        let aux = vec![Scalar::from(3u64), Scalar::from(4u64)];
+        let input_mask = vec![false, false];
+        let aux_mask = vec![false, false];
+        let result = dense_assignment_from_masks(&inputs, &aux, &input_mask, &aux_mask);
+        assert!(result.is_empty());
+    }
+
+    /// dense_assignment_from_masks with all-true masks returns all values in order.
+    #[test]
+    fn dense_assignment_all_true() {
+        let inputs = vec![Scalar::from(1u64), Scalar::from(2u64)];
+        let aux = vec![Scalar::from(3u64), Scalar::from(4u64)];
+        let input_mask = vec![true, true];
+        let aux_mask = vec![true, true];
+        let result = dense_assignment_from_masks(&inputs, &aux, &input_mask, &aux_mask);
+        assert_eq!(
+            result,
+            vec![
+                Scalar::from(1u64),
+                Scalar::from(2u64),
+                Scalar::from(3u64),
+                Scalar::from(4u64)
+            ]
+        );
+    }
+
+    /// dense_assignment_from_masks with selective masks picks the right entries.
+    #[test]
+    fn dense_assignment_selective() {
+        let inputs = vec![Scalar::from(10u64), Scalar::from(20u64), Scalar::from(30u64)];
+        let aux = vec![Scalar::from(40u64), Scalar::from(50u64)];
+        let input_mask = vec![false, true, false];
+        let aux_mask = vec![true, false];
+        let result = dense_assignment_from_masks(&inputs, &aux, &input_mask, &aux_mask);
+        assert_eq!(result, vec![Scalar::from(20u64), Scalar::from(40u64)]);
+    }
+
+    /// GpuConstraintSystem starts with one input (the implicit ONE).
+    #[test]
+    fn gpu_constraint_system_initial_state() {
+        let cs = GpuConstraintSystem::<Bls12>::new();
+        assert_eq!(cs.inputs.len(), 1);
+        assert_eq!(cs.inputs[0], Scalar::ONE);
+        assert!(cs.aux.is_empty());
+        assert_eq!(cs.b_input_density.len(), 1);
+        assert!(!cs.b_input_density[0]);
+    }
+
+    /// DummyCircuit synthesizes correctly and produces the right witness.
+    #[test]
+    fn dummy_circuit_synthesis() {
+        let x = Scalar::from(3u64);
+        let y = Scalar::from(27u64); // 3^3
+
+        let mut cs = GpuConstraintSystem::<Bls12>::new();
+        DummyCircuit {
+            x: Some(x),
+            y: Some(y),
+        }
+        .synthesize(&mut cs)
+        .expect("synthesis should succeed");
+
+        // Should have 2 inputs: the implicit ONE and y
+        assert_eq!(cs.inputs.len(), 2);
+        assert_eq!(cs.inputs[1], y);
+
+        // Should have 2 aux: x and x_sq
+        assert_eq!(cs.aux.len(), 2);
+        assert_eq!(cs.aux[0], x);
+        assert_eq!(cs.aux[1], x.square());
+    }
+
+    /// DummyCircuit: verify the constraint system is satisfiable.
+    #[test]
+    fn dummy_circuit_constraints_satisfied() {
+        let x = Scalar::from(4u64);
+        let y = Scalar::from(64u64); // 4^3
+
+        let mut cs = GpuConstraintSystem::<Bls12>::new();
+        DummyCircuit {
+            x: Some(x),
+            y: Some(y),
+        }
+        .synthesize(&mut cs)
+        .expect("synthesis should succeed");
+
+        // Add input constraints (mirroring create_proof logic)
+        for i in 0..cs.inputs.len() {
+            cs.a_lcs.push(vec![(
+                bellman::Variable::new_unchecked(bellman::Index::Input(i)),
+                Scalar::ONE,
+            )]);
+            cs.b_lcs.push(Vec::new());
+            cs.c_lcs.push(Vec::new());
+        }
+
+        // Verify A*B = C for each constraint
+        for i in 0..cs.a_lcs.len() {
+            let a_val = eval_lc(&cs.a_lcs[i], &cs.inputs, &cs.aux);
+            let b_val = eval_lc(&cs.b_lcs[i], &cs.inputs, &cs.aux);
+            let c_val = eval_lc(&cs.c_lcs[i], &cs.inputs, &cs.aux);
+            assert_eq!(
+                a_val * b_val,
+                c_val,
+                "constraint {i} not satisfied: a*b != c"
+            );
+        }
+    }
+
+    /// DummyCircuit with wrong witness (x^3 != y) should fail constraint check.
+    #[test]
+    fn dummy_circuit_wrong_witness_detected() {
+        let x = Scalar::from(3u64);
+        let y = Scalar::from(28u64); // Wrong! 3^3 = 27 != 28
+
+        let mut cs = GpuConstraintSystem::<Bls12>::new();
+        DummyCircuit {
+            x: Some(x),
+            y: Some(y),
+        }
+        .synthesize(&mut cs)
+        .expect("synthesis should succeed even with wrong witness");
+
+        // Check that x * x = x_sq holds
+        let x_val = cs.aux[0]; // x
+        let x_sq = cs.aux[1]; // x_sq
+        assert_eq!(x_val * x_val, x_sq, "x * x = x_sq should hold");
+
+        // Check that x_sq * x != y (wrong witness)
+        let y_val = cs.inputs[1]; // y
+        assert_ne!(x_sq * x_val, y_val, "wrong witness should not satisfy constraint");
+    }
+
+    /// fold_window_sums_g1: single identity window should return identity.
+    #[test]
+    fn fold_window_sums_identity() {
+        // Serialize a single G1 identity point
+        let identity_bytes = <Bls12 as GpuCurve>::serialize_g1(
+            &<blstrs::G1Affine as group::prime::PrimeCurveAffine>::identity(),
+        );
+        let result = fold_window_sums_g1::<Bls12>(&identity_bytes, 1, 13).unwrap();
+        assert!(
+            bool::from(result.is_identity()),
+            "folding a single identity window should give identity"
+        );
+    }
+
+    /// fold_window_sums_g1 with one non-trivial window returns that point.
+    #[test]
+    fn fold_window_sums_single_point() {
+        let g = <blstrs::G1Affine as group::prime::PrimeCurveAffine>::generator();
+        let g_bytes = <Bls12 as GpuCurve>::serialize_g1(&g);
+        let result = fold_window_sums_g1::<Bls12>(&g_bytes, 1, 13).unwrap();
+        let result_affine: blstrs::G1Affine = result.into();
+        assert_eq!(
+            result_affine, g,
+            "single window fold should return the window sum"
+        );
+    }
+
+    /// fold_window_sums_g1: two windows, verify Horner-style folding.
+    /// result = window[1] * 2^c + window[0]
+    #[test]
+    fn fold_window_sums_two_windows() {
+        use group::prime::PrimeCurveAffine;
+
+        let g = blstrs::G1Affine::generator();
+        let g_proj = blstrs::G1Projective::from(g);
+        let c = 13usize;
+
+        // window 0 = G, window 1 = 2G
+        let p0 = g;
+        let p1: blstrs::G1Affine = (g_proj + g_proj).into();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&<Bls12 as GpuCurve>::serialize_g1(&p0));
+        bytes.extend_from_slice(&<Bls12 as GpuCurve>::serialize_g1(&p1));
+
+        let result = fold_window_sums_g1::<Bls12>(&bytes, 2, c).unwrap();
+
+        // Expected: start with window[1]=2G, double c times, add window[0]=G
+        // = 2G * 2^13 + G = G * (2^14 + 1) = G * 16385
+        let expected = g_proj * Scalar::from(16385u64);
+        assert_eq!(
+            blstrs::G1Affine::from(result),
+            blstrs::G1Affine::from(expected),
+            "two-window fold mismatch"
+        );
+    }
+
+    /// CPU proof generation and verification across several (x, y=x^3) pairs.
+    #[test]
+    fn cpu_proof_multiple_witnesses() {
+        let mut rng = OsRng;
+        let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
+        let params =
+            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+                .expect("param gen failed");
+        let pvk = bellman::groth16::prepare_verifying_key(&params.vk);
+
+        for x_val in [1u64, 2, 3, 5, 100, 999] {
+            let x = Scalar::from(x_val);
+            let y = x * x * x;
+            let circuit = DummyCircuit {
+                x: Some(x),
+                y: Some(y),
+            };
+
+            let proof = bellman::groth16::create_random_proof(circuit, &params, &mut rng)
+                .expect("cpu proof failed");
+            let valid = bellman::groth16::verify_proof(&pvk, &proof, &[y])
+                .expect("verification failed");
+            assert!(valid, "proof for x={x_val} should verify");
+        }
+    }
+
+    /// A CPU proof with incorrect witness should fail verification.
+    #[test]
+    fn cpu_proof_wrong_public_input_rejects() {
+        let mut rng = OsRng;
+        let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
+        let params =
+            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+                .expect("param gen failed");
+        let pvk = bellman::groth16::prepare_verifying_key(&params.vk);
+
+        let x = Scalar::from(5u64);
+        let y = x * x * x; // 125
+        let circuit = DummyCircuit {
+            x: Some(x),
+            y: Some(y),
+        };
+
+        let proof = bellman::groth16::create_random_proof(circuit, &params, &mut rng)
+            .expect("cpu proof failed");
+
+        // Should verify with correct y
+        let valid = bellman::groth16::verify_proof(&pvk, &proof, &[y]).expect("verify failed");
+        assert!(valid);
+
+        // Should reject with wrong y
+        let wrong_y = Scalar::from(126u64);
+        let invalid = bellman::groth16::verify_proof(&pvk, &proof, &[wrong_y]).expect("verify failed");
+        assert!(!invalid, "should reject proof with wrong public input");
+    }
+
+    /// PreparedProvingKey serialization produces expected byte lengths.
+    #[test]
+    fn prepared_proving_key_sizes() {
+        let mut rng = OsRng;
+        let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
+        let params =
+            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+                .expect("param gen failed");
+
+        let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
+
+        // Each G1 point serializes to 144 bytes, each G2 to 288 bytes
+        assert_eq!(ppk.a_bytes.len(), params.a.len() * 144);
+        assert_eq!(ppk.b_g1_bytes.len(), params.b_g1.len() * 144);
+        assert_eq!(ppk.l_bytes.len(), params.l.len() * 144);
+        assert_eq!(ppk.h_bytes.len(), params.h.len() * 144);
+        assert_eq!(ppk.b_g2_bytes.len(), params.b_g2.len() * 288);
     }
 
     #[tokio::test]
