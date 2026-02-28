@@ -112,6 +112,13 @@ fn add_g1_safe(p1: PointG1, p2: PointG1) -> PointG1 {
     return add_g1(p1, p2);
 }
 
+// Mixed safe: P1 projective + P2 affine (Z2 = R in Montgomery form).
+// P2 is never infinity (bucket sorting filters zeros), so only check P1.
+fn add_g1_mixed_safe(p1: PointG1, p2_affine: PointG1) -> PointG1 {
+    if is_inf_g1(p1) { return p2_affine; }
+    return add_g1_mixed(p1, p2_affine);
+}
+
 fn add_g2_safe(p1: PointG2, p2: PointG2) -> PointG2 {
     let p1_inf = is_inf_g2(p1); let p2_inf = is_inf_g2(p2);
     if p1_inf && p2_inf { return G2_INFINITY; }
@@ -210,7 +217,7 @@ fn aggregate_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let size = bucket_sizes[bucket_idx];
     var sum = G1_INFINITY;
     for (var i = 0u; i < size; i = i + 1u) {
-        sum = add_g1_safe(sum, load_g1_mont(bases_g1[base_indices[start + i]]));
+        sum = add_g1_mixed_safe(sum, load_g1_mont(bases_g1[base_indices[start + i]]));
     }
     // Weight the bucket sum by its bucket value: v * B[v]
     // This moves O(log(v)) work per bucket into the parallel aggregate pass,

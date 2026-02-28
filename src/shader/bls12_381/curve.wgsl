@@ -139,6 +139,65 @@ fn add_g1(p1: PointG1, p2: PointG1) -> PointG1 {
     return PointG1(x3, y3, z3);
 }
 
+// Mixed addition: P1 (projective, arbitrary Z) + P2 (affine in Montgomery form, Z2 = R).
+// When Z2 = R (the Montgomery representation of 1), several terms simplify:
+//   z2z2 = R, u1 = X1, s1 = Y1, and z1z2_factor = 2*Z1.
+// This saves 5 Montgomery multiplications compared to the full Jacobian addition
+// (11 muls vs 16 muls).
+fn add_g1_mixed(p1: PointG1, p2: PointG1) -> PointG1 {
+    // Z1Z1 = Z1^2
+    let z1z1 = mul_montgomery_u384(p1.z, p1.z);
+
+    // u1 = X1 (since Z2 = R: X1 * z2z2 = X1 * R * R^-1 = X1)
+    // u2 = X2 * Z1Z1
+    let u2 = mul_montgomery_u384(p2.x, z1z1);
+
+    // s1 = Y1 (since Z2 = R: Y1 * Z2 * z2z2 = Y1)
+    // s2 = Y2 * Z1 * Z1Z1
+    let s2 = mul_montgomery_u384(mul_montgomery_u384(p2.y, p1.z), z1z1);
+
+    // Check if U1 == U2 (doubling or cancellation)
+    var u_eq = true;
+    for (var i = 0u; i < 12u; i = i + 1u) {
+        if p1.x.limbs[i] != u2.limbs[i] { u_eq = false; break; }
+    }
+    if u_eq {
+        var s_eq = true;
+        for (var i = 0u; i < 12u; i = i + 1u) {
+            if p1.y.limbs[i] != s2.limbs[i] { s_eq = false; break; }
+        }
+        if s_eq { return double_g1(p1); }
+        else { return G1_INFINITY; }
+    }
+
+    // H = U2 - U1 = U2 - X1
+    let h = sub_mod_q(u2, p1.x);
+    let two_h = add_mod_q(h, h);
+    let i = mul_montgomery_u384(two_h, two_h);
+    let j = mul_montgomery_u384(h, i);
+    // r = 2*(S2 - S1) = 2*(S2 - Y1)
+    let s2_minus_s1 = sub_mod_q(s2, p1.y);
+    let r = add_mod_q(s2_minus_s1, s2_minus_s1);
+    // V = U1 * I = X1 * I
+    let v = mul_montgomery_u384(p1.x, i);
+
+    let r_sq = mul_montgomery_u384(r, r);
+    var x3 = sub_mod_q(r_sq, j);
+    x3 = sub_mod_q(x3, add_mod_q(v, v));
+
+    let v_minus_x3 = sub_mod_q(v, x3);
+    let r_times_v_minus_x3 = mul_montgomery_u384(r, v_minus_x3);
+    let two_s1 = add_mod_q(p1.y, p1.y);
+    let two_s1_j = mul_montgomery_u384(two_s1, j);
+    let y3 = sub_mod_q(r_times_v_minus_x3, two_s1_j);
+
+    // Z3: since Z2=R, 2*Z1*Z2 = 2*mul_montgomery(Z1,R) = 2*Z1
+    let two_z1 = add_mod_q(p1.z, p1.z);
+    let z3 = mul_montgomery_u384(two_z1, h);
+
+    return PointG1(x3, y3, z3);
+}
+
 // ============================================================================
 // EXTENSION FIELD ARITHMETIC (F_q^2)
 // Required for G2 Curve elements (the 'B' element in Groth16)
