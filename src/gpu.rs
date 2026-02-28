@@ -755,7 +755,13 @@ impl<C: GpuCurve> GpuContext<C> {
     #[cfg(feature = "profiling")]
     pub fn process_profiler_results(&self) -> Option<Vec<wgpu_profiler::GpuTimerQueryResult>> {
         let mut profiler = self.profiler.lock().unwrap();
-        profiler.process_finished_frame(self.queue.get_timestamp_period())
+        let results = profiler.process_finished_frame(self.queue.get_timestamp_period());
+        if let Some(ref results) = results {
+            // Use our fixed version instead of wgpu_profiler::puffin::output_frame_to_puffin
+            // which has a bug: range_ns.1 = range_ns.0.max(end) should be range_ns.1.max(end)
+            output_gpu_frame_to_puffin(&mut puffin::GlobalProfiler::lock(), results);
+        }
+        results
     }
 
     pub fn create_storage_buffer(&self, label: &str, data: &[u8]) -> wgpu::Buffer {
@@ -1909,6 +1915,80 @@ mod tests {
             let got =
                 <Bls12 as GpuCurve>::deserialize_scalar(chunk).expect("deserialize scalar failed");
             assert_eq!(got, scalars[i], "scalar mismatch at index {i}");
+        }
+    }
+}
+
+// Fixed version of wgpu_profiler::puffin::output_frame_to_puffin.
+// Upstream bug: range_ns.1 = range_ns.0.max(end) should be range_ns.1.max(end).
+// See https://github.com/Wumpf/wgpu-profiler/blob/main/src/puffin.rs
+#[cfg(feature = "profiling")]
+fn output_gpu_frame_to_puffin(
+    profiler: &mut puffin::GlobalProfiler,
+    query_result: &[wgpu_profiler::GpuTimerQueryResult],
+) {
+    let mut stream_info = puffin::StreamInfo::default();
+    collect_gpu_scopes(profiler, &mut stream_info, query_result, 0);
+    if stream_info.num_scopes == 0 {
+        return;
+    }
+
+    // Validate the stream using puffin's own parser before sending to viewer.
+    // This catches any binary format issues that would crash puffin_viewer.
+    match puffin::StreamInfo::parse(stream_info.stream.clone()) {
+        Ok(validated) => {
+            profiler.report_user_scopes(
+                puffin::ThreadInfo {
+                    start_time_ns: None,
+                    name: "GPU".to_string(),
+                },
+                &validated.as_stream_into_ref(),
+            );
+        }
+        Err(e) => {
+            eprintln!("[gpu-profiler] puffin stream validation failed: {e:?}, skipping GPU frame");
+        }
+    }
+}
+
+#[cfg(feature = "profiling")]
+fn collect_gpu_scopes(
+    profiler: &mut puffin::GlobalProfiler,
+    stream_info: &mut puffin::StreamInfo,
+    query_result: &[wgpu_profiler::GpuTimerQueryResult],
+    depth: usize,
+) {
+    let details: Vec<_> = query_result
+        .iter()
+        .map(|q| puffin::ScopeDetails::from_scope_name(q.label.clone()))
+        .collect();
+    let ids = profiler.register_user_scopes(&details);
+    for (query, id) in query_result.iter().zip(ids) {
+        if let Some(time) = &query.time {
+            let start_f = time.start * 1e9;
+            let end_f = time.end * 1e9;
+
+            // puffin rejects scopes where stop_ns < start_ns (InvalidStream).
+            // Skip scopes with non-finite or negative-duration timestamps.
+            if !start_f.is_finite() || !end_f.is_finite() || end_f < start_f {
+                continue;
+            }
+
+            let start = start_f as puffin::NanoSecond;
+            let end = end_f as puffin::NanoSecond;
+
+            if end < start {
+                continue;
+            }
+
+            stream_info.depth = stream_info.depth.max(depth);
+            stream_info.num_scopes += 1;
+            stream_info.range_ns.0 = stream_info.range_ns.0.min(start);
+            stream_info.range_ns.1 = stream_info.range_ns.1.max(end);
+
+            let (offset, _) = stream_info.stream.begin_scope(|| start, id, "");
+            collect_gpu_scopes(profiler, stream_info, &query.nested_queries, depth + 1);
+            stream_info.stream.end_scope(offset, end);
         }
     }
 }
