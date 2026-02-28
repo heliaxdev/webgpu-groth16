@@ -14,7 +14,14 @@ pub struct BucketData {
 }
 
 pub fn compute_bucket_sorting<G: GpuCurve>(scalars: &[G::Scalar]) -> BucketData {
-    let c = G::bucket_width();
+    compute_bucket_sorting_with_width::<G>(scalars, G::bucket_width())
+}
+
+pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
+    scalars: &[G::Scalar],
+    c: usize,
+) -> BucketData {
+    let c = c;
     let scalar_bits = <G::Scalar as PrimeField>::NUM_BITS as usize;
     let num_windows = scalar_bits.div_ceil(c);
 

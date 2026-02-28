@@ -31,6 +31,11 @@ pub trait GpuCurve: 'static {
     // Optimal bucket width for MSM (c such that 2^c buckets)
     fn bucket_width() -> usize;
 
+    // Smaller bucket width for G2 MSM (avoids O(2^c) subsum without gap-skipping)
+    fn g2_bucket_width() -> usize {
+        4
+    }
+
     // NTT support
     fn root_of_unity(n: usize) -> Self::Scalar;
 

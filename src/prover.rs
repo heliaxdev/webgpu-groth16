@@ -8,7 +8,7 @@ use ff::{Field, PrimeField};
 use rand_core::RngCore;
 
 use crate::bellman;
-use crate::bucket::{BucketData, compute_bucket_sorting};
+use crate::bucket::{BucketData, compute_bucket_sorting, compute_bucket_sorting_with_width};
 use crate::gpu::{GpuContext, curve::GpuCurve};
 
 struct GpuConstraintSystem<G: GpuCurve> {
@@ -233,7 +233,7 @@ async fn gpu_msm_g2<G: GpuCurve>(
     bases: &[G::G2Affine],
     scalars: &[G::Scalar],
 ) -> Result<G::G2> {
-    let bd: BucketData = compute_bucket_sorting::<G>(scalars);
+    let bd: BucketData = compute_bucket_sorting_with_width::<G>(scalars, G::g2_bucket_width());
     if bd.num_active_buckets == 0 {
         return Ok(G::g2_identity());
     }
@@ -274,24 +274,18 @@ async fn gpu_msm_g2<G: GpuCurve>(
     let result_bytes = gpu
         .read_buffer(&sums_buf, (bd.num_windows * 288) as u64)
         .await?;
-    let mut result = G::g2_identity();
-    for (i, chunk) in result_bytes.chunks_exact(288).enumerate().rev() {
-        if i != (bd.num_windows - 1) as usize {
-            for _ in 0..G::bucket_width() {
-                result = G::add_g2_proj(&result, &result);
-            }
-        }
-        let w_sum = G::deserialize_g2(chunk)?;
-        result = G::add_g2_proj(&result, &w_sum);
-    }
-    Ok(result)
+    fold_window_sums_g2::<G>(&result_bytes, bd.num_windows, G::g2_bucket_width())
 }
 
-fn fold_window_sums_g1<G: GpuCurve>(result_bytes: &[u8], num_windows: u32) -> Result<G::G1> {
+fn fold_window_sums_g1<G: GpuCurve>(
+    result_bytes: &[u8],
+    num_windows: u32,
+    bucket_width: usize,
+) -> Result<G::G1> {
     let mut result = G::g1_identity();
     for (i, chunk) in result_bytes.chunks_exact(144).enumerate().rev() {
         if i != (num_windows - 1) as usize {
-            for _ in 0..G::bucket_width() {
+            for _ in 0..bucket_width {
                 result = G::add_g1_proj(&result, &result);
             }
         }
@@ -301,11 +295,15 @@ fn fold_window_sums_g1<G: GpuCurve>(result_bytes: &[u8], num_windows: u32) -> Re
     Ok(result)
 }
 
-fn fold_window_sums_g2<G: GpuCurve>(result_bytes: &[u8], num_windows: u32) -> Result<G::G2> {
+fn fold_window_sums_g2<G: GpuCurve>(
+    result_bytes: &[u8],
+    num_windows: u32,
+    bucket_width: usize,
+) -> Result<G::G2> {
     let mut result = G::g2_identity();
     for (i, chunk) in result_bytes.chunks_exact(288).enumerate().rev() {
         if i != (num_windows - 1) as usize {
-            for _ in 0..G::bucket_width() {
+            for _ in 0..bucket_width {
                 result = G::add_g2_proj(&result, &result);
             }
         }
@@ -402,7 +400,7 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
         };
 
     let enqueue_g2 = |bases: &[G::G2Affine], scalars: &[G::Scalar]| -> Result<Option<G2Pending>> {
-        let bd: BucketData = compute_bucket_sorting::<G>(scalars);
+        let bd: BucketData = compute_bucket_sorting_with_width::<G>(scalars, G::g2_bucket_width());
         if bd.num_active_buckets == 0 {
             return Ok(None);
         }
@@ -475,27 +473,27 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
     let mut read_results = gpu.read_buffers_batch(&read_targets).await?.into_iter();
 
     let a = if let Some(job) = &a_job {
-        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows)?
+        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, G::bucket_width())?
     } else {
         G::g1_identity()
     };
     let b1 = if let Some(job) = &b1_job {
-        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows)?
+        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, G::bucket_width())?
     } else {
         G::g1_identity()
     };
     let l = if let Some(job) = &l_job {
-        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows)?
+        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, G::bucket_width())?
     } else {
         G::g1_identity()
     };
     let h = if let Some(job) = &h_job {
-        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows)?
+        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, G::bucket_width())?
     } else {
         G::g1_identity()
     };
     let b2 = if let Some(job) = &b2_job {
-        fold_window_sums_g2::<G>(&read_results.next().unwrap(), job.num_windows)?
+        fold_window_sums_g2::<G>(&read_results.next().unwrap(), job.num_windows, G::g2_bucket_width())?
     } else {
         G::g2_identity()
     };
