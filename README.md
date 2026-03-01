@@ -46,18 +46,15 @@ Montgomery form, bit-reversal permutation, and coset shift stages.
 
 ## Profiling
 
-GPU-level profiling is available via [wgpu-profiler](https://github.com/Wumpf/wgpu-profiler)
-and [Tracy](https://github.com/wolfpld/tracy), gated behind the `profiling` feature.
+GPU-level profiling is available via [wgpu-profiler](https://github.com/Wumpf/wgpu-profiler),
+gated behind the `profiling` feature. Results are written as a Chrome trace JSON file.
 
 ```bash
 # Run the profiling harness (default: 10K constraints, 5 iterations)
 cargo run --release --example profile --features profiling -- [NUM_SQUARINGS] [ITERATIONS]
 
-# Connect Tracy profiler to view the flamegraph
+# Open the generated trace in https://ui.perfetto.dev → load profile.json
 ```
-
-Tracy shows a live flamegraph with per-compute-pass GPU timing (H pipeline stages,
-MSM bucket aggregation / tree reduction).
 
 Instrumented GPU passes:
 - **H pipeline** — `to_montgomery`, `intt_abc`, `coset_shift_abc`, `ntt_abc`,
@@ -286,6 +283,40 @@ At current point set sizes (~21K), the aggregate pass dominates and the window c
 reduction has negligible impact. The optimization becomes more significant at larger
 scales where weight+subsum represent a larger fraction of total GPU compute.
 - **sapling_output:** 16.6s → 16.6s (neutral at ~21K points)
+
+### 19. Sub-bucket chunking for workload-balanced aggregation
+Real-world ZK circuits (e.g. Sapling Output) have highly skewed scalar distributions:
+bucket value 1 in window 0 accumulates 11,767 points while the median bucket gets 1-2.
+Since `aggregate_buckets` assigns 1 GPU thread per bucket, the thread handling the
+overloaded bucket becomes the critical path — explaining why Sapling (32K points) took
+16.6s while 100K uniform-random points took only 3.2s.
+
+Sub-bucket chunking splits any bucket with >64 points into sub-buckets of at most 64
+on the CPU, then adds a lightweight GPU reduce pass (`reduce_sub_buckets_g1/g2`) that
+sums sub-bucket partial results back into per-bucket totals. The reduce pass uses
+`add_g1_safe`/`add_g2_safe` (simple loop, no register pressure) and is dispatched only
+when chunking is needed (`has_chunks` flag). Weight and subsum passes operate on the
+original (non-chunked) bucket metadata, unchanged.
+
+- **sapling_output:** 16.6s → 1.10s (15.1x speedup)
+- **proof/n=100000:** 2.83s → 2.85s (neutral — uniform scalars trigger no chunking)
+
+## Latest Benchmark Results
+
+Measured on Apple M3 Max. Criterion median times.
+
+| Benchmark | Time |
+|---|---|
+| proof/n=2 | 86.7 ms |
+| proof/n=1000 | 265 ms |
+| proof/n=10000 | 758 ms |
+| proof/n=100000 | 2.85 s |
+| msm_g1/n=100000 | 372 ms |
+| msm_batch/5x100 | 164 ms |
+| msm_batch/5x1000 | 297 ms |
+| msm_batch/5x10000 | 735 ms |
+| msm_batch/5x100000 | 2.34 s |
+| sapling_output/proof | 1.10 s |
 
 ## Discarded optimizations
 

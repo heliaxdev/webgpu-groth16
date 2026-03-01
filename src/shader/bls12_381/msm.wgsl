@@ -324,6 +324,35 @@ fn aggregate_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     aggregated_buckets_g1[bucket_idx] = sum;
 }
 
+// Phase 1a-reduce: Sum sub-buckets of the same parent into a single bucket result.
+// Used when large buckets are split into capped-size sub-buckets for load balancing.
+// Thread i handles original bucket i: reads reduce_starts[i]..+reduce_counts[i] from
+// the sub-bucket intermediate buffer and writes the sum to the output buffer.
+@group(0) @binding(0) var<storage, read> reduce_input_g1: array<PointG1>;
+@group(0) @binding(1) var<storage, read> reduce_starts_g1: array<u32>;
+@group(0) @binding(2) var<storage, read> reduce_counts_g1: array<u32>;
+@group(0) @binding(3) var<storage, read_write> reduce_output_g1: array<PointG1>;
+
+@compute @workgroup_size(64)
+fn reduce_sub_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let parent_idx = global_id.x;
+    if parent_idx >= arrayLength(&reduce_starts_g1) { return; }
+
+    let start = reduce_starts_g1[parent_idx];
+    let count = reduce_counts_g1[parent_idx];
+
+    if count == 1u {
+        reduce_output_g1[parent_idx] = reduce_input_g1[start];
+        return;
+    }
+
+    var sum = reduce_input_g1[start];
+    for (var i = 1u; i < count; i = i + 1u) {
+        sum = add_g1_safe(sum, reduce_input_g1[start + i]);
+    }
+    reduce_output_g1[parent_idx] = sum;
+}
+
 // Computes k * P using double-and-add.
 fn scalar_mul_g1(p: PointG1, k: u32) -> PointG1 {
     if k == 0u { return G1_INFINITY; }
@@ -482,6 +511,35 @@ fn aggregate_buckets_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
         sum = add_g2_mixed_safe(sum, base);
     }
     aggregated_buckets_g2[bucket_idx] = sum;
+}
+
+// Phase 1a-reduce for G2: Sum sub-buckets of the same parent into a single bucket result.
+// Aggregate outputs Jacobian; add_g2 calls double_g2 which has Metal issues under pressure.
+// Use add_g2 here — the reduce kernel has low register pressure (simple loop only).
+// NOTE: add_g2_safe is defined earlier in this file (used by aggregate_buckets_g2 too).
+@group(0) @binding(0) var<storage, read> reduce_input_g2: array<PointG2>;
+@group(0) @binding(1) var<storage, read> reduce_starts_g2: array<u32>;
+@group(0) @binding(2) var<storage, read> reduce_counts_g2: array<u32>;
+@group(0) @binding(3) var<storage, read_write> reduce_output_g2: array<PointG2>;
+
+@compute @workgroup_size(64)
+fn reduce_sub_buckets_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let parent_idx = global_id.x;
+    if parent_idx >= arrayLength(&reduce_starts_g2) { return; }
+
+    let start = reduce_starts_g2[parent_idx];
+    let count = reduce_counts_g2[parent_idx];
+
+    if count == 1u {
+        reduce_output_g2[parent_idx] = reduce_input_g2[start];
+        return;
+    }
+
+    var sum = reduce_input_g2[start];
+    for (var i = 1u; i < count; i = i + 1u) {
+        sum = add_g2_safe(sum, reduce_input_g2[start + i]);
+    }
+    reduce_output_g2[parent_idx] = sum;
 }
 
 @group(0) @binding(0) var<storage, read> aggregated_buckets_in_g2: array<PointG2>;

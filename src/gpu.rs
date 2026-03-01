@@ -133,6 +133,14 @@ pub struct MsmBuffers<'a> {
     pub window_starts: &'a wgpu::Buffer,
     pub window_counts: &'a wgpu::Buffer,
     pub window_sums: &'a wgpu::Buffer,
+    /// Sub-bucket reduce buffers (only used when has_chunks is true).
+    pub reduce_starts: Option<&'a wgpu::Buffer>,
+    pub reduce_counts: Option<&'a wgpu::Buffer>,
+    /// Original (pre-chunking) bucket values for weight pass.
+    pub orig_bucket_values: Option<&'a wgpu::Buffer>,
+    /// Original window starts/counts for subsum passes.
+    pub orig_window_starts: Option<&'a wgpu::Buffer>,
+    pub orig_window_counts: Option<&'a wgpu::Buffer>,
 }
 
 /// GPU buffers required for the H polynomial pipeline.
@@ -174,6 +182,8 @@ pub struct GpuContext<C> {
     pub msm_weight_g2_pipeline: wgpu::ComputePipeline,
     pub msm_subsum_phase1_g2_pipeline: wgpu::ComputePipeline,
     pub msm_subsum_phase2_g2_pipeline: wgpu::ComputePipeline,
+    pub msm_reduce_g1_pipeline: wgpu::ComputePipeline,
+    pub msm_reduce_g2_pipeline: wgpu::ComputePipeline,
 
     // Bind Group Layouts
     pub ntt_bind_group_layout: wgpu::BindGroupLayout,
@@ -187,6 +197,7 @@ pub struct GpuContext<C> {
     pub msm_weight_g2_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_subsum_phase1_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_subsum_phase2_bind_group_layout: wgpu::BindGroupLayout,
+    pub msm_reduce_bind_group_layout: wgpu::BindGroupLayout,
 
     _marker: PhantomData<C>,
 
@@ -278,6 +289,8 @@ impl<C: GpuCurve> GpuContext<C> {
         let msm_subsum_phase1_bind_group_layout = create_bind_group_layout(&device, "MSM Subsum Phase1", &[RO, RO, RO, RW, UF]);
         // Phase2: [partial_sums(read), window_sums(rw), subsum_params(uniform)]
         let msm_subsum_phase2_bind_group_layout = create_bind_group_layout(&device, "MSM Subsum Phase2", &[RO, RW, UF]);
+        // Reduce sub-buckets: [input(read), starts(read), counts(read), output(rw)]
+        let msm_reduce_bind_group_layout = create_bind_group_layout(&device, "MSM Reduce", &[RO, RO, RO, RW]);
 
         #[cfg(feature = "timing")]
         let layouts_total = layouts_start.elapsed();
@@ -344,6 +357,12 @@ impl<C: GpuCurve> GpuContext<C> {
             create_pipeline(&device, "MSM Subsum Phase1 G2", &msm_subsum_phase1_layout, &msm_module, "subsum_phase1_g2"));
         let msm_subsum_phase2_g2_pipeline = timed!("pipeline: MSM Subsum Ph2 G2",
             create_pipeline(&device, "MSM Subsum Phase2 G2", &msm_subsum_phase2_layout, &msm_module, "subsum_phase2_g2"));
+
+        let msm_reduce_layout = pipeline_layout(&device, &[&msm_reduce_bind_group_layout]);
+        let msm_reduce_g1_pipeline = timed!("pipeline: MSM Reduce G1",
+            create_pipeline(&device, "MSM Reduce G1", &msm_reduce_layout, &msm_module, "reduce_sub_buckets_g1"));
+        let msm_reduce_g2_pipeline = timed!("pipeline: MSM Reduce G2",
+            create_pipeline(&device, "MSM Reduce G2", &msm_reduce_layout, &msm_module, "reduce_sub_buckets_g2"));
         #[cfg(feature = "timing")]
         {
             let pipelines_total = pipelines_start.elapsed();
@@ -386,6 +405,8 @@ impl<C: GpuCurve> GpuContext<C> {
             msm_weight_g2_pipeline,
             msm_subsum_phase1_g2_pipeline,
             msm_subsum_phase2_g2_pipeline,
+            msm_reduce_g1_pipeline,
+            msm_reduce_g2_pipeline,
             ntt_bind_group_layout,
             ntt_params_bind_group_layout,
             coset_shift_bind_group_layout,
@@ -397,6 +418,7 @@ impl<C: GpuCurve> GpuContext<C> {
             msm_weight_g2_bind_group_layout,
             msm_subsum_phase1_bind_group_layout,
             msm_subsum_phase2_bind_group_layout,
+            msm_reduce_bind_group_layout,
             _marker: PhantomData,
             #[cfg(feature = "profiling")]
             profiler,
@@ -904,6 +926,8 @@ impl<C: GpuCurve> GpuContext<C> {
         is_g2: bool,
         bufs: &MsmBuffers<'_>,
         num_active_buckets: u32,
+        num_dispatched: u32,
+        has_chunks: bool,
         num_windows: u32,
     ) {
         let bases_buf = bufs.bases;
@@ -915,6 +939,25 @@ impl<C: GpuCurve> GpuContext<C> {
         let window_starts_buf = bufs.window_starts;
         let window_counts_buf = bufs.window_counts;
         let window_sums_buf = bufs.window_sums;
+
+        let point_gpu_bytes: u64 = if is_g2 { G2_GPU_BYTES as u64 } else { G1_GPU_BYTES as u64 };
+
+        // When chunking is active, aggregate writes to a larger intermediate buffer
+        // and a reduce pass sums sub-buckets into the final aggregated_buckets buffer.
+        let intermediate_buf = if has_chunks {
+            Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("MSM Intermediate Sub-Buckets"),
+                size: num_dispatched as u64 * point_gpu_bytes,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }))
+        } else {
+            None
+        };
+
+        // The buffer the aggregate kernel writes to: intermediate (chunked) or final (unchunked).
+        let agg_output_buf = intermediate_buf.as_ref().unwrap_or(aggregated_buckets_buf);
+
         let agg_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("MSM Agg Bind Group"),
             layout: &self.msm_agg_bind_group_layout,
@@ -937,7 +980,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: aggregated_buckets_buf.as_entire_binding(),
+                    resource: agg_output_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -991,10 +1034,53 @@ impl<C: GpuCurve> GpuContext<C> {
                 &self.msm_agg_g1_pipeline
             });
             cpass.set_bind_group(0, &agg_bind_group, &[]);
+            cpass.dispatch_workgroups(num_dispatched.div_ceil(MSM_WORKGROUP_SIZE).max(1), 1, 1);
+        }
+
+        // When sub-bucket chunking is active, reduce sub-bucket partial sums
+        // into the final per-bucket aggregated results.
+        if has_chunks {
+            let reduce_starts_buf = bufs.reduce_starts.expect("reduce_starts required when has_chunks");
+            let reduce_counts_buf = bufs.reduce_counts.expect("reduce_counts required when has_chunks");
+            let reduce_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("MSM Reduce Sub-Buckets BG"),
+                layout: &self.msm_reduce_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: agg_output_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: reduce_starts_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: reduce_counts_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: aggregated_buckets_buf.as_entire_binding(),
+                    },
+                ],
+            });
+            let mut cpass = compute_pass!(scope, encoder, "reduce_sub_buckets");
+            cpass.set_pipeline(if is_g2 {
+                &self.msm_reduce_g2_pipeline
+            } else {
+                &self.msm_reduce_g1_pipeline
+            });
+            cpass.set_bind_group(0, &reduce_bind_group, &[]);
             cpass.dispatch_workgroups(num_active_buckets.div_ceil(MSM_WORKGROUP_SIZE).max(1), 1, 1);
         }
 
         // Weight each bucket sum by its bucket value in a separate kernel.
+        // When chunking is active, use original bucket values (not sub-bucket values).
+        let weight_values_buf = if has_chunks {
+            bufs.orig_bucket_values.expect("orig_bucket_values required when has_chunks")
+        } else {
+            bucket_values_buf
+        };
         {
             let weight_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(if is_g2 { "MSM Weight G2 BG" } else { "MSM Weight G1 BG" }),
@@ -1010,7 +1096,7 @@ impl<C: GpuCurve> GpuContext<C> {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: bucket_values_buf.as_entire_binding(),
+                        resource: weight_values_buf.as_entire_binding(),
                     },
                 ],
             });
@@ -1025,16 +1111,13 @@ impl<C: GpuCurve> GpuContext<C> {
         }
 
         // Both G1 and G2: two-pass multi-workgroup tree reduction.
+        // When chunking is active, subsum must use original window metadata
+        // (which maps to num_active_buckets layout in aggregated_buckets_buf).
         {
             let chunks_per_window = if is_g2 {
                 G2_SUBSUM_CHUNKS_PER_WINDOW
             } else {
                 G1_SUBSUM_CHUNKS_PER_WINDOW
-            };
-            let point_gpu_bytes: u64 = if is_g2 {
-                G2_GPU_BYTES as u64
-            } else {
-                G1_GPU_BYTES as u64
             };
 
             let partial_sums_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1052,6 +1135,18 @@ impl<C: GpuCurve> GpuContext<C> {
                 },
             );
 
+            // When chunking, use original window metadata for subsum (matches reduced bucket layout).
+            let subsum_window_starts = if has_chunks {
+                bufs.orig_window_starts.expect("orig_window_starts required when has_chunks")
+            } else {
+                window_starts_buf
+            };
+            let subsum_window_counts = if has_chunks {
+                bufs.orig_window_counts.expect("orig_window_counts required when has_chunks")
+            } else {
+                window_counts_buf
+            };
+
             let phase1_bind_group =
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("MSM Subsum Phase1 BG"),
@@ -1063,11 +1158,11 @@ impl<C: GpuCurve> GpuContext<C> {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: window_starts_buf.as_entire_binding(),
+                            resource: subsum_window_starts.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: window_counts_buf.as_entire_binding(),
+                            resource: subsum_window_counts.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
