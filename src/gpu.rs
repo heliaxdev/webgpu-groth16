@@ -4,6 +4,8 @@ use std::borrow::Cow;
 use std::marker::PhantomData;
 #[cfg(feature = "profiling")]
 use std::sync::Mutex;
+#[cfg(feature = "timing")]
+use std::time::Instant;
 
 use anyhow::Context;
 use futures::channel::oneshot;
@@ -81,23 +83,43 @@ impl<C: GpuCurve> GpuContext<C> {
             .await
             .context("Failed to request WebGPU device")?;
 
+        macro_rules! timed {
+            ($label:expr, $expr:expr) => {{
+                #[cfg(feature = "timing")]
+                let _t = Instant::now();
+                let _r = $expr;
+                #[cfg(feature = "timing")]
+                eprintln!("[init] {:<30} {:>8.1}ms", $label, _t.elapsed().as_secs_f64() * 1000.0);
+                _r
+            }};
+        }
+
+        #[cfg(feature = "timing")]
+        let init_start = Instant::now();
+
         // 1. Compile Shader Modules
-        let ntt_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        #[cfg(feature = "timing")]
+        let shader_start = Instant::now();
+        let ntt_module = timed!("shader: NTT", device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("NTT Shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::NTT_SOURCE)),
-        });
+        }));
 
-        let msm_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let msm_module = timed!("shader: MSM", device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("MSM Shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_SOURCE)),
-        });
+        }));
 
-        let poly_ops_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let poly_ops_module = timed!("shader: Poly Ops", device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Poly Ops Shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::POLY_OPS_SOURCE)),
-        });
+        }));
+        #[cfg(feature = "timing")]
+        let shader_total = shader_start.elapsed();
 
         // 2. Define Bind Group Layouts
+        #[cfg(feature = "timing")]
+        let layouts_start = Instant::now();
         let ntt_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("NTT Bind Group Layout"),
@@ -482,8 +504,15 @@ impl<C: GpuCurve> GpuContext<C> {
                 ],
             });
 
+        #[cfg(feature = "timing")]
+        let layouts_total = layouts_start.elapsed();
+        #[cfg(feature = "timing")]
+        eprintln!("[init] {:<30} {:>8.1}ms", "bind group layouts (total)", layouts_total.as_secs_f64() * 1000.0);
+
         // 3. Create Compute Pipelines
-        let ntt_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        #[cfg(feature = "timing")]
+        let pipelines_start = Instant::now();
+        let ntt_pipeline = timed!("pipeline: NTT Tile", device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("NTT Compute Pipeline"),
             layout: Some(
                 &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -496,7 +525,7 @@ impl<C: GpuCurve> GpuContext<C> {
             entry_point: Some("ntt_tile"),
             compilation_options: Default::default(),
             cache: None,
-        });
+        }));
 
         let ntt_global_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("NTT Global Pipeline Layout"),
@@ -504,7 +533,7 @@ impl<C: GpuCurve> GpuContext<C> {
             immediate_size: 0,
         });
 
-        let ntt_global_stage_pipeline =
+        let ntt_global_stage_pipeline = timed!("pipeline: NTT Global Stage",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("NTT Global Stage Pipeline"),
                 layout: Some(&ntt_global_layout),
@@ -512,9 +541,9 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("ntt_global_stage"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            }));
 
-        let ntt_bitreverse_pipeline =
+        let ntt_bitreverse_pipeline = timed!("pipeline: NTT BitReverse",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("NTT BitReverse Pipeline"),
                 layout: Some(&ntt_global_layout),
@@ -522,9 +551,9 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("bitreverse_inplace"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            }));
 
-        let coset_shift_pipeline =
+        let coset_shift_pipeline = timed!("pipeline: Coset Shift",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Coset Shift Pipeline"),
                 layout: Some(
@@ -538,9 +567,9 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("coset_shift"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            }));
 
-        let pointwise_poly_pipeline =
+        let pointwise_poly_pipeline = timed!("pipeline: Pointwise Poly",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Pointwise Poly Pipeline"),
                 layout: Some(
@@ -554,9 +583,9 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("pointwise_poly"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            }));
 
-        let to_montgomery_pipeline =
+        let to_montgomery_pipeline = timed!("pipeline: To Montgomery",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("To Montgomery Pipeline"),
                 layout: Some(
@@ -570,9 +599,9 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("to_montgomery_array"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            }));
 
-        let from_montgomery_pipeline =
+        let from_montgomery_pipeline = timed!("pipeline: From Montgomery",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("From Montgomery Pipeline"),
                 layout: Some(
@@ -586,7 +615,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("from_montgomery_array"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            }));
 
         let msm_agg_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
@@ -599,7 +628,7 @@ impl<C: GpuCurve> GpuContext<C> {
             immediate_size: 0,
         });
 
-        let msm_agg_g1_pipeline =
+        let msm_agg_g1_pipeline = timed!("pipeline: MSM Agg G1",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("MSM Agg G1"),
                 layout: Some(&msm_agg_layout),
@@ -607,8 +636,8 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("aggregate_buckets_g1"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
-        let msm_sum_g1_pipeline =
+            }));
+        let msm_sum_g1_pipeline = timed!("pipeline: MSM Sum G1",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("MSM Sum G1"),
                 layout: Some(&msm_sum_layout),
@@ -616,8 +645,8 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("subsum_accumulation_g1"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
-        let msm_agg_g2_pipeline =
+            }));
+        let msm_agg_g2_pipeline = timed!("pipeline: MSM Agg G2",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("MSM Agg G2"),
                 layout: Some(&msm_agg_layout),
@@ -625,8 +654,8 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("aggregate_buckets_g2"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
-        let msm_sum_g2_pipeline =
+            }));
+        let msm_sum_g2_pipeline = timed!("pipeline: MSM Sum G2",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("MSM Sum G2"),
                 layout: Some(&msm_sum_layout),
@@ -634,9 +663,9 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("subsum_accumulation_g2"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            }));
 
-        let msm_to_mont_g1_pipeline =
+        let msm_to_mont_g1_pipeline = timed!("pipeline: MSM To Mont G1",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("MSM To Montgomery G1"),
                 layout: Some(
@@ -650,9 +679,9 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("to_montgomery_bases_g1"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            }));
 
-        let msm_to_mont_g2_pipeline =
+        let msm_to_mont_g2_pipeline = timed!("pipeline: MSM To Mont G2",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("MSM To Montgomery G2"),
                 layout: Some(
@@ -666,7 +695,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("to_montgomery_bases_g2"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            }));
 
         let msm_subsum_phase1_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -681,7 +710,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 immediate_size: 0,
             });
 
-        let msm_subsum_phase1_g1_pipeline =
+        let msm_subsum_phase1_g1_pipeline = timed!("pipeline: MSM Subsum Ph1 G1",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("MSM Subsum Phase1 G1"),
                 layout: Some(&msm_subsum_phase1_layout),
@@ -689,8 +718,8 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("subsum_phase1_g1"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
-        let msm_subsum_phase2_g1_pipeline =
+            }));
+        let msm_subsum_phase2_g1_pipeline = timed!("pipeline: MSM Subsum Ph2 G1",
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("MSM Subsum Phase2 G1"),
                 layout: Some(&msm_subsum_phase2_layout),
@@ -698,7 +727,17 @@ impl<C: GpuCurve> GpuContext<C> {
                 entry_point: Some("subsum_phase2_g1"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            }));
+        #[cfg(feature = "timing")]
+        {
+            let pipelines_total = pipelines_start.elapsed();
+            eprintln!("\n[init] === GpuContext::new() summary ===");
+            eprintln!("[init] {:<30} {:>8.1}ms", "shader compilation", shader_total.as_secs_f64() * 1000.0);
+            eprintln!("[init] {:<30} {:>8.1}ms", "bind group layouts", layouts_total.as_secs_f64() * 1000.0);
+            eprintln!("[init] {:<30} {:>8.1}ms", "pipeline creation", pipelines_total.as_secs_f64() * 1000.0);
+            eprintln!("[init] {:<30} {:>8.1}ms", "TOTAL", init_start.elapsed().as_secs_f64() * 1000.0);
+            eprintln!();
+        }
 
         #[cfg(feature = "profiling")]
         let profiler = Mutex::new(wgpu_profiler::GpuProfiler::new(
