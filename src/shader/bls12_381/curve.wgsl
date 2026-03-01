@@ -17,15 +17,15 @@ fn double_g1(p: PointG1) -> PointG1 {
     let is_inf = (p.z.limbs[0] == 0u); // Simplified infinity check
 
     // XX = X^2
-    let xx = mul_montgomery_u384(p.x, p.x);
+    let xx = sqr_montgomery_u384(p.x);
     // YY = Y^2
-    let yy = mul_montgomery_u384(p.y, p.y);
+    let yy = sqr_montgomery_u384(p.y);
     // YYYY = YY^2
-    let yyyy = mul_montgomery_u384(yy, yy);
-    
+    let yyyy = sqr_montgomery_u384(yy);
+
     // S = 2 * ((X + YY)^2 - XX - YYYY)
     let x_plus_yy = add_mod_q(p.x, yy);
-    let x_plus_yy_sq = mul_montgomery_u384(x_plus_yy, x_plus_yy);
+    let x_plus_yy_sq = sqr_montgomery_u384(x_plus_yy);
     var s = sub_mod_q(x_plus_yy_sq, xx);
     s = sub_mod_q(s, yyyy);
     s = add_mod_q(s, s); // * 2
@@ -34,7 +34,7 @@ fn double_g1(p: PointG1) -> PointG1 {
     let m = add_mod_q(add_mod_q(xx, xx), xx);
 
     // T = M^2 - 2*S
-    let m_sq = mul_montgomery_u384(m, m);
+    let m_sq = sqr_montgomery_u384(m);
     let t = sub_mod_q(m_sq, add_mod_q(s, s));
 
     // X_out = T
@@ -49,9 +49,9 @@ fn double_g1(p: PointG1) -> PointG1 {
     let y_out = sub_mod_q(m_times_s_minus_t, eight_yyyy);
 
     // Z_out = (Y + Z)^2 - YY - ZZ
-    let zz = mul_montgomery_u384(p.z, p.z);
+    let zz = sqr_montgomery_u384(p.z);
     let y_plus_z = add_mod_q(p.y, p.z);
-    let y_plus_z_sq = mul_montgomery_u384(y_plus_z, y_plus_z);
+    let y_plus_z_sq = sqr_montgomery_u384(y_plus_z);
     var z_out = sub_mod_q(y_plus_z_sq, yy);
     z_out = sub_mod_q(z_out, zz);
 
@@ -61,9 +61,9 @@ fn double_g1(p: PointG1) -> PointG1 {
 // Computes P1 + P2 in Jacobian coordinates.
 fn add_g1(p1: PointG1, p2: PointG1) -> PointG1 {
     // Z1Z1 = Z1^2
-    let z1z1 = mul_montgomery_u384(p1.z, p1.z);
+    let z1z1 = sqr_montgomery_u384(p1.z);
     // Z2Z2 = Z2^2
-    let z2z2 = mul_montgomery_u384(p2.z, p2.z);
+    let z2z2 = sqr_montgomery_u384(p2.z);
 
     // U1 = X1 * Z2Z2
     let u1 = mul_montgomery_u384(p1.x, z2z2);
@@ -109,7 +109,7 @@ fn add_g1(p1: PointG1, p2: PointG1) -> PointG1 {
     let h = sub_mod_q(u2, u1);
     // I = (2*H)^2
     let two_h = add_mod_q(h, h);
-    let i = mul_montgomery_u384(two_h, two_h);
+    let i = sqr_montgomery_u384(two_h);
     // J = H * I
     let j = mul_montgomery_u384(h, i);
     // r = 2*(S2 - S1)
@@ -119,7 +119,7 @@ fn add_g1(p1: PointG1, p2: PointG1) -> PointG1 {
     let v = mul_montgomery_u384(u1, i);
 
     // X3 = r^2 - J - 2*V
-    let r_sq = mul_montgomery_u384(r, r);
+    let r_sq = sqr_montgomery_u384(r);
     var x3 = sub_mod_q(r_sq, j);
     x3 = sub_mod_q(x3, add_mod_q(v, v));
 
@@ -132,7 +132,7 @@ fn add_g1(p1: PointG1, p2: PointG1) -> PointG1 {
 
     // Z3 = ((Z1 + Z2)^2 - Z1Z1 - Z2Z2) * H
     let z1_plus_z2 = add_mod_q(p1.z, p2.z);
-    let z1_plus_z2_sq = mul_montgomery_u384(z1_plus_z2, z1_plus_z2);
+    let z1_plus_z2_sq = sqr_montgomery_u384(z1_plus_z2);
     let z1z2_factor = sub_mod_q(sub_mod_q(z1_plus_z2_sq, z1z1), z2z2);
     let z3 = mul_montgomery_u384(z1z2_factor, h);
 
@@ -146,7 +146,7 @@ fn add_g1(p1: PointG1, p2: PointG1) -> PointG1 {
 // (11 muls vs 16 muls).
 fn add_g1_mixed(p1: PointG1, p2: PointG1) -> PointG1 {
     // Z1Z1 = Z1^2
-    let z1z1 = mul_montgomery_u384(p1.z, p1.z);
+    let z1z1 = sqr_montgomery_u384(p1.z);
 
     // u1 = X1 (since Z2 = R: X1 * z2z2 = X1 * R * R^-1 = X1)
     // u2 = X2 * Z1Z1
@@ -173,7 +173,7 @@ fn add_g1_mixed(p1: PointG1, p2: PointG1) -> PointG1 {
     // H = U2 - U1 = U2 - X1
     let h = sub_mod_q(u2, p1.x);
     let two_h = add_mod_q(h, h);
-    let i = mul_montgomery_u384(two_h, two_h);
+    let i = sqr_montgomery_u384(two_h);
     let j = mul_montgomery_u384(h, i);
     // r = 2*(S2 - S1) = 2*(S2 - Y1)
     let s2_minus_s1 = sub_mod_q(s2, p1.y);
@@ -181,7 +181,7 @@ fn add_g1_mixed(p1: PointG1, p2: PointG1) -> PointG1 {
     // V = U1 * I = X1 * I
     let v = mul_montgomery_u384(p1.x, i);
 
-    let r_sq = mul_montgomery_u384(r, r);
+    let r_sq = sqr_montgomery_u384(r);
     var x3 = sub_mod_q(r_sq, j);
     x3 = sub_mod_q(x3, add_mod_q(v, v));
 
