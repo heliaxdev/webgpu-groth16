@@ -32,7 +32,8 @@ fn double_g1(p: PointG1) -> PointG1 {
     s = add_mod_q(s, s); // * 2
 
     // M = 3 * XX (since a = 0)
-    let m = add_mod_q(add_mod_q(xx, xx), xx);
+    // m only feeds sqr_montgomery and mul_montgomery, which handle inputs < 3q < R
+    let m = add_u384(add_u384(xx, xx), xx);
 
     // T = M^2 - 2*S
     let m_sq = sqr_montgomery_u384(m);
@@ -233,8 +234,9 @@ fn mul_fp2(a: Fq2, b: Fq2) -> Fq2 {
     let a1b1 = mul_montgomery_u384(a.c1, b.c1);
     
     // a0b1 + a1b0 = (a0 + a1)*(b0 + b1) - a0b0 - a1b1
-    let a0_plus_a1 = add_mod_q(a.c0, a.c1);
-    let b0_plus_b1 = add_mod_q(b.c0, b.c1);
+    // Sums only feed mul_montgomery, which handles inputs < 2q < R
+    let a0_plus_a1 = add_u384(a.c0, a.c1);
+    let b0_plus_b1 = add_u384(b.c0, b.c1);
     let a_plus_b_prod = mul_montgomery_u384(a0_plus_a1, b0_plus_b1);
 
     var c1_out = sub_mod_q(a_plus_b_prod, a0b0);
@@ -249,7 +251,8 @@ fn mul_fp2(a: Fq2, b: Fq2) -> Fq2 {
 // Uses 2 Fq muls instead of 3 for general multiplication (33% savings).
 // c0 = (a0 + a1)(a0 - a1), c1 = 2 * a0 * a1
 fn sqr_fp2(a: Fq2) -> Fq2 {
-    let a0_plus_a1 = add_mod_q(a.c0, a.c1);
+    // Sum only feeds mul_montgomery, which handles inputs < 2q < R
+    let a0_plus_a1 = add_u384(a.c0, a.c1);
     let a0_minus_a1 = sub_mod_q(a.c0, a.c1);
     let c0_out = mul_montgomery_u384(a0_plus_a1, a0_minus_a1);
     let a0a1 = mul_montgomery_u384(a.c0, a.c1);
