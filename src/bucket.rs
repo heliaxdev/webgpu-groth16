@@ -1,28 +1,120 @@
 use crate::glv;
 use crate::gpu::curve::{GpuCurve, G1_GPU_BYTES};
 
+/// Maximum number of points a single GPU thread will process in aggregate_buckets.
+/// Buckets larger than this are split into sub-buckets for load balancing.
+const MAX_CHUNK_SIZE: u32 = 64;
+
 /// Bucket sorting result for GPU MSM dispatch.
 ///
 /// Uses a Structure-of-Arrays layout: each array is uploaded as a separate
 /// `storage<read_only>` GPU buffer. This avoids struct padding issues in WGSL
 /// and allows independent buffer bindings per kernel.
 ///
+/// When sub-bucket chunking is active (`has_chunks == true`), the parallel arrays
+/// (`bucket_pointers`, `bucket_sizes`, `bucket_values`, `window_starts`,
+/// `window_counts`) describe *sub-buckets* (dispatched units), not logical buckets.
+/// The `reduce_starts`/`reduce_counts` arrays map original bucket indices to their
+/// sub-bucket ranges for a post-aggregation reduction pass.
+///
 /// Invariants:
-/// - `bucket_pointers[i]` is the starting index in `base_indices` for bucket `i`
-/// - `bucket_sizes[i]` is the count of points in bucket `i`
-/// - `bucket_values[i]` is the scalar weight for bucket `i` (in `[1, 2^(c-1)]`)
-/// - `window_starts[w]` is the first bucket index belonging to window `w`
-/// - `window_counts[w]` is the number of active (non-empty) buckets in window `w`
+/// - `bucket_pointers[i]` is the starting index in `base_indices` for sub-bucket `i`
+/// - `bucket_sizes[i]` is the count of points in sub-bucket `i` (<= MAX_CHUNK_SIZE)
+/// - `bucket_values[i]` is the scalar weight for sub-bucket `i` (in `[1, 2^(c-1)]`)
+/// - `window_starts[w]` is the first sub-bucket index belonging to window `w`
+/// - `window_counts[w]` is the number of sub-buckets in window `w`
+/// - `reduce_starts[j]` is the first sub-bucket index for original bucket `j`
+/// - `reduce_counts[j]` is the number of sub-buckets for original bucket `j`
 pub struct BucketData {
     pub base_indices: Vec<u32>,
+    /// Sub-bucket pointers into base_indices (length = num_dispatched).
     pub bucket_pointers: Vec<u32>,
+    /// Sub-bucket sizes, each <= MAX_CHUNK_SIZE (length = num_dispatched).
     pub bucket_sizes: Vec<u32>,
+    /// Sub-bucket values, same as parent's value (length = num_dispatched).
     pub bucket_values: Vec<u32>,
+    /// Sub-bucket window starts (length = num_windows).
     pub window_starts: Vec<u32>,
+    /// Sub-bucket counts per window (length = num_windows).
     pub window_counts: Vec<u32>,
     pub num_windows: u32,
+    /// Number of original (logical) buckets.
     pub num_active_buckets: u32,
+    /// Number of dispatched sub-buckets (>= num_active_buckets when chunking occurs).
+    pub num_dispatched: u32,
+    /// Original bucket values for weight/subsum passes (length = num_active_buckets).
+    pub orig_bucket_values: Vec<u32>,
+    /// Original window starts for weight/subsum passes (length = num_windows).
+    pub orig_window_starts: Vec<u32>,
+    /// Original window counts for weight/subsum passes (length = num_windows).
+    pub orig_window_counts: Vec<u32>,
+    /// Start offset in the dispatch buffer for each original bucket.
+    pub reduce_starts: Vec<u32>,
+    /// Number of sub-buckets for each original bucket.
+    pub reduce_counts: Vec<u32>,
+    /// Whether any bucket was split into sub-buckets.
+    pub has_chunks: bool,
     pub bucket_width: usize,
+}
+
+impl BucketData {
+    /// Print bucket size distribution statistics for diagnosing workload imbalance.
+    /// Only active when the `timing` feature is enabled.
+    pub fn print_distribution_stats(&self, _label: &str) {
+        #[cfg(feature = "timing")]
+        {
+            let label = _label;
+            if self.num_active_buckets == 0 {
+                eprintln!("[bucket-diag] {label}: 0 active buckets");
+                return;
+            }
+            let mut sizes: Vec<u32> = self.bucket_sizes.clone();
+            sizes.sort();
+            let n = sizes.len();
+            let total: u32 = sizes.iter().sum();
+            let max = *sizes.last().unwrap();
+            let min = *sizes.first().unwrap();
+            let mean = total as f64 / n as f64;
+            let median = sizes[n / 2];
+            let p90 = sizes[(n * 90) / 100];
+            let p95 = sizes[(n * 95) / 100];
+            let p99 = sizes[n.saturating_sub(1).min((n * 99) / 100)];
+
+            let over_64 = sizes.iter().filter(|&&s| s > 64).count();
+            let over_256 = sizes.iter().filter(|&&s| s > 256).count();
+            let over_1024 = sizes.iter().filter(|&&s| s > 1024).count();
+
+            eprintln!(
+                "[bucket-diag] {label}: {n} active buckets, {total} total points, c={}",
+                self.bucket_width
+            );
+            eprintln!("[bucket-diag]   min={min} max={max} mean={mean:.1} median={median}");
+            eprintln!("[bucket-diag]   p90={p90} p95={p95} p99={p99}");
+            eprintln!("[bucket-diag]   >64: {over_64}  >256: {over_256}  >1024: {over_1024}");
+
+            // Per-window summary for windows with large buckets
+            for w in 0..self.num_windows as usize {
+                let start = self.window_starts[w] as usize;
+                let count = self.window_counts[w] as usize;
+                if count == 0 {
+                    continue;
+                }
+                let w_sizes: Vec<u32> = (start..start + count)
+                    .map(|i| self.bucket_sizes[i])
+                    .collect();
+                let w_max = *w_sizes.iter().max().unwrap();
+                let w_total: u32 = w_sizes.iter().sum();
+                // Find the bucket value with max size
+                let max_idx = w_sizes.iter().position(|&s| s == w_max).unwrap();
+                let max_val = self.bucket_values[start + max_idx];
+                if w_max > 32 {
+                    eprintln!(
+                        "[bucket-diag]   window {w}: {count} buckets, max_size={w_max} (val={max_val}), total={w_total}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Sign bit used to encode point negation in base_indices entries.
@@ -33,16 +125,20 @@ const SIGN_BIT: u32 = 1 << 31;
 ///
 /// `all_windows[i]` contains the (absolute_value, is_negative) pairs for point `i`.
 /// `c` is the bucket width (window size in bits).
+///
+/// Large buckets (size > MAX_CHUNK_SIZE) are split into sub-buckets to ensure
+/// uniform GPU thread workload in the aggregate pass.
 fn build_bucket_data(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
     let num_windows = all_windows.iter().map(|w| w.len()).max().unwrap_or(0);
     let num_buckets = (1usize << (c - 1)) + 1;
 
+    // First pass: collect points into logical buckets per window.
     let mut base_indices = Vec::new();
-    let mut bucket_pointers = Vec::new();
-    let mut bucket_sizes = Vec::new();
-    let mut bucket_values = Vec::new();
-    let mut window_starts = Vec::new();
-    let mut window_counts = Vec::new();
+    let mut orig_pointers = Vec::new();
+    let mut orig_sizes = Vec::new();
+    let mut orig_values = Vec::new();
+    let mut orig_window_starts = Vec::new();
+    let mut orig_window_counts = Vec::new();
 
     for w in 0..num_windows {
         let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); num_buckets];
@@ -57,22 +153,73 @@ fn build_bucket_data(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
             }
         }
 
-        window_starts.push(bucket_values.len() as u32);
-        let mut count = 0;
+        orig_window_starts.push(orig_values.len() as u32);
+        let mut count = 0u32;
 
         for (val, indices) in buckets.into_iter().enumerate() {
             if !indices.is_empty() {
-                bucket_pointers.push(base_indices.len() as u32);
-                bucket_sizes.push(indices.len() as u32);
-                bucket_values.push(val as u32);
+                orig_pointers.push(base_indices.len() as u32);
+                orig_sizes.push(indices.len() as u32);
+                orig_values.push(val as u32);
                 base_indices.extend(indices);
                 count += 1;
             }
         }
-        window_counts.push(count);
+        orig_window_counts.push(count);
     }
 
-    let num_active_buckets = bucket_sizes.len() as u32;
+    let num_active_buckets = orig_sizes.len() as u32;
+
+    // Second pass: split large buckets into sub-buckets of at most MAX_CHUNK_SIZE.
+    let mut bucket_pointers = Vec::new();
+    let mut bucket_sizes = Vec::new();
+    let mut bucket_values = Vec::new();
+    let mut window_starts = Vec::new();
+    let mut window_counts = Vec::new();
+    let mut reduce_starts = Vec::new();
+    let mut reduce_counts = Vec::new();
+    let mut has_chunks = false;
+
+    for w in 0..num_windows {
+        let w_start = orig_window_starts[w] as usize;
+        let w_count = orig_window_counts[w] as usize;
+        window_starts.push(bucket_pointers.len() as u32);
+        let mut dispatched_in_window = 0u32;
+
+        for b in 0..w_count {
+            let orig_idx = w_start + b;
+            let ptr = orig_pointers[orig_idx];
+            let size = orig_sizes[orig_idx];
+            let val = orig_values[orig_idx];
+
+            let sub_start = bucket_pointers.len() as u32;
+
+            if size <= MAX_CHUNK_SIZE {
+                bucket_pointers.push(ptr);
+                bucket_sizes.push(size);
+                bucket_values.push(val);
+                reduce_starts.push(sub_start);
+                reduce_counts.push(1);
+                dispatched_in_window += 1;
+            } else {
+                has_chunks = true;
+                let num_chunks = size.div_ceil(MAX_CHUNK_SIZE);
+                for chunk in 0..num_chunks {
+                    let chunk_start = ptr + chunk * MAX_CHUNK_SIZE;
+                    let chunk_size = (size - chunk * MAX_CHUNK_SIZE).min(MAX_CHUNK_SIZE);
+                    bucket_pointers.push(chunk_start);
+                    bucket_sizes.push(chunk_size);
+                    bucket_values.push(val);
+                    dispatched_in_window += 1;
+                }
+                reduce_starts.push(sub_start);
+                reduce_counts.push(num_chunks);
+            }
+        }
+        window_counts.push(dispatched_in_window);
+    }
+
+    let num_dispatched = bucket_pointers.len() as u32;
     BucketData {
         base_indices,
         bucket_pointers,
@@ -82,6 +229,13 @@ fn build_bucket_data(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
         window_counts,
         num_windows: num_windows as u32,
         num_active_buckets,
+        num_dispatched,
+        orig_bucket_values: orig_values,
+        orig_window_starts,
+        orig_window_counts,
+        reduce_starts,
+        reduce_counts,
+        has_chunks,
         bucket_width: c,
     }
 }
@@ -162,33 +316,47 @@ mod tests {
     const SIGN_BIT_MASK: u32 = 1 << 31;
     const INDEX_MASK: u32 = !SIGN_BIT_MASK;
 
-    /// Verify all structural invariants of BucketData.
+    /// Verify all structural invariants of BucketData (with sub-bucket chunking).
     fn assert_bucket_data_invariants(bd: &BucketData, n: usize, c: usize) {
         let half = 1u32 << (c - 1);
 
-        // Parallel array lengths
-        assert_eq!(bd.bucket_pointers.len(), bd.num_active_buckets as usize);
-        assert_eq!(bd.bucket_sizes.len(), bd.num_active_buckets as usize);
-        assert_eq!(bd.bucket_values.len(), bd.num_active_buckets as usize);
+        // Parallel array lengths match num_dispatched (sub-bucket count)
+        assert_eq!(bd.bucket_pointers.len(), bd.num_dispatched as usize);
+        assert_eq!(bd.bucket_sizes.len(), bd.num_dispatched as usize);
+        assert_eq!(bd.bucket_values.len(), bd.num_dispatched as usize);
         assert_eq!(bd.window_starts.len(), bd.num_windows as usize);
         assert_eq!(bd.window_counts.len(), bd.num_windows as usize);
 
-        // Sum of window_counts == num_active_buckets
-        let total_active: u32 = bd.window_counts.iter().sum();
-        assert_eq!(total_active, bd.num_active_buckets);
+        // Reduce arrays match num_active_buckets (original bucket count)
+        assert_eq!(bd.reduce_starts.len(), bd.num_active_buckets as usize);
+        assert_eq!(bd.reduce_counts.len(), bd.num_active_buckets as usize);
+        assert!(bd.num_dispatched >= bd.num_active_buckets);
+
+        // Sum of window_counts == num_dispatched
+        let total_dispatched: u32 = bd.window_counts.iter().sum();
+        assert_eq!(total_dispatched, bd.num_dispatched);
+
+        // Sum of reduce_counts == num_dispatched
+        let total_reduce: u32 = bd.reduce_counts.iter().sum();
+        assert_eq!(total_reduce, bd.num_dispatched);
 
         // Sum of bucket_sizes == base_indices.len()
         let total_entries: u32 = bd.bucket_sizes.iter().sum();
         assert_eq!(total_entries as usize, bd.base_indices.len());
 
-        // Every active bucket is non-empty and has valid pointers
-        for i in 0..bd.num_active_buckets as usize {
-            assert!(bd.bucket_sizes[i] > 0, "empty bucket at index {i}");
+        // Every sub-bucket is non-empty, within MAX_CHUNK_SIZE, and has valid pointers
+        for i in 0..bd.num_dispatched as usize {
+            assert!(bd.bucket_sizes[i] > 0, "empty sub-bucket at index {i}");
+            assert!(
+                bd.bucket_sizes[i] <= MAX_CHUNK_SIZE,
+                "sub-bucket {i} has size {} > MAX_CHUNK_SIZE={MAX_CHUNK_SIZE}",
+                bd.bucket_sizes[i]
+            );
             let ptr = bd.bucket_pointers[i] as usize;
             let end = ptr + bd.bucket_sizes[i] as usize;
             assert!(
                 end <= bd.base_indices.len(),
-                "bucket {i} overflows base_indices"
+                "sub-bucket {i} overflows base_indices"
             );
         }
 
@@ -201,14 +369,35 @@ mod tests {
             );
         }
 
-        // Within each window, bucket values are in ascending order
+        // Within each window, bucket values are in non-decreasing order
+        // (sub-buckets of the same parent share the same value)
         for w in 0..bd.num_windows as usize {
             let start = bd.window_starts[w] as usize;
             let count = bd.window_counts[w] as usize;
             for j in 1..count {
                 assert!(
-                    bd.bucket_values[start + j] > bd.bucket_values[start + j - 1],
+                    bd.bucket_values[start + j] >= bd.bucket_values[start + j - 1],
                     "bucket values not sorted in window {w}"
+                );
+            }
+        }
+
+        // Reduce starts/counts are consistent: each original bucket's sub-buckets
+        // are contiguous and cover exactly the right number of dispatched entries
+        for j in 0..bd.num_active_buckets as usize {
+            let start = bd.reduce_starts[j] as usize;
+            let count = bd.reduce_counts[j] as usize;
+            assert!(count >= 1, "original bucket {j} has 0 sub-buckets");
+            assert!(
+                start + count <= bd.num_dispatched as usize,
+                "reduce range overflows for bucket {j}"
+            );
+            // All sub-buckets in this range must share the same bucket_value
+            let val = bd.bucket_values[start];
+            for k in 1..count {
+                assert_eq!(
+                    bd.bucket_values[start + k], val,
+                    "sub-buckets of bucket {j} have mismatched values"
                 );
             }
         }
@@ -385,7 +574,9 @@ mod tests {
         assert_bucket_data_covers_all_windows(&bd, &scalars, c);
     }
 
-    /// Verify that the number of buckets per window is bounded by 2^(c-1).
+    /// Verify that the number of *original* buckets per window is bounded by 2^(c-1).
+    /// With sub-bucket chunking, num_dispatched sub-buckets per window can exceed this
+    /// but the distinct bucket values per window must not.
     #[test]
     fn bucket_count_halved_vs_unsigned() {
         let c = <Bls12 as GpuCurve>::bucket_width();
@@ -394,10 +585,17 @@ mod tests {
         let bd = compute_bucket_sorting::<Bls12>(&scalars);
 
         for w in 0..bd.num_windows as usize {
+            let start = bd.window_starts[w] as usize;
             let count = bd.window_counts[w] as usize;
+            // Count distinct bucket values (original buckets) in this window.
+            let mut seen = std::collections::HashSet::new();
+            for j in 0..count {
+                seen.insert(bd.bucket_values[start + j]);
+            }
             assert!(
-                count <= half,
-                "window {w} has {count} active buckets, max is {half}"
+                seen.len() <= half,
+                "window {w} has {} distinct bucket values, max is {half}",
+                seen.len()
             );
         }
     }
@@ -469,16 +667,16 @@ mod tests {
             // Combined bases should have 2*n points of G1_GPU_BYTES bytes each
             assert_eq!(combined.len(), n * 2 * G1_GPU_BYTES);
 
-            // Window/bucket parallel array lengths
-            assert_eq!(bd.bucket_pointers.len(), bd.num_active_buckets as usize);
-            assert_eq!(bd.bucket_sizes.len(), bd.num_active_buckets as usize);
-            assert_eq!(bd.bucket_values.len(), bd.num_active_buckets as usize);
+            // Window/sub-bucket parallel array lengths
+            assert_eq!(bd.bucket_pointers.len(), bd.num_dispatched as usize);
+            assert_eq!(bd.bucket_sizes.len(), bd.num_dispatched as usize);
+            assert_eq!(bd.bucket_values.len(), bd.num_dispatched as usize);
             assert_eq!(bd.window_starts.len(), bd.num_windows as usize);
             assert_eq!(bd.window_counts.len(), bd.num_windows as usize);
 
             // Sum invariants
-            let total_active: u32 = bd.window_counts.iter().sum();
-            assert_eq!(total_active, bd.num_active_buckets);
+            let total_dispatched: u32 = bd.window_counts.iter().sum();
+            assert_eq!(total_dispatched, bd.num_dispatched);
             let total_entries: u32 = bd.bucket_sizes.iter().sum();
             assert_eq!(total_entries as usize, bd.base_indices.len());
 
@@ -601,16 +799,16 @@ mod tests {
         let scalars: Vec<Scalar> = (0..500).map(|_| Scalar::random(OsRng)).collect();
         let bd = compute_bucket_sorting::<Bls12>(&scalars);
 
-        if bd.num_active_buckets == 0 {
+        if bd.num_dispatched == 0 {
             return;
         }
 
-        // Verify bucket spans are consecutive and cover base_indices exactly.
+        // Verify sub-bucket spans are consecutive and cover base_indices exactly.
         let mut expected_ptr = 0u32;
-        for i in 0..bd.num_active_buckets as usize {
+        for i in 0..bd.num_dispatched as usize {
             assert_eq!(
                 bd.bucket_pointers[i], expected_ptr,
-                "bucket {i} pointer gap: expected {expected_ptr}, got {}",
+                "sub-bucket {i} pointer gap: expected {expected_ptr}, got {}",
                 bd.bucket_pointers[i]
             );
             expected_ptr += bd.bucket_sizes[i];
@@ -644,11 +842,15 @@ mod tests {
         }
     }
 
-    /// Bucket values within each window have no duplicates (each value is unique).
+    /// With random scalars (no chunking), bucket values within each window have
+    /// no duplicates (each value is unique). With chunking, sub-buckets of the
+    /// same parent share a value, so duplicates are expected.
     #[test]
-    fn bucket_values_unique_per_window() {
+    fn bucket_values_unique_per_window_no_chunking() {
+        // 300 random scalars at c=13 => ~1-2 points per bucket, no chunking
         let scalars: Vec<Scalar> = (0..300).map(|_| Scalar::random(OsRng)).collect();
         let bd = compute_bucket_sorting::<Bls12>(&scalars);
+        assert!(!bd.has_chunks, "expected no chunking with 300 random scalars");
 
         for w in 0..bd.num_windows as usize {
             let w_start = bd.window_starts[w] as usize;

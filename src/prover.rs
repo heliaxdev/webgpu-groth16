@@ -270,6 +270,22 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     let agg_buf = gpu.create_empty_buffer("Agg", (bd.num_active_buckets as usize * G1_GPU_BYTES) as u64);
     let sums_buf = gpu.create_empty_buffer("Sums", (bd.num_windows as usize * G1_GPU_BYTES) as u64);
 
+    let reduce_starts_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer("ReduceStarts", bytemuck::cast_slice(&bd.reduce_starts)))
+    } else { None };
+    let reduce_counts_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer("ReduceCounts", bytemuck::cast_slice(&bd.reduce_counts)))
+    } else { None };
+    let orig_vals_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer("OrigVals", bytemuck::cast_slice(&bd.orig_bucket_values)))
+    } else { None };
+    let orig_wstarts_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer("OrigWStarts", bytemuck::cast_slice(&bd.orig_window_starts)))
+    } else { None };
+    let orig_wcounts_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer("OrigWCounts", bytemuck::cast_slice(&bd.orig_window_counts)))
+    } else { None };
+
     #[cfg(feature = "timing")]
     let t_upload = std::time::Instant::now();
 
@@ -285,8 +301,15 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
             window_starts: &w_starts_buf,
             window_counts: &w_counts_buf,
             window_sums: &sums_buf,
+            reduce_starts: reduce_starts_buf.as_ref(),
+            reduce_counts: reduce_counts_buf.as_ref(),
+            orig_bucket_values: orig_vals_buf.as_ref(),
+            orig_window_starts: orig_wstarts_buf.as_ref(),
+            orig_window_counts: orig_wcounts_buf.as_ref(),
         },
         bd.num_active_buckets,
+        bd.num_dispatched,
+        bd.has_chunks,
         bd.num_windows,
     );
 
@@ -348,6 +371,22 @@ async fn gpu_msm_g2<G: GpuCurve>(
     let agg_buf = gpu.create_empty_buffer("AggG2", (bd.num_active_buckets as usize * G2_GPU_BYTES) as u64);
     let sums_buf = gpu.create_empty_buffer("SumsG2", (bd.num_windows as usize * G2_GPU_BYTES) as u64);
 
+    let reduce_starts_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer("ReduceStartsG2", bytemuck::cast_slice(&bd.reduce_starts)))
+    } else { None };
+    let reduce_counts_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer("ReduceCountsG2", bytemuck::cast_slice(&bd.reduce_counts)))
+    } else { None };
+    let orig_vals_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer("OrigValsG2", bytemuck::cast_slice(&bd.orig_bucket_values)))
+    } else { None };
+    let orig_wstarts_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer("OrigWStartsG2", bytemuck::cast_slice(&bd.orig_window_starts)))
+    } else { None };
+    let orig_wcounts_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer("OrigWCountsG2", bytemuck::cast_slice(&bd.orig_window_counts)))
+    } else { None };
+
     gpu.execute_msm(
         true,
         &MsmBuffers {
@@ -360,8 +399,15 @@ async fn gpu_msm_g2<G: GpuCurve>(
             window_starts: &w_starts_buf,
             window_counts: &w_counts_buf,
             window_sums: &sums_buf,
+            reduce_starts: reduce_starts_buf.as_ref(),
+            reduce_counts: reduce_counts_buf.as_ref(),
+            orig_bucket_values: orig_vals_buf.as_ref(),
+            orig_window_starts: orig_wstarts_buf.as_ref(),
+            orig_window_counts: orig_wcounts_buf.as_ref(),
         },
         bd.num_active_buckets,
+        bd.num_dispatched,
+        bd.has_chunks,
         bd.num_windows,
     );
 
@@ -518,6 +564,48 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
             let sums_buf =
                 gpu.create_empty_buffer(&format!("{name}_sums"), (bd.num_windows as usize * G1_GPU_BYTES) as u64);
 
+            // Create chunking buffers when sub-bucket splitting is active.
+            let reduce_starts_buf = if bd.has_chunks {
+                Some(gpu.create_storage_buffer(
+                    &format!("{name}_reduce_starts"),
+                    bytemuck::cast_slice(&bd.reduce_starts),
+                ))
+            } else {
+                None
+            };
+            let reduce_counts_buf = if bd.has_chunks {
+                Some(gpu.create_storage_buffer(
+                    &format!("{name}_reduce_counts"),
+                    bytemuck::cast_slice(&bd.reduce_counts),
+                ))
+            } else {
+                None
+            };
+            let orig_vals_buf = if bd.has_chunks {
+                Some(gpu.create_storage_buffer(
+                    &format!("{name}_orig_vals"),
+                    bytemuck::cast_slice(&bd.orig_bucket_values),
+                ))
+            } else {
+                None
+            };
+            let orig_wstarts_buf = if bd.has_chunks {
+                Some(gpu.create_storage_buffer(
+                    &format!("{name}_orig_wstarts"),
+                    bytemuck::cast_slice(&bd.orig_window_starts),
+                ))
+            } else {
+                None
+            };
+            let orig_wcounts_buf = if bd.has_chunks {
+                Some(gpu.create_storage_buffer(
+                    &format!("{name}_orig_wcounts"),
+                    bytemuck::cast_slice(&bd.orig_window_counts),
+                ))
+            } else {
+                None
+            };
+
             gpu.execute_msm(
                 false,
                 &MsmBuffers {
@@ -530,8 +618,15 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
                     window_starts: &w_starts_buf,
                     window_counts: &w_counts_buf,
                     window_sums: &sums_buf,
+                    reduce_starts: reduce_starts_buf.as_ref(),
+                    reduce_counts: reduce_counts_buf.as_ref(),
+                    orig_bucket_values: orig_vals_buf.as_ref(),
+                    orig_window_starts: orig_wstarts_buf.as_ref(),
+                    orig_window_counts: orig_wcounts_buf.as_ref(),
                 },
                 bd.num_active_buckets,
+                bd.num_dispatched,
+                bd.has_chunks,
                 bd.num_windows,
             );
 
@@ -563,6 +658,47 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
         let agg_buf = gpu.create_empty_buffer("b2_agg", (bd.num_active_buckets as usize * G2_GPU_BYTES) as u64);
         let sums_buf = gpu.create_empty_buffer("b2_sums", (bd.num_windows as usize * G2_GPU_BYTES) as u64);
 
+        let reduce_starts_buf = if bd.has_chunks {
+            Some(gpu.create_storage_buffer(
+                "b2_reduce_starts",
+                bytemuck::cast_slice(&bd.reduce_starts),
+            ))
+        } else {
+            None
+        };
+        let reduce_counts_buf = if bd.has_chunks {
+            Some(gpu.create_storage_buffer(
+                "b2_reduce_counts",
+                bytemuck::cast_slice(&bd.reduce_counts),
+            ))
+        } else {
+            None
+        };
+        let orig_vals_buf = if bd.has_chunks {
+            Some(gpu.create_storage_buffer(
+                "b2_orig_vals",
+                bytemuck::cast_slice(&bd.orig_bucket_values),
+            ))
+        } else {
+            None
+        };
+        let orig_wstarts_buf = if bd.has_chunks {
+            Some(gpu.create_storage_buffer(
+                "b2_orig_wstarts",
+                bytemuck::cast_slice(&bd.orig_window_starts),
+            ))
+        } else {
+            None
+        };
+        let orig_wcounts_buf = if bd.has_chunks {
+            Some(gpu.create_storage_buffer(
+                "b2_orig_wcounts",
+                bytemuck::cast_slice(&bd.orig_window_counts),
+            ))
+        } else {
+            None
+        };
+
         gpu.execute_msm(
             true,
             &MsmBuffers {
@@ -575,8 +711,15 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
                 window_starts: &w_starts_buf,
                 window_counts: &w_counts_buf,
                 window_sums: &sums_buf,
+                reduce_starts: reduce_starts_buf.as_ref(),
+                reduce_counts: reduce_counts_buf.as_ref(),
+                orig_bucket_values: orig_vals_buf.as_ref(),
+                orig_window_starts: orig_wstarts_buf.as_ref(),
+                orig_window_counts: orig_wcounts_buf.as_ref(),
             },
             bd.num_active_buckets,
+            bd.num_dispatched,
+            bd.has_chunks,
             bd.num_windows,
         );
 
@@ -587,20 +730,30 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
         }))
     };
 
+    #[cfg(feature = "timing")]
     let t_msm_enqueue = std::time::Instant::now();
     let a_job = enqueue_g1("a", a_bytes, a_bd)?;
+    #[cfg(feature = "timing")]
     eprintln!("[msm] enqueue a: {:?} ({} bases)", t_msm_enqueue.elapsed(), a_bytes.len() / G1_GPU_BYTES);
+    #[cfg(feature = "timing")]
     let t_msm_enqueue = std::time::Instant::now();
     let b1_job = enqueue_g1("b1", b1_bytes, b1_bd)?;
+    #[cfg(feature = "timing")]
     eprintln!("[msm] enqueue b1: {:?} ({} bases)", t_msm_enqueue.elapsed(), b1_bytes.len() / G1_GPU_BYTES);
+    #[cfg(feature = "timing")]
     let t_msm_enqueue = std::time::Instant::now();
     let l_job = enqueue_g1("l", l_bytes, l_bd)?;
+    #[cfg(feature = "timing")]
     eprintln!("[msm] enqueue l: {:?} ({} bases)", t_msm_enqueue.elapsed(), l_bytes.len() / G1_GPU_BYTES);
+    #[cfg(feature = "timing")]
     let t_msm_enqueue = std::time::Instant::now();
     let h_job = enqueue_g1("h", h_bytes, h_bd)?;
+    #[cfg(feature = "timing")]
     eprintln!("[msm] enqueue h: {:?} ({} bases)", t_msm_enqueue.elapsed(), h_bytes.len() / G1_GPU_BYTES);
+    #[cfg(feature = "timing")]
     let t_msm_enqueue = std::time::Instant::now();
     let b2_job = enqueue_g2(b2_bytes, b2_bd)?;
+    #[cfg(feature = "timing")]
     eprintln!("[msm] enqueue b2: {:?} ({} bases)", t_msm_enqueue.elapsed(), b2_bytes.len() / G2_GPU_BYTES);
 
     let mut read_targets: Vec<(&wgpu::Buffer, wgpu::BufferAddress)> = Vec::new();
@@ -620,8 +773,10 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
         read_targets.push((&job.sums_buf, (job.num_windows as usize * G2_GPU_BYTES) as u64));
     }
 
+    #[cfg(feature = "timing")]
     let t_readback = std::time::Instant::now();
     let mut read_results = gpu.read_buffers_batch(&read_targets).await?.into_iter();
+    #[cfg(feature = "timing")]
     eprintln!("[msm] readback: {:?}", t_readback.elapsed());
 
     let a = if let Some(job) = &a_job {
@@ -797,6 +952,7 @@ where
             G2Affine = E::G2Affine,
         > + Send,
 {
+    #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     let mut cs = GpuConstraintSystem::<G>::new();
     circuit
@@ -814,9 +970,11 @@ where
 
     let num_constraints = cs.a_lcs.len();
     let n = num_constraints.next_power_of_two();
+    #[cfg(feature = "timing")]
     eprintln!("[proof] synthesis: {:?} (constraints={num_constraints}, n={n}, inputs={}, aux={})",
         t_phase.elapsed(), cs.inputs.len(), cs.aux.len());
 
+    #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     let mut a_values = vec![G::Scalar::ZERO; n];
     let mut b_values = vec![G::Scalar::ZERO; n];
@@ -827,10 +985,12 @@ where
         b_values[i] = eval_lc(&cs.b_lcs[i], &cs.inputs, &cs.aux);
         c_values[i] = eval_lc(&cs.c_lcs[i], &cs.inputs, &cs.aux);
     }
+    #[cfg(feature = "timing")]
     eprintln!("[proof] eval_lc: {:?}", t_phase.elapsed());
 
     // Build assignments before H poly so we can pre-compute bucket data
     // while the GPU processes the H polynomial pipeline.
+    #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     let mut a_assignment = cs.inputs.clone();
     for (i, v) in cs.aux.iter().enumerate() {
@@ -840,14 +1000,18 @@ where
     }
     let b_assignment =
         dense_assignment_from_masks(&cs.inputs, &cs.aux, &cs.b_input_density, &cs.b_aux_density);
+    #[cfg(feature = "timing")]
     eprintln!("[proof] assignments: {:?} (a_assign={}, b_assign={})",
         t_phase.elapsed(), a_assignment.len(), b_assignment.len());
 
+    #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     // Submit H polynomial to GPU (non-blocking — GPU processes asynchronously)
     let h_pending = submit_h_poly::<G>(gpu, &a_values, &b_values, &c_values)?;
+    #[cfg(feature = "timing")]
     eprintln!("[proof] h_poly submit: {:?}", t_phase.elapsed());
 
+    #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     // Pre-compute GLV bucket data for non-H G1 MSMs while GPU computes H.
     // GLV decomposes each scalar k into k1·P + k2·φ(P) with ~128-bit sub-scalars,
@@ -863,20 +1027,35 @@ where
         &cs.aux, &ppk.l_bytes, &ppk.l_phi_bytes, glv_c,
     );
     let b2_bd = compute_bucket_sorting_with_width::<G>(&b_assignment, G::g2_bucket_width());
-    eprintln!("[proof] bucket sorting (4x GLV): {:?}", t_phase.elapsed());
+    #[cfg(feature = "timing")]
+    {
+        eprintln!("[proof] bucket sorting (4x GLV): {:?}", t_phase.elapsed());
+        a_bd.print_distribution_stats("a_g1_glv");
+        b1_bd.print_distribution_stats("b1_g1_glv");
+        l_bd.print_distribution_stats("l_g1_glv");
+        b2_bd.print_distribution_stats("b2_g2");
+    }
 
+    #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     // Await H result (GPU likely already done by now)
     let h_coeffs = read_h_poly_result::<G>(gpu, h_pending).await?;
+    #[cfg(feature = "timing")]
     eprintln!("[proof] h_poly read: {:?}", t_phase.elapsed());
 
     // H bucket data depends on h_coeffs — also uses GLV
+    #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     let (h_glv_bytes, h_bd) = compute_glv_bucket_sorting::<G>(
         &h_coeffs[..pk.h.len()], &ppk.h_bytes, &ppk.h_phi_bytes, glv_c,
     );
-    eprintln!("[proof] h bucket sorting (GLV): {:?}", t_phase.elapsed());
+    #[cfg(feature = "timing")]
+    {
+        eprintln!("[proof] h bucket sorting (GLV): {:?}", t_phase.elapsed());
+        h_bd.print_distribution_stats("h_g1_glv");
+    }
 
+    #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     let (a_msm, b_g1_msm, l_msm, h_msm, b_g2_msm) = gpu_msm_batch_bytes::<G>(
         gpu,
@@ -892,8 +1071,10 @@ where
         b2_bd,
     )
     .await?;
+    #[cfg(feature = "timing")]
     eprintln!("[proof] msm_batch: {:?}", t_phase.elapsed());
 
+    #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     let mut proof_a = G::add_g1_proj(&G::affine_to_proj_g1(&pk.vk.alpha_g1), &a_msm);
     proof_a = G::add_g1_proj(&proof_a, &G::mul_g1_scalar(&pk.vk.delta_g1, &r));
@@ -915,6 +1096,7 @@ where
     rs *= s;
     let rs_delta = G::mul_g1_scalar(&pk.vk.delta_g1, &rs);
     proof_c = G::sub_g1_proj(&proof_c, &rs_delta);
+    #[cfg(feature = "timing")]
     eprintln!("[proof] final assembly: {:?}", t_phase.elapsed());
 
     Ok(bellman::groth16::Proof {
