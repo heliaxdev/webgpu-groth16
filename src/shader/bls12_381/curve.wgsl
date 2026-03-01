@@ -24,7 +24,8 @@ fn double_g1(p: PointG1) -> PointG1 {
     let yyyy = sqr_montgomery_u384(yy);
 
     // S = 2 * ((X + YY)^2 - XX - YYYY)
-    let x_plus_yy = add_mod_q(p.x, yy);
+    // x_plus_yy only feeds sqr_montgomery, which handles inputs < 2q < R
+    let x_plus_yy = add_u384(p.x, yy);
     let x_plus_yy_sq = sqr_montgomery_u384(x_plus_yy);
     var s = sub_mod_q(x_plus_yy_sq, xx);
     s = sub_mod_q(s, yyyy);
@@ -50,7 +51,8 @@ fn double_g1(p: PointG1) -> PointG1 {
 
     // Z_out = (Y + Z)^2 - YY - ZZ
     let zz = sqr_montgomery_u384(p.z);
-    let y_plus_z = add_mod_q(p.y, p.z);
+    // y_plus_z only feeds sqr_montgomery, which handles inputs < 2q < R
+    let y_plus_z = add_u384(p.y, p.z);
     let y_plus_z_sq = sqr_montgomery_u384(y_plus_z);
     var z_out = sub_mod_q(y_plus_z_sq, yy);
     z_out = sub_mod_q(z_out, zz);
@@ -108,13 +110,15 @@ fn add_g1(p1: PointG1, p2: PointG1) -> PointG1 {
     // H = U2 - U1
     let h = sub_mod_q(u2, u1);
     // I = (2*H)^2
-    let two_h = add_mod_q(h, h);
+    // two_h only feeds sqr_montgomery, which handles inputs < 2q < R
+    let two_h = add_u384(h, h);
     let i = sqr_montgomery_u384(two_h);
     // J = H * I
     let j = mul_montgomery_u384(h, i);
     // r = 2*(S2 - S1)
     let s2_minus_s1 = sub_mod_q(s2, s1);
-    let r = add_mod_q(s2_minus_s1, s2_minus_s1);
+    // r feeds sqr_montgomery and mul_montgomery, which handle inputs < 2q < R
+    let r = add_u384(s2_minus_s1, s2_minus_s1);
     // V = U1 * I
     let v = mul_montgomery_u384(u1, i);
 
@@ -126,12 +130,14 @@ fn add_g1(p1: PointG1, p2: PointG1) -> PointG1 {
     // Y3 = r*(V - X3) - 2*S1*J
     let v_minus_x3 = sub_mod_q(v, x3);
     let r_times_v_minus_x3 = mul_montgomery_u384(r, v_minus_x3);
-    let two_s1 = add_mod_q(s1, s1);
+    // two_s1 only feeds mul_montgomery, which handles inputs < 2q < R
+    let two_s1 = add_u384(s1, s1);
     let two_s1_j = mul_montgomery_u384(two_s1, j);
     let y3 = sub_mod_q(r_times_v_minus_x3, two_s1_j);
 
     // Z3 = ((Z1 + Z2)^2 - Z1Z1 - Z2Z2) * H
-    let z1_plus_z2 = add_mod_q(p1.z, p2.z);
+    // z1_plus_z2 only feeds sqr_montgomery, which handles inputs < 2q < R
+    let z1_plus_z2 = add_u384(p1.z, p2.z);
     let z1_plus_z2_sq = sqr_montgomery_u384(z1_plus_z2);
     let z1z2_factor = sub_mod_q(sub_mod_q(z1_plus_z2_sq, z1z1), z2z2);
     let z3 = mul_montgomery_u384(z1z2_factor, h);
@@ -172,12 +178,14 @@ fn add_g1_mixed(p1: PointG1, p2: PointG1) -> PointG1 {
 
     // H = U2 - U1 = U2 - X1
     let h = sub_mod_q(u2, p1.x);
-    let two_h = add_mod_q(h, h);
+    // two_h only feeds sqr_montgomery, which handles inputs < 2q < R
+    let two_h = add_u384(h, h);
     let i = sqr_montgomery_u384(two_h);
     let j = mul_montgomery_u384(h, i);
     // r = 2*(S2 - S1) = 2*(S2 - Y1)
     let s2_minus_s1 = sub_mod_q(s2, p1.y);
-    let r = add_mod_q(s2_minus_s1, s2_minus_s1);
+    // r feeds sqr_montgomery and mul_montgomery, which handle inputs < 2q < R
+    let r = add_u384(s2_minus_s1, s2_minus_s1);
     // V = U1 * I = X1 * I
     let v = mul_montgomery_u384(p1.x, i);
 
@@ -187,12 +195,14 @@ fn add_g1_mixed(p1: PointG1, p2: PointG1) -> PointG1 {
 
     let v_minus_x3 = sub_mod_q(v, x3);
     let r_times_v_minus_x3 = mul_montgomery_u384(r, v_minus_x3);
-    let two_s1 = add_mod_q(p1.y, p1.y);
+    // two_s1 only feeds mul_montgomery, which handles inputs < 2q < R
+    let two_s1 = add_u384(p1.y, p1.y);
     let two_s1_j = mul_montgomery_u384(two_s1, j);
     let y3 = sub_mod_q(r_times_v_minus_x3, two_s1_j);
 
     // Z3: since Z2=R, 2*Z1*Z2 = 2*mul_montgomery(Z1,R) = 2*Z1
-    let two_z1 = add_mod_q(p1.z, p1.z);
+    // two_z1 only feeds mul_montgomery, which handles inputs < 2q < R
+    let two_z1 = add_u384(p1.z, p1.z);
     let z3 = mul_montgomery_u384(two_z1, h);
 
     return PointG1(x3, y3, z3);
