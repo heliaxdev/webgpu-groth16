@@ -8,6 +8,8 @@ use blstrs::{Fp, G1Affine};
 use ff::PrimeField;
 use group::prime::PrimeCurveAffine;
 
+use crate::gpu::curve::{fq_13bit_to_bytes, fq_bytes_to_13bit, FQ_GPU_BYTES, G1_GPU_BYTES};
+
 // ============================================================================
 // BLS12-381 GLV constants
 // ============================================================================
@@ -168,63 +170,75 @@ pub fn endomorphism_g1(p: &G1Affine) -> G1Affine {
 
 /// Applies the GLV endomorphism φ(P) = (β·x, y) to a serialized G1 point.
 ///
-/// The point is in GPU format: x[48 LE] || y[48 LE] || z[48 LE].
+/// The point is in GPU 13-bit limb format: x[120] || y[120] || z[120] = 360 bytes.
+/// Each coordinate is 30×13-bit limbs stored as 30 little-endian u32s.
 /// Returns new serialized bytes with x replaced by β·x.
-pub fn endomorphism_g1_bytes(point_bytes: &[u8]) -> [u8; 144] {
-    debug_assert_eq!(point_bytes.len(), 144);
+pub fn endomorphism_g1_bytes(point_bytes: &[u8]) -> [u8; G1_GPU_BYTES] {
+    debug_assert_eq!(point_bytes.len(), G1_GPU_BYTES);
 
-    let mut result = [0u8; 144];
+    let mut result = [0u8; G1_GPU_BYTES];
     result.copy_from_slice(point_bytes);
 
     // Point at infinity (z = 0): return as-is
-    if point_bytes[96..144].iter().all(|&b| b == 0) {
+    if point_bytes[2 * FQ_GPU_BYTES..G1_GPU_BYTES].iter().all(|&b| b == 0) {
         return result;
     }
 
-    // Read x-coordinate from bytes[0..48] (LE)
-    let x_le: [u8; 48] = point_bytes[0..48].try_into().unwrap();
-    let x = Fp::from_bytes_le(&x_le).expect("valid Fp x-coordinate");
+    // Convert x from 13-bit limb format (120 bytes) to 48-byte LE
+    let x_le = fq_13bit_to_bytes(&point_bytes[0..FQ_GPU_BYTES]);
+    let x_le_arr: [u8; 48] = x_le.try_into().unwrap();
+    let x = Fp::from_bytes_le(&x_le_arr).expect("valid Fp x-coordinate");
 
     let beta = Fp::from_bytes_le(&BETA_LE_BYTES).expect("valid BETA constant");
     let beta_x = beta * x;
 
-    // Write back β·x in LE format (to_bytes_be returns BE, so reverse)
+    // Convert β·x back to 48-byte LE, then to 13-bit limb format
     let beta_x_be = beta_x.to_bytes_be();
+    let mut beta_x_le = [0u8; 48];
     for i in 0..48 {
-        result[i] = beta_x_be[47 - i];
+        beta_x_le[i] = beta_x_be[47 - i];
     }
+    let beta_x_13bit = fq_bytes_to_13bit(&beta_x_le);
+    result[0..FQ_GPU_BYTES].copy_from_slice(&beta_x_13bit);
 
     result
 }
 
 /// Negates a serialized G1 affine point in-place: (x, y, z) → (x, q−y, z).
 ///
-/// The point is in the GPU serialization format: x[48 LE] || y[48 LE] || z[48 LE].
+/// The point is in the GPU 13-bit limb format: x[120] || y[120] || z[120] = 360 bytes.
 pub fn negate_g1_bytes(point_bytes: &mut [u8]) {
-    debug_assert!(point_bytes.len() == 144);
+    debug_assert!(point_bytes.len() == G1_GPU_BYTES);
 
     // Check for point at infinity (all zeros)
     if point_bytes.iter().all(|&b| b == 0) {
         return;
     }
 
-    // y is at bytes [48..96] in little-endian format.
+    // y is at bytes [FQ_GPU_BYTES..2*FQ_GPU_BYTES] in 13-bit limb format.
+    // Convert y from 13-bit (120 bytes) to 48-byte LE, negate, convert back.
+    let y_le = fq_13bit_to_bytes(&point_bytes[FQ_GPU_BYTES..2 * FQ_GPU_BYTES]);
+
     // Compute q - y using 384-bit subtraction with borrow.
+    let mut neg_y_le = [0u8; 48];
     let mut borrow: u16 = 0;
     for i in 0..48 {
         let q_byte = Q_MODULUS_LE[i] as u16;
-        let y_byte = point_bytes[48 + i] as u16;
+        let y_byte = y_le[i] as u16;
         let diff = q_byte.wrapping_sub(y_byte).wrapping_sub(borrow);
-        // If the subtraction underflowed, diff > q_byte (since we're in u16 range)
         if q_byte < y_byte + borrow {
-            point_bytes[48 + i] = diff as u8; // wrapping gives correct low byte
+            neg_y_le[i] = diff as u8;
             borrow = 1;
         } else {
-            point_bytes[48 + i] = diff as u8;
+            neg_y_le[i] = diff as u8;
             borrow = 0;
         }
     }
     debug_assert_eq!(borrow, 0, "q - y underflow: y >= q");
+
+    // Convert negated y back to 13-bit limb format and write in-place.
+    let neg_y_13bit = fq_bytes_to_13bit(&neg_y_le);
+    point_bytes[FQ_GPU_BYTES..2 * FQ_GPU_BYTES].copy_from_slice(&neg_y_13bit);
 }
 
 /// Decomposes a 128-bit unsigned integer into c-bit windows.
@@ -762,7 +776,7 @@ mod tests {
     /// Point negation on identity is a no-op.
     #[test]
     fn negate_g1_bytes_identity() {
-        let mut zero_bytes = vec![0u8; 144];
+        let mut zero_bytes = vec![0u8; G1_GPU_BYTES];
         let original = zero_bytes.clone();
         negate_g1_bytes(&mut zero_bytes);
         assert_eq!(zero_bytes, original, "negating identity should be a no-op");

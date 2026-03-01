@@ -4,6 +4,61 @@ use ff::{Field, PrimeField, PrimeFieldBits};
 use group::Group;
 use group::prime::PrimeCurveAffine;
 
+/// Size of a single Fq element in GPU format: 30 × 4 bytes = 120 bytes.
+pub const FQ_GPU_BYTES: usize = 120;
+/// Size of a G1 point in GPU format: 3 × 120 = 360 bytes.
+pub const G1_GPU_BYTES: usize = 3 * FQ_GPU_BYTES;
+/// Size of a G2 point in GPU format: 6 × 120 = 720 bytes.
+pub const G2_GPU_BYTES: usize = 6 * FQ_GPU_BYTES;
+
+/// Convert a 48-byte little-endian field element to 30×13-bit limb representation (120 bytes).
+/// Each 13-bit limb is stored as a 4-byte little-endian u32.
+pub(crate) fn fq_bytes_to_13bit(bytes_48: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(bytes_48.len(), 48);
+    let mut result = vec![0u8; FQ_GPU_BYTES];
+    let mut bit_offset: usize = 0;
+    for i in 0..30 {
+        let byte_idx = bit_offset / 8;
+        let bit_shift = bit_offset % 8;
+        let mut val: u32 = 0;
+        for j in 0..3usize {
+            if byte_idx + j < 48 {
+                val |= (bytes_48[byte_idx + j] as u32) << (j * 8);
+            }
+        }
+        let limb = (val >> bit_shift) & 0x1FFF;
+        let limb_bytes = limb.to_le_bytes();
+        result[i * 4..i * 4 + 4].copy_from_slice(&limb_bytes);
+        bit_offset += 13;
+    }
+    result
+}
+
+/// Convert 30×13-bit limb representation (120 bytes) back to 48-byte little-endian.
+pub(crate) fn fq_13bit_to_bytes(bytes_120: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(bytes_120.len(), FQ_GPU_BYTES);
+    let mut result = vec![0u8; 48];
+    let mut bit_offset: usize = 0;
+    for i in 0..30 {
+        let limb = u32::from_le_bytes([
+            bytes_120[i * 4],
+            bytes_120[i * 4 + 1],
+            bytes_120[i * 4 + 2],
+            bytes_120[i * 4 + 3],
+        ]) & 0x1FFF;
+        let byte_idx = bit_offset / 8;
+        let bit_shift = bit_offset % 8;
+        let shifted = (limb as u64) << bit_shift;
+        for j in 0..3usize {
+            if byte_idx + j < 48 {
+                result[byte_idx + j] |= ((shifted >> (j * 8)) & 0xFF) as u8;
+            }
+        }
+        bit_offset += 13;
+    }
+    result
+}
+
 pub trait GpuCurve: 'static {
     type Engine: pairing::Engine;
 
@@ -127,37 +182,43 @@ impl GpuCurve for blstrs::Bls12 {
     );
 
     fn serialize_g1(point: &Self::G1Affine) -> Vec<u8> {
-        let mut uncompressed = point.to_uncompressed();
-
-        // Strip Zcash metadata bits from x before handing coordinates to WGSL.
-        uncompressed[0] &= 0b0001_1111;
-
-        // Reverse Big-Endian 48-byte chunks to Little-Endian for WGSL
-        let mut x = uncompressed[0..48].to_vec();
-        x.reverse();
-        let mut y = uncompressed[48..96].to_vec();
-        y.reverse();
-
         let is_inf: bool = point.is_identity().into();
-        let mut z = vec![0u8; 48];
-        z[0] = if is_inf { 0 } else { 1 }; // Important for infinity handling!
 
         if is_inf {
-            x.fill(0);
-            y.fill(0);
+            return vec![0u8; G1_GPU_BYTES];
         }
 
-        let mut wgsl_bytes = Vec::with_capacity(144);
-        wgsl_bytes.extend_from_slice(&x);
-        wgsl_bytes.extend_from_slice(&y);
-        wgsl_bytes.extend_from_slice(&z);
+        let mut uncompressed = point.to_uncompressed();
+        // Strip Zcash metadata bits from x
+        uncompressed[0] &= 0b0001_1111;
+
+        // Reverse Big-Endian 48-byte chunks to Little-Endian
+        let mut x_le = uncompressed[0..48].to_vec();
+        x_le.reverse();
+        let mut y_le = uncompressed[48..96].to_vec();
+        y_le.reverse();
+
+        // z = 1 in standard form (not Montgomery)
+        let mut z_le = vec![0u8; 48];
+        z_le[0] = 1;
+
+        // Convert each 48-byte LE coordinate to 120-byte 13-bit representation
+        let mut wgsl_bytes = Vec::with_capacity(G1_GPU_BYTES);
+        wgsl_bytes.extend_from_slice(&fq_bytes_to_13bit(&x_le));
+        wgsl_bytes.extend_from_slice(&fq_bytes_to_13bit(&y_le));
+        wgsl_bytes.extend_from_slice(&fq_bytes_to_13bit(&z_le));
         wgsl_bytes
     }
 
     fn serialize_g2(point: &Self::G2Affine) -> Vec<u8> {
-        let mut uncompressed = point.to_uncompressed();
+        let is_inf: bool = point.is_identity().into();
 
-        // Strip Zcash metadata bits from x.c1 before handing coordinates to WGSL.
+        if is_inf {
+            return vec![0u8; G2_GPU_BYTES];
+        }
+
+        let mut uncompressed = point.to_uncompressed();
+        // Strip Zcash metadata bits from x.c1
         uncompressed[0] &= 0b0001_1111;
 
         // blstrs G2 uncompressed layout (192 bytes):
@@ -172,37 +233,33 @@ impl GpuCurve for blstrs::Bls12 {
         let mut y_c0 = uncompressed[144..192].to_vec();
         y_c0.reverse();
 
-        let is_inf: bool = point.is_identity().into();
+        // z = (1, 0) in standard form
         let mut z_c0 = vec![0u8; 48];
-        z_c0[0] = if is_inf { 0 } else { 1 };
+        z_c0[0] = 1;
         let z_c1 = vec![0u8; 48];
 
-        if is_inf {
-            x_c0.fill(0);
-            x_c1.fill(0);
-            y_c0.fill(0);
-            y_c1.fill(0);
-        }
-
-        let mut wgsl_bytes = Vec::with_capacity(288);
-        wgsl_bytes.extend_from_slice(&x_c0);
-        wgsl_bytes.extend_from_slice(&x_c1);
-        wgsl_bytes.extend_from_slice(&y_c0);
-        wgsl_bytes.extend_from_slice(&y_c1);
-        wgsl_bytes.extend_from_slice(&z_c0);
-        wgsl_bytes.extend_from_slice(&z_c1);
+        // Convert each 48-byte LE coordinate to 120-byte 13-bit representation
+        // Layout: x.c0, x.c1, y.c0, y.c1, z.c0, z.c1
+        let mut wgsl_bytes = Vec::with_capacity(G2_GPU_BYTES);
+        wgsl_bytes.extend_from_slice(&fq_bytes_to_13bit(&x_c0));
+        wgsl_bytes.extend_from_slice(&fq_bytes_to_13bit(&x_c1));
+        wgsl_bytes.extend_from_slice(&fq_bytes_to_13bit(&y_c0));
+        wgsl_bytes.extend_from_slice(&fq_bytes_to_13bit(&y_c1));
+        wgsl_bytes.extend_from_slice(&fq_bytes_to_13bit(&z_c0));
+        wgsl_bytes.extend_from_slice(&fq_bytes_to_13bit(&z_c1));
         wgsl_bytes
     }
 
     fn deserialize_g1(bytes: &[u8]) -> anyhow::Result<Self::G1> {
-        if bytes.len() != 144 {
+        if bytes.len() != G1_GPU_BYTES {
             anyhow::bail!("Invalid G1 byte length from GPU: {}", bytes.len());
         }
-        // GPU outputs 144 bytes: X (48), Y (48), Z (48) in Little-Endian.
+        // GPU outputs 360 bytes: X (120), Y (120), Z (120) in 30×13-bit format.
 
         // 1. Check if the point is at infinity by inspecting the Z coordinate
+        let z_bytes = &bytes[2 * FQ_GPU_BYTES..3 * FQ_GPU_BYTES];
         let mut z_is_zero = true;
-        for &b in &bytes[96..144] {
+        for &b in z_bytes {
             if b != 0 {
                 z_is_zero = false;
                 break;
@@ -212,21 +269,19 @@ impl GpuCurve for blstrs::Bls12 {
             return Ok(Self::G1::identity());
         }
 
-        // 2. Parse X and Y for standard uncompressed affine
-        let mut x = [0u8; 48];
-        x.copy_from_slice(&bytes[0..48]);
-        x.reverse();
-        let mut y = [0u8; 48];
-        y.copy_from_slice(&bytes[48..96]);
-        y.reverse();
+        // 2. Convert 13-bit limb representation back to 48-byte LE
+        let x_le = fq_13bit_to_bytes(&bytes[0..FQ_GPU_BYTES]);
+        let y_le = fq_13bit_to_bytes(&bytes[FQ_GPU_BYTES..2 * FQ_GPU_BYTES]);
+
+        // 3. Reverse to Big-Endian for Zcash uncompressed format
+        let mut x_be = x_le;
+        x_be.reverse();
+        let mut y_be = y_le;
+        y_be.reverse();
 
         let mut uncompressed = [0u8; 96];
-        uncompressed[..48].copy_from_slice(&x);
-        uncompressed[48..].copy_from_slice(&y);
-
-        // Note: The BLS12-381 prime is 381 bits long. This guarantees that the top
-        // 3 bits of a valid X coordinate are 000. This perfectly aligns with the Zcash
-        // spec for a non-infinity, uncompressed point, so we don't need to touch the flags!
+        uncompressed[..48].copy_from_slice(&x_be);
+        uncompressed[48..].copy_from_slice(&y_be);
 
         let ct: subtle::CtOption<blstrs::G1Affine> =
             blstrs::G1Affine::from_uncompressed(&uncompressed);
@@ -235,24 +290,24 @@ impl GpuCurve for blstrs::Bls12 {
         if let Some(affine) = affine {
             Ok(affine.into())
         } else {
-            let x0 = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            let y0 = u32::from_le_bytes([bytes[48], bytes[49], bytes[50], bytes[51]]);
-            let z0 = u32::from_le_bytes([bytes[96], bytes[97], bytes[98], bytes[99]]);
+            let limb0 = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             anyhow::bail!(
-                "Failed to deserialize G1 point from GPU (x0={:#x}, y0={:#x}, z0={:#x})",
-                x0,
-                y0,
-                z0
+                "Failed to deserialize G1 point from GPU (x_limb0={:#x})",
+                limb0
             )
         }
     }
 
     fn deserialize_g2(bytes: &[u8]) -> anyhow::Result<Self::G2> {
-        // GPU outputs 288 bytes: X_c0, X_c1, Y_c0, Y_c1, Z_c0, Z_c1 (all 48 bytes LE)
+        if bytes.len() != G2_GPU_BYTES {
+            anyhow::bail!("Invalid G2 byte length from GPU: {}", bytes.len());
+        }
+        // GPU outputs 720 bytes: X_c0, X_c1, Y_c0, Y_c1, Z_c0, Z_c1 (all 120 bytes, 13-bit)
 
-        // 1. Check if the point is at infinity by inspecting the Z coordinate (Z_c0 and Z_c1)
+        // 1. Check if the point is at infinity by inspecting Z (last 2 × 120 bytes)
+        let z_bytes = &bytes[4 * FQ_GPU_BYTES..6 * FQ_GPU_BYTES];
         let mut z_is_zero = true;
-        for &b in &bytes[192..288] {
+        for &b in z_bytes {
             if b != 0 {
                 z_is_zero = false;
                 break;
@@ -262,26 +317,28 @@ impl GpuCurve for blstrs::Bls12 {
             return Ok(Self::G2::identity());
         }
 
-        // 2. Parse X and Y for standard uncompressed affine
-        let mut x_c0 = [0u8; 48];
-        x_c0.copy_from_slice(&bytes[0..48]);
-        x_c0.reverse();
-        let mut x_c1 = [0u8; 48];
-        x_c1.copy_from_slice(&bytes[48..96]);
-        x_c1.reverse();
-        let mut y_c0 = [0u8; 48];
-        y_c0.copy_from_slice(&bytes[96..144]);
-        y_c0.reverse();
-        let mut y_c1 = [0u8; 48];
-        y_c1.copy_from_slice(&bytes[144..192]);
-        y_c1.reverse();
+        // 2. Convert each 120-byte 13-bit coordinate back to 48-byte LE
+        let x_c0_le = fq_13bit_to_bytes(&bytes[0..FQ_GPU_BYTES]);
+        let x_c1_le = fq_13bit_to_bytes(&bytes[FQ_GPU_BYTES..2 * FQ_GPU_BYTES]);
+        let y_c0_le = fq_13bit_to_bytes(&bytes[2 * FQ_GPU_BYTES..3 * FQ_GPU_BYTES]);
+        let y_c1_le = fq_13bit_to_bytes(&bytes[3 * FQ_GPU_BYTES..4 * FQ_GPU_BYTES]);
 
-        // Reconstruct Zcash BE uncompressed structure
+        // 3. Reverse to Big-Endian for Zcash uncompressed format
+        let mut x_c0_be = x_c0_le;
+        x_c0_be.reverse();
+        let mut x_c1_be = x_c1_le;
+        x_c1_be.reverse();
+        let mut y_c0_be = y_c0_le;
+        y_c0_be.reverse();
+        let mut y_c1_be = y_c1_le;
+        y_c1_be.reverse();
+
+        // Reconstruct Zcash BE uncompressed structure: x_c1, x_c0, y_c1, y_c0
         let mut uncompressed = [0u8; 192];
-        uncompressed[0..48].copy_from_slice(&x_c1);
-        uncompressed[48..96].copy_from_slice(&x_c0);
-        uncompressed[96..144].copy_from_slice(&y_c1);
-        uncompressed[144..192].copy_from_slice(&y_c0);
+        uncompressed[0..48].copy_from_slice(&x_c1_be);
+        uncompressed[48..96].copy_from_slice(&x_c0_be);
+        uncompressed[96..144].copy_from_slice(&y_c1_be);
+        uncompressed[144..192].copy_from_slice(&y_c0_be);
 
         let ct: subtle::CtOption<blstrs::G2Affine> =
             blstrs::G2Affine::from_uncompressed(&uncompressed);
@@ -397,7 +454,7 @@ impl GpuCurve for blstrs::Bls12 {
 
 #[cfg(test)]
 mod tests {
-    use super::GpuCurve;
+    use super::{GpuCurve, FQ_GPU_BYTES, G1_GPU_BYTES, G2_GPU_BYTES};
     use blstrs::{Bls12, G1Affine, G2Affine, Scalar};
     use ff::{PrimeField, PrimeFieldBits};
     use group::Group;
@@ -550,12 +607,10 @@ mod tests {
     fn g1_identity_serialize_deserialize() {
         let identity = G1Affine::identity();
         let bytes = <Bls12 as GpuCurve>::serialize_g1(&identity);
-        assert_eq!(bytes.len(), 144);
+        assert_eq!(bytes.len(), G1_GPU_BYTES);
 
-        // Z coordinate should be all zeros for identity
-        assert!(bytes[96..144].iter().all(|&b| b == 0));
-        // X, Y should also be all zeros
-        assert!(bytes[0..96].iter().all(|&b| b == 0));
+        // All bytes should be zero for identity
+        assert!(bytes.iter().all(|&b| b == 0));
 
         let parsed = <Bls12 as GpuCurve>::deserialize_g1(&bytes).expect("identity deserialize");
         assert!(
@@ -569,10 +624,10 @@ mod tests {
     fn g2_identity_serialize_deserialize() {
         let identity = G2Affine::identity();
         let bytes = <Bls12 as GpuCurve>::serialize_g2(&identity);
-        assert_eq!(bytes.len(), 288);
+        assert_eq!(bytes.len(), G2_GPU_BYTES);
 
-        // Z components (last 96 bytes) should be all zeros
-        assert!(bytes[192..288].iter().all(|&b| b == 0));
+        // All bytes should be zero for identity
+        assert!(bytes.iter().all(|&b| b == 0));
 
         let parsed = <Bls12 as GpuCurve>::deserialize_g2(&bytes).expect("g2 identity deserialize");
         assert!(
@@ -653,15 +708,16 @@ mod tests {
         let g = G1Affine::generator();
         let bytes = <Bls12 as GpuCurve>::serialize_g1(&g);
 
-        assert_eq!(bytes.len(), 144);
-
-        // For a non-identity point, z[0] should be 1, rest zeros
-        assert_eq!(bytes[96], 1);
-        assert!(bytes[97..144].iter().all(|&b| b == 0));
+        assert_eq!(bytes.len(), G1_GPU_BYTES);
 
         // x and y should not be all zeros for the generator
-        assert!(!bytes[0..48].iter().all(|&b| b == 0));
-        assert!(!bytes[48..96].iter().all(|&b| b == 0));
+        assert!(!bytes[0..FQ_GPU_BYTES].iter().all(|&b| b == 0));
+        assert!(!bytes[FQ_GPU_BYTES..2 * FQ_GPU_BYTES].iter().all(|&b| b == 0));
+
+        // z = 1 in 13-bit format: limb[0] = 1 (bytes [0..4] = [1,0,0,0]), rest zeros
+        let z_start = 2 * FQ_GPU_BYTES;
+        assert_eq!(bytes[z_start], 1);
+        assert!(bytes[z_start + 1..G1_GPU_BYTES].iter().all(|&b| b == 0));
     }
 
     /// G1 deserialization rejects wrong-length input.

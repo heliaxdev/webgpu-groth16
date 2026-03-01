@@ -79,7 +79,7 @@ fn add_g1(p1: PointG1, p2: PointG1) -> PointG1 {
 
     // Check if U1 == U2 (meaning X coordinates are equal in affine space)
     var u_eq = true;
-    for (var i = 0u; i < 12u; i = i + 1u) {
+    for (var i = 0u; i < 30u; i = i + 1u) {
         if u1.limbs[i] != u2.limbs[i] {
             u_eq = false;
             break;
@@ -90,7 +90,7 @@ fn add_g1(p1: PointG1, p2: PointG1) -> PointG1 {
     if u_eq {
         // Check if S1 == S2 (meaning Y coordinates are equal in affine space)
         var s_eq = true;
-        for (var i = 0u; i < 12u; i = i + 1u) {
+        for (var i = 0u; i < 30u; i = i + 1u) {
             if s1.limbs[i] != s2.limbs[i] {
                 s_eq = false;
                 break;
@@ -164,12 +164,12 @@ fn add_g1_mixed(p1: PointG1, p2: PointG1) -> PointG1 {
 
     // Check if U1 == U2 (doubling or cancellation)
     var u_eq = true;
-    for (var i = 0u; i < 12u; i = i + 1u) {
+    for (var i = 0u; i < 30u; i = i + 1u) {
         if p1.x.limbs[i] != u2.limbs[i] { u_eq = false; break; }
     }
     if u_eq {
         var s_eq = true;
-        for (var i = 0u; i < 12u; i = i + 1u) {
+        for (var i = 0u; i < 30u; i = i + 1u) {
             if p1.y.limbs[i] != s2.limbs[i] { s_eq = false; break; }
         }
         if s_eq { return double_g1(p1); }
@@ -331,7 +331,7 @@ fn add_g2(p1: PointG2, p2: PointG2) -> PointG2 {
 
     // Explicitly handle edge cases where incomplete Jacobian addition fails.
     var u_eq = true;
-    for (var i = 0u; i < 12u; i = i + 1u) {
+    for (var i = 0u; i < 30u; i = i + 1u) {
         if u1.c0.limbs[i] != u2.c0.limbs[i] || u1.c1.limbs[i] != u2.c1.limbs[i] {
             u_eq = false;
             break;
@@ -340,7 +340,7 @@ fn add_g2(p1: PointG2, p2: PointG2) -> PointG2 {
 
     if u_eq {
         var s_eq = true;
-        for (var i = 0u; i < 12u; i = i + 1u) {
+        for (var i = 0u; i < 30u; i = i + 1u) {
             if s1.c0.limbs[i] != s2.c0.limbs[i] || s1.c1.limbs[i] != s2.c1.limbs[i] {
                 s_eq = false;
                 break;
@@ -349,7 +349,7 @@ fn add_g2(p1: PointG2, p2: PointG2) -> PointG2 {
         if s_eq {
             return double_g2(p1);
         } else {
-            return PointG2(Fq2(U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)), U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))), Fq2(U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)), U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))), Fq2(U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)), U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))));
+            return PointG2(Fq2(U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)), U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))), Fq2(U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)), U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))), Fq2(U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)), U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))));
         }
     }
 
@@ -399,7 +399,7 @@ fn add_g2_mixed(p1: PointG2, p2: PointG2) -> PointG2 {
 
     // Check if U1 == U2 (doubling or cancellation)
     var u_eq = true;
-    for (var i = 0u; i < 12u; i = i + 1u) {
+    for (var i = 0u; i < 30u; i = i + 1u) {
         if p1.x.c0.limbs[i] != u2.c0.limbs[i] || p1.x.c1.limbs[i] != u2.c1.limbs[i] {
             u_eq = false;
             break;
@@ -407,7 +407,7 @@ fn add_g2_mixed(p1: PointG2, p2: PointG2) -> PointG2 {
     }
     if u_eq {
         var s_eq = true;
-        for (var i = 0u; i < 12u; i = i + 1u) {
+        for (var i = 0u; i < 30u; i = i + 1u) {
             if p1.y.c0.limbs[i] != s2.c0.limbs[i] || p1.y.c1.limbs[i] != s2.c1.limbs[i] {
                 s_eq = false;
                 break;
@@ -416,12 +416,12 @@ fn add_g2_mixed(p1: PointG2, p2: PointG2) -> PointG2 {
         if s_eq { return double_g2(p1); }
         else {
             return PointG2(
-                Fq2(U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)),
-                    U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))),
-                Fq2(U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)),
-                    U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))),
-                Fq2(U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)),
-                    U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)))
+                Fq2(U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)),
+                    U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))),
+                Fq2(U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)),
+                    U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))),
+                Fq2(U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)),
+                    U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)))
             );
         }
     }

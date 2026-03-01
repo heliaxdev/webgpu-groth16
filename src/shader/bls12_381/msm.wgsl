@@ -1,22 +1,22 @@
 // src/shader/bls12_381/msm.wgsl
 
 // ============================================================================
-// CONSTANTS & MONTGOMERY CONVERSION
+// CONSTANTS & MONTGOMERY CONVERSION (30 × 13-bit limbs, R = 2^390)
 // ============================================================================
-const G1_INFINITY = PointG1(
-    U384(array<u32, 12>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u)),
-    U384(array<u32, 12>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u)),
-    U384(array<u32, 12>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u))
-);
 
-const FQ2_ZERO = Fq2(
-    U384(array<u32, 12>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u)),
-    U384(array<u32, 12>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u))
-);
+const U384_ZERO = U384(array<u32, 30>(
+    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+));
+
+const G1_INFINITY = PointG1(U384_ZERO, U384_ZERO, U384_ZERO);
+
+const FQ2_ZERO = Fq2(U384_ZERO, U384_ZERO);
 const G2_INFINITY = PointG2(FQ2_ZERO, FQ2_ZERO, FQ2_ZERO);
 
 fn is_gte_q(a: U384) -> bool {
-    for (var i = 11u; i < 12u; i = i - 1u) {
+    for (var i = 29u; i < 30u; i = i - 1u) {
         if a.limbs[i] > Q_MODULUS[i] { return true; }
         if a.limbs[i] < Q_MODULUS[i] { return false; }
         if i == 0u { break; }
@@ -24,11 +24,22 @@ fn is_gte_q(a: U384) -> bool {
     return true;
 }
 
-// R^2 mod q for BLS12-381 base field F_q (12 little-endian u32 limbs).
-const R2_MOD_Q = U384(array<u32, 12>(
-    0x1c341746u, 0xf4df1f34u, 0x09d104f1u, 0x0a76e6a6u,
-    0x4c95b6d5u, 0x8de5476cu, 0x939d83c0u, 0x67eb88a9u,
-    0xb519952du, 0x9a793e85u, 0x92cae3aau, 0x11988fe5u
+// R^2 mod q for BLS12-381 base field F_q (30 × 13-bit limbs, R = 2^390).
+const R2_MOD_Q = U384(array<u32, 30>(
+    0x070fu, 0x0880u, 0x10d1u, 0x0c83u, 0x1aecu, 0x1121u,
+    0x004cu, 0x1874u, 0x066eu, 0x1b75u, 0x01ebu, 0x1beau,
+    0x07b1u, 0x1f70u, 0x117bu, 0x0362u, 0x0ed2u, 0x090fu,
+    0x110au, 0x1482u, 0x0f70u, 0x1699u, 0x05dcu, 0x1200u,
+    0x0c97u, 0x0c8cu, 0x12b3u, 0x1dc0u, 0x1696u, 0x0007u
+));
+
+// Montgomery representation of 1: R mod q (30 × 13-bit limbs)
+const MONT_ONE = U384(array<u32, 30>(
+    0x1f2eu, 0x068fu, 0x0000u, 0x0c00u, 0x0467u, 0x0056u,
+    0x0d20u, 0x06f3u, 0x1803u, 0x0425u, 0x10c7u, 0x1104u,
+    0x1e0eu, 0x0cd3u, 0x0037u, 0x1b9fu, 0x1683u, 0x1685u,
+    0x1b09u, 0x1d84u, 0x0a5eu, 0x11e2u, 0x15d9u, 0x1e28u,
+    0x0b29u, 0x1402u, 0x1fcfu, 0x132cu, 0x15deu, 0x0000u
 ));
 
 // Computes a * R mod q, putting standard input into Montgomery form.
@@ -38,7 +49,11 @@ fn to_montgomery_u384(a: U384) -> U384 {
 
 // Converts Montgomery form back to standard form
 fn from_montgomery_u384(a: U384) -> U384 {
-    let one = U384(array<u32, 12>(1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u));
+    let one = U384(array<u32, 30>(
+        1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+    ));
     return mul_montgomery_u384(a, one);
 }
 
@@ -51,19 +66,22 @@ fn normalize_u384(a: U384) -> U384 {
 
 // Inverts a Montgomery U384 via Fermat's Little Theorem (a^(q-2) mod q)
 fn invert_u384(a: U384) -> U384 {
-    let q_minus_2 = array<u32, 12>(
-        0xffffaaa9u, 0xb9feffffu, 0xb153ffffu, 0x1eabfffeu,
-        0xf6b0f624u, 0x6730d2a0u, 0xf38512bfu, 0x64774b84u,
-        0x434bacd7u, 0x4b1ba7b6u, 0x397fe69au, 0x1a0111eau
+    // q - 2 in 30 × 13-bit limbs
+    let q_minus_2 = array<u32, 30>(
+        0x0aa9u, 0x1ffdu, 0x1fffu, 0x1dffu, 0x1b9fu, 0x1fffu,
+        0x054fu, 0x1fd6u, 0x0bffu, 0x00f5u, 0x1d89u, 0x0d61u,
+        0x0a0fu, 0x1869u, 0x1d9cu, 0x0257u, 0x1385u, 0x1c27u,
+        0x1dd2u, 0x0ec8u, 0x1acdu, 0x01a5u, 0x1ed9u, 0x0374u,
+        0x1a4bu, 0x1f34u, 0x0e5fu, 0x03d4u, 0x0011u, 0x000du
     );
-    var res = to_montgomery_u384(U384(array<u32, 12>(1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u)));
+    var res = MONT_ONE;
     var base = a;
 
-    for (var i = 0u; i < 12u; i = i + 1u) {
+    for (var i = 0u; i < 30u; i = i + 1u) {
         var limb = q_minus_2[i];
-        for (var j = 0u; j < 32u; j = j + 1u) {
+        for (var j = 0u; j < 13u; j = j + 1u) {
             if (limb & 1u) != 0u { res = mul_montgomery_u384(res, base); }
-            base = mul_montgomery_u384(base, base);
+            base = sqr_montgomery_u384(base);
             limb = limb >> 1u;
         }
     }
@@ -75,8 +93,8 @@ fn from_montgomery_fp2(a: Fq2) -> Fq2 { return Fq2(from_montgomery_u384(a.c0), f
 fn normalize_fp2(a: Fq2) -> Fq2 { return Fq2(normalize_u384(a.c0), normalize_u384(a.c1)); }
 
 fn invert_fp2(a: Fq2) -> Fq2 {
-    let a_sq = mul_montgomery_u384(a.c0, a.c0);
-    let b_sq = mul_montgomery_u384(a.c1, a.c1);
+    let a_sq = sqr_montgomery_u384(a.c0);
+    let b_sq = sqr_montgomery_u384(a.c1);
     var denom = add_u384(a_sq, b_sq);
     if is_gte_q(denom) { denom = sub_u384(denom, U384(Q_MODULUS)); }
 
@@ -92,14 +110,14 @@ fn invert_fp2(a: Fq2) -> Fq2 {
 // ============================================================================
 
 fn is_inf_g1(p: PointG1) -> bool {
-    for (var i = 0u; i < 12u; i = i + 1u) {
+    for (var i = 0u; i < 30u; i = i + 1u) {
         if p.z.limbs[i] != 0u { return false; }
     }
     return true;
 }
 
 fn is_inf_g2(p: PointG2) -> bool {
-    for (var i = 0u; i < 12u; i = i + 1u) {
+    for (var i = 0u; i < 30u; i = i + 1u) {
         if p.z.c0.limbs[i] != 0u || p.z.c1.limbs[i] != 0u { return false; }
     }
     return true;
@@ -135,7 +153,7 @@ fn add_g2_mixed_safe(p1: PointG2, p2_affine: PointG2) -> PointG2 {
 
 // Load Standard Affine -> Montgomery Jacobian
 fn load_g1(p: PointG1) -> PointG1 {
-    if p.x.limbs[0] == 0u && p.y.limbs[0] == 0u && p.z.limbs[0] == 0u { return G1_INFINITY; }
+    if is_inf_g1(p) { return G1_INFINITY; }
     return PointG1(to_montgomery_u384(p.x), to_montgomery_u384(p.y), to_montgomery_u384(p.z));
 }
 
@@ -143,13 +161,17 @@ fn load_g1(p: PointG1) -> PointG1 {
 fn store_g1(p: PointG1) -> PointG1 {
     if is_inf_g1(p) { return G1_INFINITY; }
     let z_inv = invert_u384(p.z);
-    let z_inv2 = mul_montgomery_u384(z_inv, z_inv);
+    let z_inv2 = sqr_montgomery_u384(z_inv);
     let z_inv3 = mul_montgomery_u384(z_inv2, z_inv);
 
     let x_aff = mul_montgomery_u384(p.x, z_inv2);
     let y_aff = mul_montgomery_u384(p.y, z_inv3);
 
-    let z_std = U384(array<u32,12>(1u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u));
+    let z_std = U384(array<u32, 30>(
+        1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+    ));
     return PointG1(
         normalize_u384(from_montgomery_u384(x_aff)),
         normalize_u384(from_montgomery_u384(y_aff)),
@@ -158,20 +180,27 @@ fn store_g1(p: PointG1) -> PointG1 {
 }
 
 fn load_g2(p: PointG2) -> PointG2 {
-    if p.x.c0.limbs[0] == 0u && p.x.c1.limbs[0] == 0u && p.z.c0.limbs[0] == 0u { return G2_INFINITY; }
+    if is_inf_g2(p) { return G2_INFINITY; }
     return PointG2(to_montgomery_fp2(p.x), to_montgomery_fp2(p.y), to_montgomery_fp2(p.z));
 }
 
 fn store_g2(p: PointG2) -> PointG2 {
     if is_inf_g2(p) { return G2_INFINITY; }
     let z_inv = invert_fp2(p.z);
-    let z_inv2 = mul_fp2(z_inv, z_inv);
+    let z_inv2 = sqr_fp2(z_inv);
     let z_inv3 = mul_fp2(z_inv2, z_inv);
 
     let x_aff = mul_fp2(p.x, z_inv2);
     let y_aff = mul_fp2(p.y, z_inv3);
 
-    let z_std = Fq2(U384(array<u32,12>(1u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)), U384(array<u32,12>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)));
+    let z_std = Fq2(
+        U384(array<u32, 30>(
+            1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+            0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+            0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+        )),
+        U384_ZERO
+    );
     return PointG2(
         normalize_fp2(from_montgomery_fp2(x_aff)),
         normalize_fp2(from_montgomery_fp2(y_aff)),
@@ -190,7 +219,7 @@ fn to_montgomery_bases_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let i = global_id.x;
     if i >= arrayLength(&bases_preconv) { return; }
     let p = bases_preconv[i];
-    if p.x.limbs[0] == 0u && p.y.limbs[0] == 0u && p.z.limbs[0] == 0u { return; }
+    if is_inf_g1(p) { return; }
     bases_preconv[i] = PointG1(
         to_montgomery_u384(p.x),
         to_montgomery_u384(p.y),
@@ -200,12 +229,11 @@ fn to_montgomery_bases_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 // Load a base point that is already in Montgomery form (skip conversion).
 fn load_g1_mont(p: PointG1) -> PointG1 {
-    if p.x.limbs[0] == 0u && p.y.limbs[0] == 0u && p.z.limbs[0] == 0u { return G1_INFINITY; }
+    if is_inf_g1(p) { return G1_INFINITY; }
     return p;
 }
 
 // G2 base pre-conversion: standard affine -> Montgomery form (in-place).
-// Same pattern as to_montgomery_bases_g1, but for PointG2 (288 bytes).
 @group(0) @binding(0) var<storage, read_write> bases_preconv_g2: array<PointG2>;
 
 @compute @workgroup_size(64)
@@ -213,7 +241,7 @@ fn to_montgomery_bases_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let i = global_id.x;
     if i >= arrayLength(&bases_preconv_g2) { return; }
     let p = bases_preconv_g2[i];
-    if p.x.c0.limbs[0] == 0u && p.x.c1.limbs[0] == 0u && p.z.c0.limbs[0] == 0u { return; }
+    if is_inf_g2(p) { return; }
     bases_preconv_g2[i] = PointG2(
         to_montgomery_fp2(p.x),
         to_montgomery_fp2(p.y),
@@ -223,7 +251,7 @@ fn to_montgomery_bases_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 // Load a G2 base point that is already in Montgomery form (skip conversion).
 fn load_g2_mont(p: PointG2) -> PointG2 {
-    if p.x.c0.limbs[0] == 0u && p.x.c1.limbs[0] == 0u && p.z.c0.limbs[0] == 0u { return G2_INFINITY; }
+    if is_inf_g2(p) { return G2_INFINITY; }
     return p;
 }
 
@@ -243,6 +271,9 @@ fn negate_g1(p: PointG1) -> PointG1 {
     return PointG1(p.x, sub_u384(U384(Q_MODULUS), p.y), p.z);
 }
 
+// Phase 1a: Sum points in each bucket (no weighting).
+// Kept separate from weighting to avoid Metal shader miscompilation
+// when add_g1_mixed and scalar_mul_g1 are compiled in the same kernel.
 @compute @workgroup_size(64)
 fn aggregate_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let bucket_idx = global_id.x;
@@ -261,15 +292,10 @@ fn aggregate_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
         sum = add_g1_mixed_safe(sum, base);
     }
-    // Weight the bucket sum by its bucket value: v * B[v]
-    // This moves O(log(v)) work per bucket into the parallel aggregate pass,
-    // so the subsum only needs a simple addition per bucket.
-    aggregated_buckets_g1[bucket_idx] = scalar_mul_g1(sum, bucket_values_agg[bucket_idx]);
+    aggregated_buckets_g1[bucket_idx] = sum;
 }
 
 // Computes k * P using double-and-add.
-// With signed bucket index, k is at most 2^(c-1) where c is the bucket width.
-// For c=13 this is 4096, needing at most 13 bits.
 fn scalar_mul_g1(p: PointG1, k: u32) -> PointG1 {
     if k == 0u { return G1_INFINITY; }
     if k == 1u { return p; }
@@ -287,62 +313,50 @@ fn scalar_mul_g1(p: PointG1, k: u32) -> PointG1 {
     return result;
 }
 
+// Phase 1b: Weight each bucket sum by its bucket value: v * B[v].
+// Separate kernel to avoid Metal shader miscompilation (see aggregate_buckets_g1).
+@group(0) @binding(0) var<storage, read_write> weight_buckets_g1_data: array<PointG1>;
+@group(0) @binding(1) var<storage, read> weight_bucket_values: array<u32>;
+
+@compute @workgroup_size(64)
+fn weight_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    if i >= arrayLength(&weight_buckets_g1_data) { return; }
+    weight_buckets_g1_data[i] = scalar_mul_g1(weight_buckets_g1_data[i], weight_bucket_values[i]);
+}
+
 @group(0) @binding(0) var<storage, read> aggregated_buckets_in_g1: array<PointG1>;
 @group(0) @binding(1) var<storage, read> bucket_values: array<u32>;
 @group(0) @binding(2) var<storage, read> window_starts: array<u32>;
 @group(0) @binding(3) var<storage, read> window_counts: array<u32>;
 @group(0) @binding(4) var<storage, read_write> window_sums_g1: array<PointG1>;
 
-const SUBSUM_WG_SIZE: u32 = 64u;
-var<workgroup> shared_g1: array<PointG1, 64>;
-
-@compute @workgroup_size(64)
-fn subsum_accumulation_g1(
-    @builtin(local_invocation_id) local_id: vec3<u32>,
-    @builtin(workgroup_id) wg_id: vec3<u32>,
-) {
-    let window_id = wg_id.x;
-    let tid = local_id.x;
+// Single-thread G1 subsum accumulation.
+// With 30×13-bit limbs, PointG1 = 360 bytes which triggers Metal
+// var<workgroup> corruption. Use workgroup_size(1) without shared memory.
+@compute @workgroup_size(1)
+fn subsum_accumulation_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let window_id = global_id.x;
     if window_id >= arrayLength(&window_starts) { return; }
 
     let start = window_starts[window_id];
     let count = window_counts[window_id];
-
-    // Phase 1: Each thread sums its strided subset of pre-weighted buckets.
-    var local_sum = G1_INFINITY;
-    var i = tid;
-    for (var iter = 0u; iter < 1024u; iter = iter + 1u) {
-        if i >= count { break; }
-        local_sum = add_g1_safe(local_sum, aggregated_buckets_in_g1[start + i]);
-        i = i + SUBSUM_WG_SIZE;
+    if count == 0u {
+        window_sums_g1[window_id] = G1_INFINITY;
+        return;
     }
-    shared_g1[tid] = local_sum;
-    workgroupBarrier();
 
-    // Phase 2: Tree reduction in shared memory.
-    if tid < 32u { shared_g1[tid] = add_g1_safe(shared_g1[tid], shared_g1[tid + 32u]); }
-    workgroupBarrier();
-    if tid < 16u { shared_g1[tid] = add_g1_safe(shared_g1[tid], shared_g1[tid + 16u]); }
-    workgroupBarrier();
-    if tid < 8u { shared_g1[tid] = add_g1_safe(shared_g1[tid], shared_g1[tid + 8u]); }
-    workgroupBarrier();
-    if tid < 4u { shared_g1[tid] = add_g1_safe(shared_g1[tid], shared_g1[tid + 4u]); }
-    workgroupBarrier();
-    if tid < 2u { shared_g1[tid] = add_g1_safe(shared_g1[tid], shared_g1[tid + 2u]); }
-    workgroupBarrier();
-    if tid == 0u {
-        let result = add_g1_safe(shared_g1[0], shared_g1[1]);
-        window_sums_g1[window_id] = store_g1(result);
+    var sum = G1_INFINITY;
+    for (var i = 0u; i < count; i = i + 1u) {
+        sum = add_g1_safe(sum, aggregated_buckets_in_g1[start + i]);
     }
+    window_sums_g1[window_id] = store_g1(sum);
 }
 
 // ==== Multi-Workgroup G1 Tree Reduction ====
 //
-// Splits the single-workgroup subsum into two passes:
-// Phase 1: num_windows * chunks_per_window workgroups, each reduces a chunk of
-//          pre-weighted buckets → writes one partial sum per workgroup.
-// Phase 2: num_windows workgroups, each reduces chunks_per_window partial sums
-//          → writes one final window sum.
+// Phase 1 + Phase 2: both use workgroup_size(1) without shared memory
+// to avoid Metal var<workgroup> corruption with 360-byte PointG1.
 
 struct SubsumParams {
     chunks_per_window: u32,
@@ -357,93 +371,47 @@ struct SubsumParams {
 @group(0) @binding(3) var<storage, read_write> partial_sums_g1: array<PointG1>;
 @group(0) @binding(4) var<uniform> subsum_params_ph1: SubsumParams;
 
-var<workgroup> shared_ph1_g1: array<PointG1, 64>;
-
-@compute @workgroup_size(64)
+@compute @workgroup_size(1)
 fn subsum_phase1_g1(
-    @builtin(local_invocation_id) local_id: vec3<u32>,
-    @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(global_invocation_id) global_id: vec3<u32>,
 ) {
     let chunks = subsum_params_ph1.chunks_per_window;
-    let window_id = wg_id.x / chunks;
-    let chunk_id = wg_id.x % chunks;
-    let tid = local_id.x;
+    let flat_id = global_id.x;
+    let window_id = flat_id / chunks;
+    let chunk_id = flat_id % chunks;
 
     if window_id >= arrayLength(&win_starts_ph1) { return; }
 
     let start = win_starts_ph1[window_id];
     let count = win_counts_ph1[window_id];
 
-    // Determine this chunk's range within the window's buckets.
     let chunk_size = (count + chunks - 1u) / chunks;
     let chunk_begin = chunk_id * chunk_size;
     let chunk_end = min(chunk_begin + chunk_size, count);
 
-    // Each thread sums its strided portion of this chunk.
     var local_sum = G1_INFINITY;
-    var idx = chunk_begin + tid;
-    for (var iter = 0u; iter < 1024u; iter = iter + 1u) {
-        if idx >= chunk_end { break; }
+    for (var idx = chunk_begin; idx < chunk_end; idx = idx + 1u) {
         local_sum = add_g1_safe(local_sum, agg_ph1_g1[start + idx]);
-        idx = idx + 64u;
     }
-    shared_ph1_g1[tid] = local_sum;
-    workgroupBarrier();
-
-    // Tree reduction in shared memory.
-    if tid < 32u { shared_ph1_g1[tid] = add_g1_safe(shared_ph1_g1[tid], shared_ph1_g1[tid + 32u]); }
-    workgroupBarrier();
-    if tid < 16u { shared_ph1_g1[tid] = add_g1_safe(shared_ph1_g1[tid], shared_ph1_g1[tid + 16u]); }
-    workgroupBarrier();
-    if tid < 8u { shared_ph1_g1[tid] = add_g1_safe(shared_ph1_g1[tid], shared_ph1_g1[tid + 8u]); }
-    workgroupBarrier();
-    if tid < 4u { shared_ph1_g1[tid] = add_g1_safe(shared_ph1_g1[tid], shared_ph1_g1[tid + 4u]); }
-    workgroupBarrier();
-    if tid < 2u { shared_ph1_g1[tid] = add_g1_safe(shared_ph1_g1[tid], shared_ph1_g1[tid + 2u]); }
-    workgroupBarrier();
-    if tid == 0u {
-        partial_sums_g1[window_id * chunks + chunk_id] = add_g1_safe(shared_ph1_g1[0], shared_ph1_g1[1]);
-    }
+    partial_sums_g1[window_id * chunks + chunk_id] = local_sum;
 }
 
 @group(0) @binding(0) var<storage, read> partial_sums_ph2_g1: array<PointG1>;
 @group(0) @binding(1) var<storage, read_write> win_sums_ph2_g1: array<PointG1>;
 @group(0) @binding(2) var<uniform> subsum_params_ph2: SubsumParams;
 
-var<workgroup> shared_ph2_g1: array<PointG1, 64>;
-
-@compute @workgroup_size(64)
+@compute @workgroup_size(1)
 fn subsum_phase2_g1(
-    @builtin(local_invocation_id) local_id: vec3<u32>,
-    @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(global_invocation_id) global_id: vec3<u32>,
 ) {
-    let window_id = wg_id.x;
-    let tid = local_id.x;
+    let window_id = global_id.x;
     let chunks = subsum_params_ph2.chunks_per_window;
 
-    // Each thread loads one partial sum (if tid < chunks), else identity.
-    var val = G1_INFINITY;
-    if tid < chunks {
-        val = partial_sums_ph2_g1[window_id * chunks + tid];
+    var sum = G1_INFINITY;
+    for (var i = 0u; i < chunks; i = i + 1u) {
+        sum = add_g1_safe(sum, partial_sums_ph2_g1[window_id * chunks + i]);
     }
-    shared_ph2_g1[tid] = val;
-    workgroupBarrier();
-
-    // Tree reduction in shared memory.
-    if tid < 32u { shared_ph2_g1[tid] = add_g1_safe(shared_ph2_g1[tid], shared_ph2_g1[tid + 32u]); }
-    workgroupBarrier();
-    if tid < 16u { shared_ph2_g1[tid] = add_g1_safe(shared_ph2_g1[tid], shared_ph2_g1[tid + 16u]); }
-    workgroupBarrier();
-    if tid < 8u { shared_ph2_g1[tid] = add_g1_safe(shared_ph2_g1[tid], shared_ph2_g1[tid + 8u]); }
-    workgroupBarrier();
-    if tid < 4u { shared_ph2_g1[tid] = add_g1_safe(shared_ph2_g1[tid], shared_ph2_g1[tid + 4u]); }
-    workgroupBarrier();
-    if tid < 2u { shared_ph2_g1[tid] = add_g1_safe(shared_ph2_g1[tid], shared_ph2_g1[tid + 2u]); }
-    workgroupBarrier();
-    if tid == 0u {
-        let result = add_g1_safe(shared_ph2_g1[0], shared_ph2_g1[1]);
-        win_sums_ph2_g1[window_id] = store_g1(result);
-    }
+    win_sums_ph2_g1[window_id] = store_g1(sum);
 }
 
 // ==== G2 Pipelines ====
@@ -506,9 +474,6 @@ fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var S = G2_INFINITY;
     var running_sum = G2_INFINITY;
 
-    // G2 keeps the original O(2^c) loop — the Metal shader compiler
-    // miscompiles double_g2 in the double-and-add context due to register pressure.
-    // G2 is only 1 of 5 MSMs per proof, so impact is limited.
     var bucket_ptr = start + count - 1u;
     var next_active_b = bucket_values_g2[bucket_ptr];
 
@@ -538,6 +503,16 @@ fn roundtrip_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let i = global_id.x;
     if i >= arrayLength(&rt_in_g1) { return; }
     rt_out_g1[i] = store_g1(load_g1(rt_in_g1[i]));
+}
+
+// Debug: load a point, double it, and store it back to standard affine.
+@compute @workgroup_size(1)
+fn roundtrip_double_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    if i >= arrayLength(&rt_in_g1) { return; }
+    let p = load_g1(rt_in_g1[i]);
+    let doubled = double_g1(p);
+    rt_out_g1[i] = store_g1(doubled);
 }
 
 @group(0) @binding(0) var<storage, read> rt_in_g2: array<PointG2>;

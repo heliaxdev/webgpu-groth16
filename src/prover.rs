@@ -9,7 +9,7 @@ use rand_core::RngCore;
 
 use crate::bellman;
 use crate::bucket::{BucketData, compute_bucket_sorting, compute_bucket_sorting_with_width};
-use crate::gpu::{GpuContext, curve::GpuCurve};
+use crate::gpu::{GpuContext, curve::{GpuCurve, G1_GPU_BYTES, G2_GPU_BYTES}};
 
 struct GpuConstraintSystem<G: GpuCurve> {
     inputs: Vec<G::Scalar>,
@@ -152,7 +152,7 @@ pub struct PreparedProvingKey<G: GpuCurve> {
 }
 
 fn serialize_g1_bases<G: GpuCurve>(bases: &[G::G1Affine]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(bases.len() * 144);
+    let mut bytes = Vec::with_capacity(bases.len() * G1_GPU_BYTES);
     for base in bases {
         bytes.extend_from_slice(&G::serialize_g1(base));
     }
@@ -160,7 +160,7 @@ fn serialize_g1_bases<G: GpuCurve>(bases: &[G::G1Affine]) -> Vec<u8> {
 }
 
 fn serialize_g2_bases<G: GpuCurve>(bases: &[G::G2Affine]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(bases.len() * 288);
+    let mut bytes = Vec::with_capacity(bases.len() * G2_GPU_BYTES);
     for base in bases {
         bytes.extend_from_slice(&G::serialize_g2(base));
     }
@@ -233,7 +233,7 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     #[cfg(feature = "timing")]
     let t_bucket = std::time::Instant::now();
 
-    let mut bases_bytes = Vec::with_capacity(bases.len() * 144);
+    let mut bases_bytes = Vec::with_capacity(bases.len() * G1_GPU_BYTES);
     for base in bases {
         bases_bytes.extend_from_slice(&G::serialize_g1(base));
     }
@@ -248,8 +248,8 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     let w_counts_buf =
         gpu.create_storage_buffer("WCounts", bytemuck::cast_slice(&bd.window_counts));
 
-    let agg_buf = gpu.create_empty_buffer("Agg", (bd.num_active_buckets * 144) as u64);
-    let sums_buf = gpu.create_empty_buffer("Sums", (bd.num_windows * 144) as u64);
+    let agg_buf = gpu.create_empty_buffer("Agg", (bd.num_active_buckets as usize * G1_GPU_BYTES) as u64);
+    let sums_buf = gpu.create_empty_buffer("Sums", (bd.num_windows as usize * G1_GPU_BYTES) as u64);
 
     #[cfg(feature = "timing")]
     let t_upload = std::time::Instant::now();
@@ -273,7 +273,7 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     let t_dispatch = std::time::Instant::now();
 
     let result_bytes = gpu
-        .read_buffer(&sums_buf, (bd.num_windows * 144) as u64)
+        .read_buffer(&sums_buf, (bd.num_windows as usize * G1_GPU_BYTES) as u64)
         .await?;
 
     #[cfg(feature = "timing")]
@@ -309,7 +309,7 @@ async fn gpu_msm_g2<G: GpuCurve>(
         return Ok(G::g2_identity());
     }
 
-    let mut bases_bytes = Vec::with_capacity(bases.len() * 288);
+    let mut bases_bytes = Vec::with_capacity(bases.len() * G2_GPU_BYTES);
     for base in bases {
         bases_bytes.extend_from_slice(&G::serialize_g2(base));
     }
@@ -324,8 +324,8 @@ async fn gpu_msm_g2<G: GpuCurve>(
     let w_counts_buf =
         gpu.create_storage_buffer("WCounts", bytemuck::cast_slice(&bd.window_counts));
 
-    let agg_buf = gpu.create_empty_buffer("AggG2", (bd.num_active_buckets * 288) as u64);
-    let sums_buf = gpu.create_empty_buffer("SumsG2", (bd.num_windows * 288) as u64);
+    let agg_buf = gpu.create_empty_buffer("AggG2", (bd.num_active_buckets as usize * G2_GPU_BYTES) as u64);
+    let sums_buf = gpu.create_empty_buffer("SumsG2", (bd.num_windows as usize * G2_GPU_BYTES) as u64);
 
     gpu.execute_msm(
         true,
@@ -343,7 +343,7 @@ async fn gpu_msm_g2<G: GpuCurve>(
     );
 
     let result_bytes = gpu
-        .read_buffer(&sums_buf, (bd.num_windows * 288) as u64)
+        .read_buffer(&sums_buf, (bd.num_windows as usize * G2_GPU_BYTES) as u64)
         .await?;
     fold_window_sums_g2::<G>(&result_bytes, bd.num_windows, G::g2_bucket_width())
 }
@@ -354,7 +354,7 @@ fn fold_window_sums_g1<G: GpuCurve>(
     bucket_width: usize,
 ) -> Result<G::G1> {
     let mut result = G::g1_identity();
-    for (i, chunk) in result_bytes.chunks_exact(144).enumerate().rev() {
+    for (i, chunk) in result_bytes.chunks_exact(G1_GPU_BYTES).enumerate().rev() {
         if i != (num_windows - 1) as usize {
             for _ in 0..bucket_width {
                 result = G::add_g1_proj(&result, &result);
@@ -372,7 +372,7 @@ fn fold_window_sums_g2<G: GpuCurve>(
     bucket_width: usize,
 ) -> Result<G::G2> {
     let mut result = G::g2_identity();
-    for (i, chunk) in result_bytes.chunks_exact(288).enumerate().rev() {
+    for (i, chunk) in result_bytes.chunks_exact(G2_GPU_BYTES).enumerate().rev() {
         if i != (num_windows - 1) as usize {
             for _ in 0..bucket_width {
                 result = G::add_g2_proj(&result, &result);
@@ -474,9 +474,9 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
                 bytemuck::cast_slice(&bd.window_counts),
             );
             let agg_buf = gpu
-                .create_empty_buffer(&format!("{name}_agg"), (bd.num_active_buckets * 144) as u64);
+                .create_empty_buffer(&format!("{name}_agg"), (bd.num_active_buckets as usize * G1_GPU_BYTES) as u64);
             let sums_buf =
-                gpu.create_empty_buffer(&format!("{name}_sums"), (bd.num_windows * 144) as u64);
+                gpu.create_empty_buffer(&format!("{name}_sums"), (bd.num_windows as usize * G1_GPU_BYTES) as u64);
 
             gpu.execute_msm(
                 false,
@@ -517,8 +517,8 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
             gpu.create_storage_buffer("b2_wstarts", bytemuck::cast_slice(&bd.window_starts));
         let w_counts_buf =
             gpu.create_storage_buffer("b2_wcounts", bytemuck::cast_slice(&bd.window_counts));
-        let agg_buf = gpu.create_empty_buffer("b2_agg", (bd.num_active_buckets * 288) as u64);
-        let sums_buf = gpu.create_empty_buffer("b2_sums", (bd.num_windows * 288) as u64);
+        let agg_buf = gpu.create_empty_buffer("b2_agg", (bd.num_active_buckets as usize * G2_GPU_BYTES) as u64);
+        let sums_buf = gpu.create_empty_buffer("b2_sums", (bd.num_windows as usize * G2_GPU_BYTES) as u64);
 
         gpu.execute_msm(
             true,
@@ -543,35 +543,35 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
 
     let t_msm_enqueue = std::time::Instant::now();
     let a_job = enqueue_g1("a", a_bytes, a_bd)?;
-    eprintln!("[msm] enqueue a: {:?} ({} bases)", t_msm_enqueue.elapsed(), a_bytes.len() / 144);
+    eprintln!("[msm] enqueue a: {:?} ({} bases)", t_msm_enqueue.elapsed(), a_bytes.len() / G1_GPU_BYTES);
     let t_msm_enqueue = std::time::Instant::now();
     let b1_job = enqueue_g1("b1", b1_bytes, b1_bd)?;
-    eprintln!("[msm] enqueue b1: {:?} ({} bases)", t_msm_enqueue.elapsed(), b1_bytes.len() / 144);
+    eprintln!("[msm] enqueue b1: {:?} ({} bases)", t_msm_enqueue.elapsed(), b1_bytes.len() / G1_GPU_BYTES);
     let t_msm_enqueue = std::time::Instant::now();
     let l_job = enqueue_g1("l", l_bytes, l_bd)?;
-    eprintln!("[msm] enqueue l: {:?} ({} bases)", t_msm_enqueue.elapsed(), l_bytes.len() / 144);
+    eprintln!("[msm] enqueue l: {:?} ({} bases)", t_msm_enqueue.elapsed(), l_bytes.len() / G1_GPU_BYTES);
     let t_msm_enqueue = std::time::Instant::now();
     let h_job = enqueue_g1("h", h_bytes, h_bd)?;
-    eprintln!("[msm] enqueue h: {:?} ({} bases)", t_msm_enqueue.elapsed(), h_bytes.len() / 144);
+    eprintln!("[msm] enqueue h: {:?} ({} bases)", t_msm_enqueue.elapsed(), h_bytes.len() / G1_GPU_BYTES);
     let t_msm_enqueue = std::time::Instant::now();
     let b2_job = enqueue_g2(b2_bytes, b2_bd)?;
-    eprintln!("[msm] enqueue b2: {:?} ({} bases)", t_msm_enqueue.elapsed(), b2_bytes.len() / 288);
+    eprintln!("[msm] enqueue b2: {:?} ({} bases)", t_msm_enqueue.elapsed(), b2_bytes.len() / G2_GPU_BYTES);
 
     let mut read_targets: Vec<(&wgpu::Buffer, wgpu::BufferAddress)> = Vec::new();
     if let Some(job) = &a_job {
-        read_targets.push((&job.sums_buf, (job.num_windows * 144) as u64));
+        read_targets.push((&job.sums_buf, (job.num_windows as usize * G1_GPU_BYTES) as u64));
     }
     if let Some(job) = &b1_job {
-        read_targets.push((&job.sums_buf, (job.num_windows * 144) as u64));
+        read_targets.push((&job.sums_buf, (job.num_windows as usize * G1_GPU_BYTES) as u64));
     }
     if let Some(job) = &l_job {
-        read_targets.push((&job.sums_buf, (job.num_windows * 144) as u64));
+        read_targets.push((&job.sums_buf, (job.num_windows as usize * G1_GPU_BYTES) as u64));
     }
     if let Some(job) = &h_job {
-        read_targets.push((&job.sums_buf, (job.num_windows * 144) as u64));
+        read_targets.push((&job.sums_buf, (job.num_windows as usize * G1_GPU_BYTES) as u64));
     }
     if let Some(job) = &b2_job {
-        read_targets.push((&job.sums_buf, (job.num_windows * 288) as u64));
+        read_targets.push((&job.sums_buf, (job.num_windows as usize * G2_GPU_BYTES) as u64));
     }
 
     let t_readback = std::time::Instant::now();
@@ -1452,12 +1452,12 @@ mod tests {
 
         let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
 
-        // Each G1 point serializes to 144 bytes, each G2 to 288 bytes
-        assert_eq!(ppk.a_bytes.len(), params.a.len() * 144);
-        assert_eq!(ppk.b_g1_bytes.len(), params.b_g1.len() * 144);
-        assert_eq!(ppk.l_bytes.len(), params.l.len() * 144);
-        assert_eq!(ppk.h_bytes.len(), params.h.len() * 144);
-        assert_eq!(ppk.b_g2_bytes.len(), params.b_g2.len() * 288);
+        // Each G1 point serializes to G1_GPU_BYTES bytes, each G2 to G2_GPU_BYTES bytes
+        assert_eq!(ppk.a_bytes.len(), params.a.len() * G1_GPU_BYTES);
+        assert_eq!(ppk.b_g1_bytes.len(), params.b_g1.len() * G1_GPU_BYTES);
+        assert_eq!(ppk.l_bytes.len(), params.l.len() * G1_GPU_BYTES);
+        assert_eq!(ppk.h_bytes.len(), params.h.len() * G1_GPU_BYTES);
+        assert_eq!(ppk.b_g2_bytes.len(), params.b_g2.len() * G2_GPU_BYTES);
     }
 
     #[tokio::test]
@@ -1479,6 +1479,55 @@ mod tests {
             .expect("gpu msm failed");
         let gpu_affine = Bls12::proj_to_affine_g1(&gpu);
         assert_eq!(gpu_affine, base);
+    }
+
+    #[tokio::test]
+    async fn test_gpu_msm_scalar2_matches_cpu() {
+        let mut rng = OsRng;
+        let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
+        let params =
+            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+                .expect("failed to generate parameters");
+        let gpu_ctx = GpuContext::<Bls12>::new()
+            .await
+            .expect("failed to initialize gpu");
+
+        let base = params.a[0];
+
+        // scalar = 2: exercises double_g1 via scalar_mul_g1
+        let gpu = gpu_msm_g1::<Bls12>(&gpu_ctx, &[base], &[Scalar::from(2u64)])
+            .await
+            .expect("gpu msm scalar=2 failed");
+        let cpu: blstrs::G1Projective = base.into();
+        let cpu_2 = cpu + cpu;
+        assert_eq!(
+            Bls12::proj_to_affine_g1(&gpu),
+            Bls12::proj_to_affine_g1(&cpu_2),
+            "scalar=2 mismatch"
+        );
+
+        // scalar = 3: exercises double_g1 + add_g1 via scalar_mul_g1
+        let gpu = gpu_msm_g1::<Bls12>(&gpu_ctx, &[base], &[Scalar::from(3u64)])
+            .await
+            .expect("gpu msm scalar=3 failed");
+        let cpu_3 = cpu_2 + cpu;
+        assert_eq!(
+            Bls12::proj_to_affine_g1(&gpu),
+            Bls12::proj_to_affine_g1(&cpu_3),
+            "scalar=3 mismatch"
+        );
+
+        // 2 points, scalars [1, 1]: exercises add_g1_mixed in aggregate_buckets
+        let base2 = params.a[1];
+        let gpu = gpu_msm_g1::<Bls12>(&gpu_ctx, &[base, base2], &[Scalar::from(1u64), Scalar::from(1u64)])
+            .await
+            .expect("gpu msm 2-point failed");
+        let cpu_sum: blstrs::G1Projective = Into::<blstrs::G1Projective>::into(base) + Into::<blstrs::G1Projective>::into(base2);
+        assert_eq!(
+            Bls12::proj_to_affine_g1(&gpu),
+            Bls12::proj_to_affine_g1(&cpu_sum),
+            "2-point [1,1] mismatch"
+        );
     }
 
     #[tokio::test]

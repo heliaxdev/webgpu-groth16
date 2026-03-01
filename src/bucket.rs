@@ -1,5 +1,5 @@
 use crate::glv;
-use crate::gpu::curve::GpuCurve;
+use crate::gpu::curve::{GpuCurve, G1_GPU_BYTES};
 
 pub struct BucketData {
     pub base_indices: Vec<u32>,
@@ -95,7 +95,7 @@ pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
 /// windows (128-bit scalars with c=15) over the 2N points.
 ///
 /// Returns `(combined_bases_bytes, bucket_data)` where `combined_bases_bytes` is
-/// a 2N×144-byte buffer laid out as:
+/// a 2N×G1_GPU_BYTES buffer laid out as:
 ///   [maybe_neg(P₀), maybe_neg(φ(P₀)), maybe_neg(P₁), maybe_neg(φ(P₁)), ...]
 pub fn compute_glv_bucket_sorting<G: GpuCurve>(
     scalars: &[G::Scalar],
@@ -104,28 +104,28 @@ pub fn compute_glv_bucket_sorting<G: GpuCurve>(
     c: usize,
 ) -> (Vec<u8>, BucketData) {
     let n = scalars.len();
-    debug_assert_eq!(bases_bytes.len(), n * 144);
-    debug_assert_eq!(phi_bases_bytes.len(), n * 144);
+    debug_assert_eq!(bases_bytes.len(), n * G1_GPU_BYTES);
+    debug_assert_eq!(phi_bases_bytes.len(), n * G1_GPU_BYTES);
 
     let num_windows = 128_usize.div_ceil(c);
 
     // Decompose all scalars and build the combined bases buffer.
-    let mut combined_bases = Vec::with_capacity(n * 2 * 144);
+    let mut combined_bases = Vec::with_capacity(n * 2 * G1_GPU_BYTES);
     let mut all_windows: Vec<Vec<u32>> = Vec::with_capacity(n * 2);
 
     for i in 0..n {
         let (k1, k1_neg, k2, k2_neg) = glv::glv_decompose(&scalars[i]);
 
         // Entry 2i: original base P_i (conditionally negated)
-        let src_start = i * 144;
-        let mut p_bytes = bases_bytes[src_start..src_start + 144].to_vec();
+        let src_start = i * G1_GPU_BYTES;
+        let mut p_bytes = bases_bytes[src_start..src_start + G1_GPU_BYTES].to_vec();
         if k1_neg {
             glv::negate_g1_bytes(&mut p_bytes);
         }
         combined_bases.extend_from_slice(&p_bytes);
 
         // Entry 2i+1: endomorphism base φ(P_i) (conditionally negated)
-        let mut phi_bytes = phi_bases_bytes[src_start..src_start + 144].to_vec();
+        let mut phi_bytes = phi_bases_bytes[src_start..src_start + G1_GPU_BYTES].to_vec();
         if k2_neg {
             glv::negate_g1_bytes(&mut phi_bytes);
         }
@@ -503,8 +503,8 @@ mod tests {
             let (combined, bd) =
                 compute_glv_bucket_sorting::<Bls12>(&scalars, &bases_bytes, &phi_bases_bytes, c);
 
-            // Combined bases should have 2*n points of 144 bytes each
-            assert_eq!(combined.len(), n * 2 * 144);
+            // Combined bases should have 2*n points of G1_GPU_BYTES bytes each
+            assert_eq!(combined.len(), n * 2 * G1_GPU_BYTES);
 
             // Window/bucket parallel array lengths
             assert_eq!(bd.bucket_pointers.len(), bd.num_active_buckets as usize);
@@ -557,7 +557,7 @@ mod tests {
         let (combined, bd) =
             compute_glv_bucket_sorting::<Bls12>(&scalars, &bases_bytes, &phi_bases_bytes, c);
 
-        assert_eq!(combined.len(), n * 2 * 144);
+        assert_eq!(combined.len(), n * 2 * G1_GPU_BYTES);
         assert_eq!(bd.num_active_buckets, 0);
         assert_eq!(bd.base_indices.len(), 0);
     }
