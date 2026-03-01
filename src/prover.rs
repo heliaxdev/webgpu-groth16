@@ -225,18 +225,14 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     #[cfg(feature = "timing")]
     let t_start = std::time::Instant::now();
 
-    let bd: BucketData = compute_bucket_sorting::<G>(scalars);
+    let bases_bytes = serialize_g1_bases::<G>(bases);
+    let bd = compute_bucket_sorting::<G>(scalars);
     if bd.num_active_buckets == 0 {
         return Ok(G::g1_identity());
     }
 
     #[cfg(feature = "timing")]
     let t_bucket = std::time::Instant::now();
-
-    let mut bases_bytes = Vec::with_capacity(bases.len() * G1_GPU_BYTES);
-    for base in bases {
-        bases_bytes.extend_from_slice(&G::serialize_g1(base));
-    }
 
     let bases_buf = gpu.create_storage_buffer("Bases", &bases_bytes);
     let indices_buf = gpu.create_storage_buffer("Indices", bytemuck::cast_slice(&bd.base_indices));
@@ -279,7 +275,7 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     #[cfg(feature = "timing")]
     let t_read = std::time::Instant::now();
 
-    let result = fold_window_sums_g1::<G>(&result_bytes, bd.num_windows, G::bucket_width())?;
+    let result = fold_window_sums_g1::<G>(&result_bytes, bd.num_windows, bd.bucket_width)?;
 
     #[cfg(feature = "timing")]
     {
@@ -345,7 +341,7 @@ async fn gpu_msm_g2<G: GpuCurve>(
     let result_bytes = gpu
         .read_buffer(&sums_buf, (bd.num_windows as usize * G2_GPU_BYTES) as u64)
         .await?;
-    fold_window_sums_g2::<G>(&result_bytes, bd.num_windows, G::g2_bucket_width())
+    fold_window_sums_g2::<G>(&result_bytes, bd.num_windows, bd.bucket_width)
 }
 
 fn fold_window_sums_g1<G: GpuCurve>(
@@ -398,6 +394,11 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
     b2_bases: &[G::G2Affine],
     b2_scalars: &[G::Scalar],
 ) -> Result<(G::G1, G::G1, G::G1, G::G1, G::G2)> {
+    let a_bases_bytes = serialize_g1_bases::<G>(a_bases);
+    let b1_bases_bytes = serialize_g1_bases::<G>(b1_bases);
+    let l_bases_bytes = serialize_g1_bases::<G>(l_bases);
+    let h_bases_bytes = serialize_g1_bases::<G>(h_bases);
+
     let a_bd = compute_bucket_sorting::<G>(a_scalars);
     let b_bd = compute_bucket_sorting::<G>(b_scalars);
     let l_bd = compute_bucket_sorting::<G>(l_scalars);
@@ -405,13 +406,13 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
     let b2_bd = compute_bucket_sorting_with_width::<G>(b2_scalars, G::g2_bucket_width());
     gpu_msm_batch_bytes::<G>(
         gpu,
-        &serialize_g1_bases::<G>(a_bases),
+        &a_bases_bytes,
         a_bd,
-        &serialize_g1_bases::<G>(b1_bases),
+        &b1_bases_bytes,
         b_bd,
-        &serialize_g1_bases::<G>(l_bases),
+        &l_bases_bytes,
         l_bd,
-        &serialize_g1_bases::<G>(h_bases),
+        &h_bases_bytes,
         h_bd,
         &serialize_g2_bases::<G>(b2_bases),
         b2_bd,
@@ -436,10 +437,12 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
     struct G1Pending {
         sums_buf: wgpu::Buffer,
         num_windows: u32,
+        bucket_width: usize,
     }
     struct G2Pending {
         sums_buf: wgpu::Buffer,
         num_windows: u32,
+        bucket_width: usize,
     }
 
     let enqueue_g1 =
@@ -496,6 +499,7 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
             Ok(Some(G1Pending {
                 sums_buf,
                 num_windows: bd.num_windows,
+                bucket_width: bd.bucket_width,
             }))
         };
 
@@ -538,6 +542,7 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
         Ok(Some(G2Pending {
             sums_buf,
             num_windows: bd.num_windows,
+            bucket_width: bd.bucket_width,
         }))
     };
 
@@ -579,27 +584,27 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
     eprintln!("[msm] readback: {:?}", t_readback.elapsed());
 
     let a = if let Some(job) = &a_job {
-        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, G::bucket_width())?
+        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, job.bucket_width)?
     } else {
         G::g1_identity()
     };
     let b1 = if let Some(job) = &b1_job {
-        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, G::bucket_width())?
+        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, job.bucket_width)?
     } else {
         G::g1_identity()
     };
     let l = if let Some(job) = &l_job {
-        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, G::bucket_width())?
+        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, job.bucket_width)?
     } else {
         G::g1_identity()
     };
     let h = if let Some(job) = &h_job {
-        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, G::bucket_width())?
+        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, job.bucket_width)?
     } else {
         G::g1_identity()
     };
     let b2 = if let Some(job) = &b2_job {
-        fold_window_sums_g2::<G>(&read_results.next().unwrap(), job.num_windows, G::g2_bucket_width())?
+        fold_window_sums_g2::<G>(&read_results.next().unwrap(), job.num_windows, job.bucket_width)?
     } else {
         G::g2_identity()
     };

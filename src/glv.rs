@@ -268,6 +268,40 @@ pub fn u128_to_windows(k: u128, c: usize) -> Vec<u32> {
     windows
 }
 
+/// Decomposes a 128-bit unsigned integer into signed c-bit windows.
+/// Returns `ceil(128/c) + 1` entries (extra for carry), each as (|value|, is_negative).
+/// Window values are in [0, 2^(c-1)], halving the bucket count vs unsigned.
+pub fn u128_to_signed_windows(k: u128, c: usize) -> Vec<(u32, bool)> {
+    let mut unsigned = u128_to_windows(k, c);
+    // Add extra window for potential carry from the last window
+    unsigned.push(0);
+
+    let half = 1u32 << (c - 1);
+    let full = 1u32 << c;
+    let mut result = Vec::with_capacity(unsigned.len());
+
+    for i in 0..unsigned.len() {
+        let w = unsigned[i];
+        if w >= half {
+            // Convert to negative digit: w - 2^c, carry +1 to next
+            let abs_val = full - w;
+            result.push((abs_val, true));
+            if i + 1 < unsigned.len() {
+                unsigned[i + 1] += 1;
+            }
+        } else {
+            result.push((w, false));
+        }
+    }
+
+    // Trim trailing zeros
+    while result.len() > 1 && result.last() == Some(&(0, false)) {
+        result.pop();
+    }
+
+    result
+}
+
 // ============================================================================
 // Multi-precision arithmetic helpers
 // ============================================================================

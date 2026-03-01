@@ -10,6 +10,7 @@ pub struct BucketData {
     pub window_counts: Vec<u32>,
     pub num_windows: u32,
     pub num_active_buckets: u32,
+    pub bucket_width: usize,
 }
 
 /// Sign bit used to encode point negation in base_indices entries.
@@ -85,14 +86,15 @@ pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
         window_counts,
         num_windows: num_windows as u32,
         num_active_buckets,
+        bucket_width: c,
     }
 }
 
-/// GLV-aware bucket sorting for G1 MSM.
+/// GLV-aware bucket sorting for G1 MSM with signed-digit decomposition.
 ///
-/// Decomposes each scalar via GLV into two ~128-bit components, builds a 2N-entry
-/// bases buffer with conditional point negation, and produces BucketData for 9
-/// windows (128-bit scalars with c=15) over the 2N points.
+/// Decomposes each scalar via GLV into two ~128-bit components, applies signed-digit
+/// decomposition to halve bucket count, builds a 2N-entry bases buffer with conditional
+/// point negation, and produces BucketData.
 ///
 /// Returns `(combined_bases_bytes, bucket_data)` where `combined_bases_bytes` is
 /// a 2N×G1_GPU_BYTES buffer laid out as:
@@ -107,16 +109,14 @@ pub fn compute_glv_bucket_sorting<G: GpuCurve>(
     debug_assert_eq!(bases_bytes.len(), n * G1_GPU_BYTES);
     debug_assert_eq!(phi_bases_bytes.len(), n * G1_GPU_BYTES);
 
-    let num_windows = 128_usize.div_ceil(c);
-
     // Decompose all scalars and build the combined bases buffer.
     let mut combined_bases = Vec::with_capacity(n * 2 * G1_GPU_BYTES);
-    let mut all_windows: Vec<Vec<u32>> = Vec::with_capacity(n * 2);
+    let mut all_windows: Vec<Vec<(u32, bool)>> = Vec::with_capacity(n * 2);
 
     for i in 0..n {
         let (k1, k1_neg, k2, k2_neg) = glv::glv_decompose(&scalars[i]);
 
-        // Entry 2i: original base P_i (conditionally negated)
+        // Entry 2i: original base P_i (conditionally negated by k1 sign)
         let src_start = i * G1_GPU_BYTES;
         let mut p_bytes = bases_bytes[src_start..src_start + G1_GPU_BYTES].to_vec();
         if k1_neg {
@@ -124,19 +124,24 @@ pub fn compute_glv_bucket_sorting<G: GpuCurve>(
         }
         combined_bases.extend_from_slice(&p_bytes);
 
-        // Entry 2i+1: endomorphism base φ(P_i) (conditionally negated)
+        // Entry 2i+1: endomorphism base φ(P_i) (conditionally negated by k2 sign)
         let mut phi_bytes = phi_bases_bytes[src_start..src_start + G1_GPU_BYTES].to_vec();
         if k2_neg {
             glv::negate_g1_bytes(&mut phi_bytes);
         }
         combined_bases.extend_from_slice(&phi_bytes);
 
-        // Window decompositions for the two half-scalars
-        all_windows.push(glv::u128_to_windows(k1, c));
-        all_windows.push(glv::u128_to_windows(k2, c));
+        // Signed-digit window decompositions for the two half-scalars
+        all_windows.push(glv::u128_to_signed_windows(k1, c));
+        all_windows.push(glv::u128_to_signed_windows(k2, c));
     }
 
-    // Run standard bucket sorting on the 2N window decompositions.
+    // Determine max window count across all decompositions
+    let num_windows = all_windows.iter().map(|w| w.len()).max().unwrap_or(0);
+
+    // Signed-digit: bucket values in [1, 2^(c-1)], halved from unsigned
+    let num_buckets = (1usize << (c - 1)) + 1;
+
     let mut base_indices = Vec::new();
     let mut bucket_pointers = Vec::new();
     let mut bucket_sizes = Vec::new();
@@ -145,13 +150,15 @@ pub fn compute_glv_bucket_sorting<G: GpuCurve>(
     let mut window_counts = Vec::new();
 
     for w in 0..num_windows {
-        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); 1 << c];
+        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); num_buckets];
 
         for (i, windows) in all_windows.iter().enumerate() {
             if w < windows.len() {
-                let val = windows[w] as usize;
-                if val != 0 {
-                    buckets[val].push(i as u32);
+                let (abs_val, is_neg) = windows[w];
+                if abs_val != 0 {
+                    // Encode sign in MSB (same as standard signed-digit path)
+                    let entry = if is_neg { i as u32 | SIGN_BIT } else { i as u32 };
+                    buckets[abs_val as usize].push(entry);
                 }
             }
         }
@@ -182,6 +189,7 @@ pub fn compute_glv_bucket_sorting<G: GpuCurve>(
         window_counts,
         num_windows: num_windows as u32,
         num_active_buckets,
+        bucket_width: c,
     };
 
     (combined_bases, bd)
@@ -519,15 +527,16 @@ mod tests {
             let total_entries: u32 = bd.bucket_sizes.iter().sum();
             assert_eq!(total_entries as usize, bd.base_indices.len());
 
-            // Bucket values in [1, 2^c - 1] (unsigned decomposition for GLV)
+            // Bucket values in [1, 2^(c-1)] (signed-digit decomposition)
             for &v in &bd.bucket_values {
                 assert!(v >= 1);
-                assert!(v < (1 << c));
+                assert!(v <= (1 << (c - 1)));
             }
 
-            // All base indices must be < 2*n (no sign bit in GLV path)
+            // All base indices (after masking sign bit) must be < 2*n
             for &idx in &bd.base_indices {
-                assert!((idx as usize) < 2 * n, "GLV index {idx} out of range for 2*n={}", 2 * n);
+                let raw_idx = (idx & !SIGN_BIT) as usize;
+                assert!(raw_idx < 2 * n, "GLV index {raw_idx} out of range for 2*n={}", 2 * n);
             }
         }
     }
@@ -587,19 +596,20 @@ mod tests {
         let (_combined, bd) =
             compute_glv_bucket_sorting::<Bls12>(&scalars, &bases_bytes, &phi_bases_bytes, c);
 
-        // Recompute the expected windows
-        let mut expected_windows: Vec<Vec<u32>> = Vec::new();
+        // Recompute the expected signed-digit windows
+        let mut expected_windows: Vec<Vec<(u32, bool)>> = Vec::new();
         for s in &scalars {
             let (k1, _k1_neg, k2, _k2_neg) = glv::glv_decompose(s);
-            expected_windows.push(glv::u128_to_windows(k1, c));
-            expected_windows.push(glv::u128_to_windows(k2, c));
+            expected_windows.push(glv::u128_to_signed_windows(k1, c));
+            expected_windows.push(glv::u128_to_signed_windows(k2, c));
         }
 
-        // Verify each window
+        // Verify each window: build map from (raw_index with sign) -> bucket_value
         for w in 0..bd.num_windows as usize {
             let w_start = bd.window_starts[w] as usize;
             let w_count = bd.window_counts[w] as usize;
 
+            // Map from raw base_indices entry (with SIGN_BIT) to bucket value
             let mut found: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
             for b in 0..w_count {
                 let bucket_idx = w_start + b;
@@ -607,21 +617,22 @@ mod tests {
                 let ptr = bd.bucket_pointers[bucket_idx] as usize;
                 let size = bd.bucket_sizes[bucket_idx] as usize;
                 for k in 0..size {
-                    let idx = bd.base_indices[ptr + k];
-                    found.insert(idx, val);
+                    let raw = bd.base_indices[ptr + k];
+                    found.insert(raw, val);
                 }
             }
 
             // Every expected non-zero window must appear in found
             for (i, windows) in expected_windows.iter().enumerate() {
                 if w < windows.len() {
-                    let val = windows[w];
-                    if val != 0 {
+                    let (abs_val, is_neg) = windows[w];
+                    if abs_val != 0 {
+                        let expected_key = if is_neg { i as u32 | SIGN_BIT } else { i as u32 };
                         assert_eq!(
-                            found.get(&(i as u32)),
-                            Some(&val),
-                            "point {i} window {w}: expected bucket {val}, got {:?}",
-                            found.get(&(i as u32))
+                            found.get(&expected_key),
+                            Some(&abs_val),
+                            "point {i} window {w}: expected bucket {abs_val} (neg={is_neg}), got {:?}",
+                            found.get(&expected_key)
                         );
                     }
                 }
