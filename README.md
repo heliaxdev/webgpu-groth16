@@ -356,31 +356,46 @@ One-time setup cost: ~39ms for upload + Montgomery conversion (amortized across 
   - msm enqueue a/b1/l/b2: 15.9ms → 2.3ms (no base upload)
   - bucket sorting: 57.6ms → 45.0ms (no combined_bases building)
 
+### OPT-23: Adaptive bucket width (c) per MSM
+
+Replace the fixed bucket width `c=13` for all G1 MSMs with a per-MSM optimal value
+computed by `optimal_glv_c(n)`. The function minimizes the Pippenger cost
+`f(c) = ceil(128/c) × (2n + 2^(c-1))` over c ∈ [10, 13], capped at 13 because
+values above 13 cause exponential subsum cost growth on GPU (2^(c-1)/64 sequential
+additions per thread in tree reduction).
+
+Also increased `scalar_mul_g1`/`scalar_mul_g2` loop bounds from 14 to 16 bits for
+future-proofing (early `break` ensures zero cost for small c values).
+
+- **sapling_output:** 965 ms → 987 ms (no change — all MSMs select c=13 at n~21-31K)
+- **msm_g1/n=1000:** 38.6 ms → 33.0 ms (**-14.5%**, c=10 selected)
+- **proof/n=2:** 86.6 ms → 80.1 ms (**-7.5%**, c=10 selected for small MSMs)
+
 ## Latest Benchmark Results
 
 Measured on Apple M3 Max. Criterion median times.
 
 | Benchmark | Time |
 |---|---|
-| proof/n=2 | 86.6 ms |
-| proof/n=1000 | 234 ms |
-| proof/n=10000 | 612 ms |
-| proof/n=100000 | 2.41 s |
-| msm_g1/n=100 | 21.7 ms |
-| msm_g1/n=1000 | 38.6 ms |
-| msm_g1/n=10000 | 99.6 ms |
-| msm_g1/n=100000 | 341 ms |
-| msm_batch/5x100 | 140 ms |
+| proof/n=2 | 80.1 ms |
+| proof/n=1000 | 229 ms |
+| proof/n=10000 | 601 ms |
+| proof/n=100000 | 2.32 s |
+| msm_g1/n=100 | 22.6 ms |
+| msm_g1/n=1000 | 33.0 ms |
+| msm_g1/n=10000 | 98.1 ms |
+| msm_g1/n=100000 | 339 ms |
+| msm_batch/5x100 | 144 ms |
 | msm_batch/5x1000 | 232 ms |
-| msm_batch/5x10000 | 560 ms |
+| msm_batch/5x10000 | 561 ms |
 | msm_batch/5x100000 | 2.04 s |
-| bucket_sorting/n=1000 | 2.35 ms |
-| bucket_sorting/n=10000 | 17.9 ms |
-| bucket_sorting/n=100000 | 138 ms |
-| ntt/h_poly_n=8 | 3.95 ms |
-| ntt/h_poly_n=1024 | 11.3 ms |
-| ntt/h_poly_n=16384 | 112 ms |
-| sapling_output/proof | 965 ms |
+| bucket_sorting/n=1000 | 2.31 ms |
+| bucket_sorting/n=10000 | 17.5 ms |
+| bucket_sorting/n=100000 | 139 ms |
+| ntt/h_poly_n=8 | 4.07 ms |
+| ntt/h_poly_n=1024 | 11.4 ms |
+| ntt/h_poly_n=16384 | 113 ms |
+| sapling_output/proof | 987 ms |
 
 ## Discarded optimizations
 

@@ -21,6 +21,7 @@ use rand_core::RngCore;
 use crate::bellman;
 use crate::bucket::{
     compute_bucket_sorting_with_width, compute_glv_bucket_data, compute_glv_bucket_sorting,
+    optimal_glv_c,
 };
 use crate::gpu::curve::GpuCurve;
 use crate::gpu::GpuContext;
@@ -162,7 +163,10 @@ where
     // halving the number of Pippenger windows.
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
-    let glv_c = G::glv_bucket_width();
+    // Adaptive bucket width: choose per-MSM c based on point count.
+    let a_c = optimal_glv_c(a_assignment.len());
+    let b1_c = optimal_glv_c(b_assignment.len());
+    let l_c = optimal_glv_c(cs.aux.len());
 
     // Bucket sorting: with persistent GPU key, GLV negation is folded into sign bits
     // and no combined bases buffer is built. Without it, the original path is used.
@@ -176,22 +180,22 @@ where
     let l_glv_bytes;
 
     if gpu_pk.is_some() {
-        a_bd = compute_glv_bucket_data::<G>(&a_assignment, glv_c);
-        b1_bd = compute_glv_bucket_data::<G>(&b_assignment, glv_c);
-        l_bd = compute_glv_bucket_data::<G>(&cs.aux, glv_c);
+        a_bd = compute_glv_bucket_data::<G>(&a_assignment, a_c);
+        b1_bd = compute_glv_bucket_data::<G>(&b_assignment, b1_c);
+        l_bd = compute_glv_bucket_data::<G>(&cs.aux, l_c);
         b2_bd = compute_bucket_sorting_with_width::<G>(&b_assignment, G::g2_bucket_width());
         a_glv_bytes = Vec::new();
         b1_glv_bytes = Vec::new();
         l_glv_bytes = Vec::new();
     } else {
         let (a_bytes, a_bd_tmp) = compute_glv_bucket_sorting::<G>(
-            &a_assignment, &ppk.a_bytes, &ppk.a_phi_bytes, glv_c,
+            &a_assignment, &ppk.a_bytes, &ppk.a_phi_bytes, a_c,
         );
         let (b1_bytes, b1_bd_tmp) = compute_glv_bucket_sorting::<G>(
-            &b_assignment, &ppk.b_g1_bytes, &ppk.b_g1_phi_bytes, glv_c,
+            &b_assignment, &ppk.b_g1_bytes, &ppk.b_g1_phi_bytes, b1_c,
         );
         let (l_bytes, l_bd_tmp) = compute_glv_bucket_sorting::<G>(
-            &cs.aux, &ppk.l_bytes, &ppk.l_phi_bytes, glv_c,
+            &cs.aux, &ppk.l_bytes, &ppk.l_phi_bytes, l_c,
         );
         a_bd = a_bd_tmp;
         b1_bd = b1_bd_tmp;
@@ -204,7 +208,7 @@ where
 
     #[cfg(feature = "timing")]
     {
-        eprintln!("[proof] bucket sorting (4x GLV): {:?}", t_phase.elapsed());
+        eprintln!("[proof] bucket sorting (4x GLV): {:?} (c: a={}, b1={}, l={})", t_phase.elapsed(), a_c, b1_c, l_c);
         a_bd.print_distribution_stats("a_g1_glv");
         b1_bd.print_distribution_stats("b1_g1_glv");
         l_bd.print_distribution_stats("l_g1_glv");
@@ -242,11 +246,12 @@ where
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     let h_job;
+    let h_c = optimal_glv_c(pk.h.len());
     if let Some(gpk) = gpu_pk {
-        let h_bd = compute_glv_bucket_data::<G>(&h_coeffs[..pk.h.len()], glv_c);
+        let h_bd = compute_glv_bucket_data::<G>(&h_coeffs[..pk.h.len()], h_c);
         #[cfg(feature = "timing")]
         {
-            eprintln!("[proof] h bucket sorting (GLV): {:?}", t_phase.elapsed());
+            eprintln!("[proof] h bucket sorting (GLV): {:?} (c={})", t_phase.elapsed(), h_c);
             h_bd.print_distribution_stats("h_g1_glv");
         }
         #[cfg(feature = "timing")]
@@ -256,11 +261,11 @@ where
         eprintln!("[proof] msm enqueue h: {:?}", t_phase.elapsed());
     } else {
         let (h_glv_bytes, h_bd) = compute_glv_bucket_sorting::<G>(
-            &h_coeffs[..pk.h.len()], &ppk.h_bytes, &ppk.h_phi_bytes, glv_c,
+            &h_coeffs[..pk.h.len()], &ppk.h_bytes, &ppk.h_phi_bytes, h_c,
         );
         #[cfg(feature = "timing")]
         {
-            eprintln!("[proof] h bucket sorting (GLV): {:?}", t_phase.elapsed());
+            eprintln!("[proof] h bucket sorting (GLV): {:?} (c={})", t_phase.elapsed(), h_c);
             h_bd.print_distribution_stats("h_g1_glv");
         }
         #[cfg(feature = "timing")]

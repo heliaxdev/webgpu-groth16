@@ -360,7 +360,7 @@ fn scalar_mul_g1(p: PointG1, k: u32) -> PointG1 {
     var result = G1_INFINITY;
     var base = p;
     var scalar = k;
-    for (var bit = 0u; bit < 14u; bit = bit + 1u) {
+    for (var bit = 0u; bit < 16u; bit = bit + 1u) {
         if scalar == 0u { break; }
         if (scalar & 1u) != 0u {
             result = add_g1_safe(result, base);
@@ -630,7 +630,7 @@ fn scalar_mul_g2(p: PointG2, k: u32) -> PointG2 {
     var result = G2_PROJ_IDENTITY;
     var base = p;
     var scalar = k;
-    for (var bit = 0u; bit < 14u; bit = bit + 1u) {
+    for (var bit = 0u; bit < 16u; bit = bit + 1u) {
         if scalar == 0u { break; }
         if (scalar & 1u) != 0u {
             result = add_g2_complete(result, base);

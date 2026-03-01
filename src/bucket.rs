@@ -251,6 +251,34 @@ fn build_bucket_data(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
     }
 }
 
+/// Compute the optimal GLV bucket width for a G1 MSM with `n` original points.
+///
+/// With GLV, each scalar produces two ~128-bit sub-scalars, so the effective
+/// point count is 2n. Minimizes the Pippenger cost:
+///   f(c) = ceil(128/c) × (2n + 2^(c-1))
+///
+/// Searched over c ∈ [10, 13]. Values above 13 cause exponential subsum cost
+/// growth on GPU (2^(c-1)/64 sequential additions per thread in tree reduction)
+/// that the classical Pippenger model fails to capture.
+pub fn optimal_glv_c(n: usize) -> usize {
+    if n < 256 {
+        return 13;
+    }
+    let effective_n = 2 * n;
+    let mut best_c = 13;
+    let mut best_cost = u64::MAX;
+    for c in 10..=13 {
+        let windows = (128u64 + c as u64 - 1) / c as u64;
+        let buckets = 1u64 << (c - 1);
+        let cost = windows * (effective_n as u64 + buckets);
+        if cost < best_cost {
+            best_cost = cost;
+            best_c = c;
+        }
+    }
+    best_c
+}
+
 pub fn compute_bucket_sorting<G: GpuCurve>(scalars: &[G::Scalar]) -> BucketData {
     compute_bucket_sorting_with_width::<G>(scalars, G::bucket_width())
 }
@@ -992,5 +1020,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn optimal_glv_c_values() {
+        // Tiny inputs get default
+        assert_eq!(optimal_glv_c(10), 13);
+        assert_eq!(optimal_glv_c(100), 13);
+
+        // All values in valid range [10, 13]
+        for n in [256, 500, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 500_000] {
+            let c = optimal_glv_c(n);
+            assert!(c >= 10 && c <= 13, "c={c} out of range for n={n}");
+        }
+
+        // Larger inputs should prefer equal or larger c
+        let c_small = optimal_glv_c(1_000);
+        let c_large = optimal_glv_c(1_000_000);
+        assert!(c_large >= c_small);
     }
 }

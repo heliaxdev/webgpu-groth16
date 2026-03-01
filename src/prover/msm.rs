@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 
-use crate::bucket::{BucketData, compute_bucket_sorting_with_width, compute_glv_bucket_sorting};
+use crate::bucket::{BucketData, compute_bucket_sorting_with_width, compute_glv_bucket_sorting, optimal_glv_c};
 use crate::gpu::curve::{GpuCurve, G1_GPU_BYTES, G2_GPU_BYTES};
 use crate::gpu::{GpuContext, MsmBuffers};
 
@@ -198,7 +198,7 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     #[cfg(feature = "timing")]
     let t_start = std::time::Instant::now();
 
-    let glv_c = G::glv_bucket_width();
+    let glv_c = optimal_glv_c(scalars.len());
     let bases_bytes = serialize_g1_bases::<G>(bases);
     let phi_bytes = serialize_g1_phi_bases::<G>(bases);
     let (glv_bytes, bd) = compute_glv_bucket_sorting::<G>(scalars, &bases_bytes, &phi_bytes, glv_c);
@@ -343,7 +343,6 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
     b2_bases: &[G::G2Affine],
     b2_scalars: &[G::Scalar],
 ) -> Result<(G::G1, G::G1, G::G1, G::G1, G::G2)> {
-    let glv_c = G::glv_bucket_width();
     let a_bases_bytes = serialize_g1_bases::<G>(a_bases);
     let a_phi_bytes = serialize_g1_phi_bases::<G>(a_bases);
     let b1_bases_bytes = serialize_g1_bases::<G>(b1_bases);
@@ -353,10 +352,14 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
     let h_bases_bytes = serialize_g1_bases::<G>(h_bases);
     let h_phi_bytes = serialize_g1_phi_bases::<G>(h_bases);
 
-    let (a_glv, a_bd) = compute_glv_bucket_sorting::<G>(a_scalars, &a_bases_bytes, &a_phi_bytes, glv_c);
-    let (b1_glv, b_bd) = compute_glv_bucket_sorting::<G>(b_scalars, &b1_bases_bytes, &b1_phi_bytes, glv_c);
-    let (l_glv, l_bd) = compute_glv_bucket_sorting::<G>(l_scalars, &l_bases_bytes, &l_phi_bytes, glv_c);
-    let (h_glv, h_bd) = compute_glv_bucket_sorting::<G>(h_scalars, &h_bases_bytes, &h_phi_bytes, glv_c);
+    let a_c = optimal_glv_c(a_scalars.len());
+    let b1_c = optimal_glv_c(b_scalars.len());
+    let l_c = optimal_glv_c(l_scalars.len());
+    let h_c = optimal_glv_c(h_scalars.len());
+    let (a_glv, a_bd) = compute_glv_bucket_sorting::<G>(a_scalars, &a_bases_bytes, &a_phi_bytes, a_c);
+    let (b1_glv, b_bd) = compute_glv_bucket_sorting::<G>(b_scalars, &b1_bases_bytes, &b1_phi_bytes, b1_c);
+    let (l_glv, l_bd) = compute_glv_bucket_sorting::<G>(l_scalars, &l_bases_bytes, &l_phi_bytes, l_c);
+    let (h_glv, h_bd) = compute_glv_bucket_sorting::<G>(h_scalars, &h_bases_bytes, &h_phi_bytes, h_c);
     let b2_bd = compute_bucket_sorting_with_width::<G>(b2_scalars, G::g2_bucket_width());
     gpu_msm_batch_bytes::<G>(
         gpu,
