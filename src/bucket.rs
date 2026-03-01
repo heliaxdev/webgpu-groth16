@@ -1,6 +1,18 @@
 use crate::glv;
 use crate::gpu::curve::{GpuCurve, G1_GPU_BYTES};
 
+/// Bucket sorting result for GPU MSM dispatch.
+///
+/// Uses a Structure-of-Arrays layout: each array is uploaded as a separate
+/// `storage<read_only>` GPU buffer. This avoids struct padding issues in WGSL
+/// and allows independent buffer bindings per kernel.
+///
+/// Invariants:
+/// - `bucket_pointers[i]` is the starting index in `base_indices` for bucket `i`
+/// - `bucket_sizes[i]` is the count of points in bucket `i`
+/// - `bucket_values[i]` is the scalar weight for bucket `i` (in `[1, 2^(c-1)]`)
+/// - `window_starts[w]` is the first bucket index belonging to window `w`
+/// - `window_counts[w]` is the number of active (non-empty) buckets in window `w`
 pub struct BucketData {
     pub base_indices: Vec<u32>,
     pub bucket_pointers: Vec<u32>,
@@ -17,26 +29,12 @@ pub struct BucketData {
 /// When this bit is set, the GPU negates the point's y-coordinate before adding.
 const SIGN_BIT: u32 = 1 << 31;
 
-pub fn compute_bucket_sorting<G: GpuCurve>(scalars: &[G::Scalar]) -> BucketData {
-    compute_bucket_sorting_with_width::<G>(scalars, G::bucket_width())
-}
-
-pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
-    scalars: &[G::Scalar],
-    c: usize,
-) -> BucketData {
-    // Pre-compute all signed scalar window decompositions.
-    // Each window is (absolute_value, is_negative).
-    let all_windows: Vec<Vec<(u32, bool)>> = scalars
-        .iter()
-        .map(|s| G::scalar_to_signed_windows(s, c))
-        .collect();
-
-    // The number of windows is determined by the longest decomposition
-    // (may be num_windows+1 if final carry produced an extra window).
+/// Builds `BucketData` from pre-computed signed-digit window decompositions.
+///
+/// `all_windows[i]` contains the (absolute_value, is_negative) pairs for point `i`.
+/// `c` is the bucket width (window size in bits).
+fn build_bucket_data(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
     let num_windows = all_windows.iter().map(|w| w.len()).max().unwrap_or(0);
-
-    // Bucket values now range 1..2^(c-1) (halved from unsigned).
     let num_buckets = (1usize << (c - 1)) + 1;
 
     let mut base_indices = Vec::new();
@@ -53,7 +51,6 @@ pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
             if w < windows.len() {
                 let (abs, neg) = windows[w];
                 if abs != 0 {
-                    // Encode sign in MSB of the base index
                     let entry = if neg { i as u32 | SIGN_BIT } else { i as u32 };
                     buckets[abs as usize].push(entry);
                 }
@@ -76,7 +73,6 @@ pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
     }
 
     let num_active_buckets = bucket_sizes.len() as u32;
-
     BucketData {
         base_indices,
         bucket_pointers,
@@ -88,6 +84,21 @@ pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
         num_active_buckets,
         bucket_width: c,
     }
+}
+
+pub fn compute_bucket_sorting<G: GpuCurve>(scalars: &[G::Scalar]) -> BucketData {
+    compute_bucket_sorting_with_width::<G>(scalars, G::bucket_width())
+}
+
+pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
+    scalars: &[G::Scalar],
+    c: usize,
+) -> BucketData {
+    let all_windows: Vec<Vec<(u32, bool)>> = scalars
+        .iter()
+        .map(|s| G::scalar_to_signed_windows(s, c))
+        .collect();
+    build_bucket_data(&all_windows, c)
 }
 
 /// GLV-aware bucket sorting for G1 MSM with signed-digit decomposition.
@@ -136,63 +147,7 @@ pub fn compute_glv_bucket_sorting<G: GpuCurve>(
         all_windows.push(glv::u128_to_signed_windows(k2, c));
     }
 
-    // Determine max window count across all decompositions
-    let num_windows = all_windows.iter().map(|w| w.len()).max().unwrap_or(0);
-
-    // Signed-digit: bucket values in [1, 2^(c-1)], halved from unsigned
-    let num_buckets = (1usize << (c - 1)) + 1;
-
-    let mut base_indices = Vec::new();
-    let mut bucket_pointers = Vec::new();
-    let mut bucket_sizes = Vec::new();
-    let mut bucket_values = Vec::new();
-    let mut window_starts = Vec::new();
-    let mut window_counts = Vec::new();
-
-    for w in 0..num_windows {
-        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); num_buckets];
-
-        for (i, windows) in all_windows.iter().enumerate() {
-            if w < windows.len() {
-                let (abs_val, is_neg) = windows[w];
-                if abs_val != 0 {
-                    // Encode sign in MSB (same as standard signed-digit path)
-                    let entry = if is_neg { i as u32 | SIGN_BIT } else { i as u32 };
-                    buckets[abs_val as usize].push(entry);
-                }
-            }
-        }
-
-        window_starts.push(bucket_values.len() as u32);
-        let mut count = 0;
-
-        for (val, indices) in buckets.into_iter().enumerate() {
-            if !indices.is_empty() {
-                bucket_pointers.push(base_indices.len() as u32);
-                bucket_sizes.push(indices.len() as u32);
-                bucket_values.push(val as u32);
-                base_indices.extend(indices);
-                count += 1;
-            }
-        }
-        window_counts.push(count);
-    }
-
-    let num_active_buckets = bucket_sizes.len() as u32;
-
-    let bd = BucketData {
-        base_indices,
-        bucket_pointers,
-        bucket_sizes,
-        bucket_values,
-        window_starts,
-        window_counts,
-        num_windows: num_windows as u32,
-        num_active_buckets,
-        bucket_width: c,
-    };
-
-    (combined_bases, bd)
+    (combined_bases, build_bucket_data(&all_windows, c))
 }
 
 #[cfg(test)]

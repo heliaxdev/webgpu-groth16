@@ -9,7 +9,7 @@ use rand_core::RngCore;
 
 use crate::bellman;
 use crate::bucket::{BucketData, compute_bucket_sorting, compute_bucket_sorting_with_width};
-use crate::gpu::{GpuContext, curve::{GpuCurve, G1_GPU_BYTES, G2_GPU_BYTES}};
+use crate::gpu::{GpuContext, HPolyBuffers, MsmBuffers, curve::{GpuCurve, G1_GPU_BYTES, G2_GPU_BYTES}};
 
 struct GpuConstraintSystem<G: GpuCurve> {
     inputs: Vec<G::Scalar>,
@@ -252,15 +252,17 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
 
     gpu.execute_msm(
         false,
-        &bases_buf,
-        &indices_buf,
-        &ptrs_buf,
-        &sizes_buf,
-        &agg_buf,
-        &vals_buf,
-        &w_starts_buf,
-        &w_counts_buf,
-        &sums_buf,
+        &MsmBuffers {
+            bases: &bases_buf,
+            base_indices: &indices_buf,
+            bucket_pointers: &ptrs_buf,
+            bucket_sizes: &sizes_buf,
+            aggregated_buckets: &agg_buf,
+            bucket_values: &vals_buf,
+            window_starts: &w_starts_buf,
+            window_counts: &w_counts_buf,
+            window_sums: &sums_buf,
+        },
         bd.num_active_buckets,
         bd.num_windows,
     );
@@ -325,15 +327,17 @@ async fn gpu_msm_g2<G: GpuCurve>(
 
     gpu.execute_msm(
         true,
-        &bases_buf,
-        &indices_buf,
-        &ptrs_buf,
-        &sizes_buf,
-        &agg_buf,
-        &vals_buf,
-        &w_starts_buf,
-        &w_counts_buf,
-        &sums_buf,
+        &MsmBuffers {
+            bases: &bases_buf,
+            base_indices: &indices_buf,
+            bucket_pointers: &ptrs_buf,
+            bucket_sizes: &sizes_buf,
+            aggregated_buckets: &agg_buf,
+            bucket_values: &vals_buf,
+            window_starts: &w_starts_buf,
+            window_counts: &w_counts_buf,
+            window_sums: &sums_buf,
+        },
         bd.num_active_buckets,
         bd.num_windows,
     );
@@ -344,22 +348,39 @@ async fn gpu_msm_g2<G: GpuCurve>(
     fold_window_sums_g2::<G>(&result_bytes, bd.num_windows, bd.bucket_width)
 }
 
+/// Horner-style evaluation of window sums: processes windows from most-significant
+/// to least-significant, doubling `bucket_width` times between each window.
+fn fold_window_sums<P: Clone>(
+    result_bytes: &[u8],
+    num_windows: u32,
+    bucket_width: usize,
+    point_bytes: usize,
+    identity: P,
+    deserialize: impl Fn(&[u8]) -> Result<P>,
+    add: impl Fn(&P, &P) -> P,
+) -> Result<P> {
+    let mut result = identity;
+    for (i, chunk) in result_bytes.chunks_exact(point_bytes).enumerate().rev() {
+        if i != (num_windows - 1) as usize {
+            for _ in 0..bucket_width {
+                result = add(&result, &result);
+            }
+        }
+        let w_sum = deserialize(chunk)?;
+        result = add(&result, &w_sum);
+    }
+    Ok(result)
+}
+
 fn fold_window_sums_g1<G: GpuCurve>(
     result_bytes: &[u8],
     num_windows: u32,
     bucket_width: usize,
 ) -> Result<G::G1> {
-    let mut result = G::g1_identity();
-    for (i, chunk) in result_bytes.chunks_exact(G1_GPU_BYTES).enumerate().rev() {
-        if i != (num_windows - 1) as usize {
-            for _ in 0..bucket_width {
-                result = G::add_g1_proj(&result, &result);
-            }
-        }
-        let w_sum = G::deserialize_g1(chunk)?;
-        result = G::add_g1_proj(&result, &w_sum);
-    }
-    Ok(result)
+    fold_window_sums(
+        result_bytes, num_windows, bucket_width, G1_GPU_BYTES,
+        G::g1_identity(), G::deserialize_g1, G::add_g1_proj,
+    )
 }
 
 fn fold_window_sums_g2<G: GpuCurve>(
@@ -367,17 +388,10 @@ fn fold_window_sums_g2<G: GpuCurve>(
     num_windows: u32,
     bucket_width: usize,
 ) -> Result<G::G2> {
-    let mut result = G::g2_identity();
-    for (i, chunk) in result_bytes.chunks_exact(G2_GPU_BYTES).enumerate().rev() {
-        if i != (num_windows - 1) as usize {
-            for _ in 0..bucket_width {
-                result = G::add_g2_proj(&result, &result);
-            }
-        }
-        let w_sum = G::deserialize_g2(chunk)?;
-        result = G::add_g2_proj(&result, &w_sum);
-    }
-    Ok(result)
+    fold_window_sums(
+        result_bytes, num_windows, bucket_width, G2_GPU_BYTES,
+        G::g2_identity(), G::deserialize_g2, G::add_g2_proj,
+    )
 }
 
 #[allow(clippy::type_complexity)]
@@ -434,19 +448,14 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
     b2_bytes: &[u8],
     b2_bd: BucketData,
 ) -> Result<(G::G1, G::G1, G::G1, G::G1, G::G2)> {
-    struct G1Pending {
-        sums_buf: wgpu::Buffer,
-        num_windows: u32,
-        bucket_width: usize,
-    }
-    struct G2Pending {
+    struct MsmPending {
         sums_buf: wgpu::Buffer,
         num_windows: u32,
         bucket_width: usize,
     }
 
     let enqueue_g1 =
-        |name: &str, bases_bytes: &[u8], bd: BucketData| -> Result<Option<G1Pending>> {
+        |name: &str, bases_bytes: &[u8], bd: BucketData| -> Result<Option<MsmPending>> {
             if bd.num_active_buckets == 0 {
                 return Ok(None);
             }
@@ -483,27 +492,29 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
 
             gpu.execute_msm(
                 false,
-                &bases_buf,
-                &indices_buf,
-                &ptrs_buf,
-                &sizes_buf,
-                &agg_buf,
-                &vals_buf,
-                &w_starts_buf,
-                &w_counts_buf,
-                &sums_buf,
+                &MsmBuffers {
+                    bases: &bases_buf,
+                    base_indices: &indices_buf,
+                    bucket_pointers: &ptrs_buf,
+                    bucket_sizes: &sizes_buf,
+                    aggregated_buckets: &agg_buf,
+                    bucket_values: &vals_buf,
+                    window_starts: &w_starts_buf,
+                    window_counts: &w_counts_buf,
+                    window_sums: &sums_buf,
+                },
                 bd.num_active_buckets,
                 bd.num_windows,
             );
 
-            Ok(Some(G1Pending {
+            Ok(Some(MsmPending {
                 sums_buf,
                 num_windows: bd.num_windows,
                 bucket_width: bd.bucket_width,
             }))
         };
 
-    let enqueue_g2 = |bases_bytes: &[u8], bd: BucketData| -> Result<Option<G2Pending>> {
+    let enqueue_g2 = |bases_bytes: &[u8], bd: BucketData| -> Result<Option<MsmPending>> {
         if bd.num_active_buckets == 0 {
             return Ok(None);
         }
@@ -526,20 +537,22 @@ async fn gpu_msm_batch_bytes<G: GpuCurve>(
 
         gpu.execute_msm(
             true,
-            &bases_buf,
-            &indices_buf,
-            &ptrs_buf,
-            &sizes_buf,
-            &agg_buf,
-            &vals_buf,
-            &w_starts_buf,
-            &w_counts_buf,
-            &sums_buf,
+            &MsmBuffers {
+                bases: &bases_buf,
+                base_indices: &indices_buf,
+                bucket_pointers: &ptrs_buf,
+                bucket_sizes: &sizes_buf,
+                aggregated_buckets: &agg_buf,
+                bucket_values: &vals_buf,
+                window_starts: &w_starts_buf,
+                window_counts: &w_counts_buf,
+                window_sums: &sums_buf,
+            },
             bd.num_active_buckets,
             bd.num_windows,
         );
 
-        Ok(Some(G2Pending {
+        Ok(Some(MsmPending {
             sums_buf,
             num_windows: bd.num_windows,
             bucket_width: bd.bucket_width,
@@ -692,15 +705,17 @@ fn submit_h_poly<G: GpuCurve>(
 
     // 4. DISPATCH FULL H PIPELINE ON GPU USING A SINGLE COMMAND BUFFER
     gpu.execute_h_pipeline(
-        &a_buf,
-        &b_buf,
-        &c_buf,
-        &h_buf,
-        &tw_inv_n_buf,
-        &tw_fwd_n_buf,
-        &shifts_buf,
-        &inv_shifts_buf,
-        &z_invs_buf,
+        &HPolyBuffers {
+            a: &a_buf,
+            b: &b_buf,
+            c: &c_buf,
+            h: &h_buf,
+            twiddles_inv: &tw_inv_n_buf,
+            twiddles_fwd: &tw_fwd_n_buf,
+            shifts: &shifts_buf,
+            inv_shifts: &inv_shifts_buf,
+            z_invs: &z_invs_buf,
+        },
         n as u32,
     );
 

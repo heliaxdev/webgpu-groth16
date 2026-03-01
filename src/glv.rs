@@ -3,6 +3,22 @@
 //! Exploits the efficient endomorphism φ(x, y) = (β·x, y) on BLS12-381 G1 to
 //! decompose any 256-bit scalar k into two ~128-bit scalars k1, k2 such that
 //! k·P = k1·P + k2·φ(P). This halves the number of Pippenger windows in MSM.
+//!
+//! ## Decomposition algorithm (Babai rounding)
+//!
+//! The BLS12-381 scalar field r has a short lattice basis derived from the
+//! curve parameter x = -0xd201000000010000:
+//!
+//!   v1 = (N11, 1)     where N11 = x²
+//!   v2 = (N22, -1)    where N22 = x² - 1
+//!
+//! Given scalar k, we compute:
+//!   1. c1 = round(k/r): since 0 ≤ k < r, this is 0 or 1
+//!   2. c2 = round(k·N22/r) via precomputed g = round(N22·2^256/r)
+//!   3. k1 = k - c1 - c2·N11
+//!   4. k2 = c1·N22 - c2
+//!
+//! Both |k1| and |k2| are bounded by ~sqrt(r) ≈ 2^128.
 
 use blstrs::{Fp, G1Affine};
 use ff::PrimeField;
@@ -15,8 +31,8 @@ use crate::gpu::curve::{fq_13bit_to_bytes, fq_bytes_to_13bit, FQ_GPU_BYTES, G1_G
 // ============================================================================
 
 /// Cube root of unity β in Fq such that φ(x,y) = (β·x, y) is an endomorphism.
-/// β^3 = 1 (mod q), β ≠ 1.
-/// Decimal: 793479390729215512621379701633421447060886740281060493010456487427281649075476305620758731620350
+/// β^3 = 1 (mod q), β ≠ 1. Equivalently: β = g^((q-1)/3) where g generates Fq*.
+/// Reference: https://eprint.iacr.org/2013/158 Section 4
 const BETA_LE_BYTES: [u8; 48] = [
     0xfe, 0xff, 0xfe, 0xff, 0xff, 0xff, 0x01, 0x2e, 0x02, 0x00, 0x0a, 0x62,
     0x13, 0xd8, 0x17, 0xde, 0x88, 0x96, 0xf8, 0xe6, 0x3b, 0xa9, 0xb3, 0xdd,
@@ -137,6 +153,9 @@ fn compute_k2(c1: u64, c2: u128) -> (u128, bool) {
 // ============================================================================
 
 /// Applies the GLV endomorphism φ(x, y) = (β·x, y) to a G1 affine point.
+///
+/// See also [`endomorphism_g1_bytes`] for the GPU-serialized-format equivalent
+/// that avoids full deserialize/serialize overhead.
 pub fn endomorphism_g1(p: &G1Affine) -> G1Affine {
     if bool::from(p.is_identity()) {
         return G1Affine::identity();
@@ -170,8 +189,10 @@ pub fn endomorphism_g1(p: &G1Affine) -> G1Affine {
 
 /// Applies the GLV endomorphism φ(P) = (β·x, y) to a serialized G1 point.
 ///
-/// The point is in GPU 13-bit limb format: x[120] || y[120] || z[120] = 360 bytes.
-/// Each coordinate is 30×13-bit limbs stored as 30 little-endian u32s.
+/// This is the byte-level equivalent of [`endomorphism_g1`], operating directly
+/// on the 30×13-bit limb GPU representation to avoid full deserialize/serialize.
+///
+/// Format: x[120] || y[120] || z[120] = 360 bytes (each coord is 30 LE u32s).
 /// Returns new serialized bytes with x replaced by β·x.
 pub fn endomorphism_g1_bytes(point_bytes: &[u8]) -> [u8; G1_GPU_BYTES] {
     debug_assert_eq!(point_bytes.len(), G1_GPU_BYTES);
