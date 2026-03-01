@@ -51,6 +51,44 @@ impl UploadedMsm {
     }
 }
 
+/// Holds GPU metadata buffers (no bases) for use with persistent bases.
+struct UploadedMsmMetadata {
+    indices_buf: wgpu::Buffer,
+    ptrs_buf: wgpu::Buffer,
+    sizes_buf: wgpu::Buffer,
+    vals_buf: wgpu::Buffer,
+    w_starts_buf: wgpu::Buffer,
+    w_counts_buf: wgpu::Buffer,
+    agg_buf: wgpu::Buffer,
+    sums_buf: wgpu::Buffer,
+    reduce_starts_buf: Option<wgpu::Buffer>,
+    reduce_counts_buf: Option<wgpu::Buffer>,
+    orig_vals_buf: Option<wgpu::Buffer>,
+    orig_wstarts_buf: Option<wgpu::Buffer>,
+    orig_wcounts_buf: Option<wgpu::Buffer>,
+}
+
+impl UploadedMsmMetadata {
+    fn as_msm_buffers<'a>(&'a self, bases: &'a wgpu::Buffer) -> MsmBuffers<'a> {
+        MsmBuffers {
+            bases,
+            base_indices: &self.indices_buf,
+            bucket_pointers: &self.ptrs_buf,
+            bucket_sizes: &self.sizes_buf,
+            aggregated_buckets: &self.agg_buf,
+            bucket_values: &self.vals_buf,
+            window_starts: &self.w_starts_buf,
+            window_counts: &self.w_counts_buf,
+            window_sums: &self.sums_buf,
+            reduce_starts: self.reduce_starts_buf.as_ref(),
+            reduce_counts: self.reduce_counts_buf.as_ref(),
+            orig_bucket_values: self.orig_vals_buf.as_ref(),
+            orig_window_starts: self.orig_wstarts_buf.as_ref(),
+            orig_window_counts: self.orig_wcounts_buf.as_ref(),
+        }
+    }
+}
+
 /// Uploads BucketData arrays to GPU buffers for MSM dispatch.
 fn upload_bucket_data<G: GpuCurve>(
     gpu: &GpuContext<G>,
@@ -183,6 +221,7 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
         bd.num_dispatched,
         bd.has_chunks,
         bd.num_windows,
+        false,
     );
 
     #[cfg(feature = "timing")]
@@ -235,6 +274,7 @@ pub(crate) async fn gpu_msm_g2<G: GpuCurve>(
         bd.num_dispatched,
         bd.has_chunks,
         bd.num_windows,
+        false,
     );
 
     let result_bytes = gpu
@@ -359,6 +399,7 @@ pub(crate) fn enqueue_msm_g1<G: GpuCurve>(
         bd.num_dispatched,
         bd.has_chunks,
         bd.num_windows,
+        false,
     );
     Ok(Some(MsmPending {
         sums_buf: uploaded.sums_buf,
@@ -384,9 +425,161 @@ pub(crate) fn enqueue_msm_g2<G: GpuCurve>(
         bd.num_dispatched,
         bd.has_chunks,
         bd.num_windows,
+        false,
     );
     Ok(Some(MsmPending {
         sums_buf: uploaded.sums_buf,
+        num_windows: bd.num_windows,
+        bucket_width: bd.bucket_width,
+    }))
+}
+
+/// Upload only bucket metadata (no bases) for use with persistent GPU bases.
+fn upload_bucket_metadata<G: GpuCurve>(
+    gpu: &GpuContext<G>,
+    name: &str,
+    bd: &BucketData,
+    point_gpu_bytes: usize,
+) -> UploadedMsmMetadata {
+    let indices_buf = gpu.create_storage_buffer(
+        &format!("{name}_indices"),
+        bytemuck::cast_slice(&bd.base_indices),
+    );
+    let ptrs_buf = gpu.create_storage_buffer(
+        &format!("{name}_ptrs"),
+        bytemuck::cast_slice(&bd.bucket_pointers),
+    );
+    let sizes_buf = gpu.create_storage_buffer(
+        &format!("{name}_sizes"),
+        bytemuck::cast_slice(&bd.bucket_sizes),
+    );
+    let vals_buf = gpu.create_storage_buffer(
+        &format!("{name}_vals"),
+        bytemuck::cast_slice(&bd.bucket_values),
+    );
+    let w_starts_buf = gpu.create_storage_buffer(
+        &format!("{name}_wstarts"),
+        bytemuck::cast_slice(&bd.window_starts),
+    );
+    let w_counts_buf = gpu.create_storage_buffer(
+        &format!("{name}_wcounts"),
+        bytemuck::cast_slice(&bd.window_counts),
+    );
+    let agg_buf = gpu.create_empty_buffer(
+        &format!("{name}_agg"),
+        (bd.num_active_buckets as usize * point_gpu_bytes) as u64,
+    );
+    let sums_buf = gpu.create_empty_buffer(
+        &format!("{name}_sums"),
+        (bd.num_windows as usize * point_gpu_bytes) as u64,
+    );
+
+    let reduce_starts_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer(
+            &format!("{name}_reduce_starts"),
+            bytemuck::cast_slice(&bd.reduce_starts),
+        ))
+    } else {
+        None
+    };
+    let reduce_counts_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer(
+            &format!("{name}_reduce_counts"),
+            bytemuck::cast_slice(&bd.reduce_counts),
+        ))
+    } else {
+        None
+    };
+    let orig_vals_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer(
+            &format!("{name}_orig_vals"),
+            bytemuck::cast_slice(&bd.orig_bucket_values),
+        ))
+    } else {
+        None
+    };
+    let orig_wstarts_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer(
+            &format!("{name}_orig_wstarts"),
+            bytemuck::cast_slice(&bd.orig_window_starts),
+        ))
+    } else {
+        None
+    };
+    let orig_wcounts_buf = if bd.has_chunks {
+        Some(gpu.create_storage_buffer(
+            &format!("{name}_orig_wcounts"),
+            bytemuck::cast_slice(&bd.orig_window_counts),
+        ))
+    } else {
+        None
+    };
+
+    UploadedMsmMetadata {
+        indices_buf,
+        ptrs_buf,
+        sizes_buf,
+        vals_buf,
+        w_starts_buf,
+        w_counts_buf,
+        agg_buf,
+        sums_buf,
+        reduce_starts_buf,
+        reduce_counts_buf,
+        orig_vals_buf,
+        orig_wstarts_buf,
+        orig_wcounts_buf,
+    }
+}
+
+/// Enqueue a G1 MSM using a persistent (pre-uploaded, pre-Montgomery) bases buffer.
+pub(crate) fn enqueue_msm_g1_persistent<G: GpuCurve>(
+    gpu: &GpuContext<G>,
+    name: &str,
+    bases_buf: &wgpu::Buffer,
+    bd: BucketData,
+) -> Result<Option<MsmPending>> {
+    if bd.num_active_buckets == 0 {
+        return Ok(None);
+    }
+    let meta = upload_bucket_metadata::<G>(gpu, name, &bd, G1_GPU_BYTES);
+    gpu.execute_msm(
+        false,
+        &meta.as_msm_buffers(bases_buf),
+        bd.num_active_buckets,
+        bd.num_dispatched,
+        bd.has_chunks,
+        bd.num_windows,
+        true,
+    );
+    Ok(Some(MsmPending {
+        sums_buf: meta.sums_buf,
+        num_windows: bd.num_windows,
+        bucket_width: bd.bucket_width,
+    }))
+}
+
+/// Enqueue a G2 MSM using a persistent (pre-uploaded, pre-Montgomery) bases buffer.
+pub(crate) fn enqueue_msm_g2_persistent<G: GpuCurve>(
+    gpu: &GpuContext<G>,
+    bases_buf: &wgpu::Buffer,
+    bd: BucketData,
+) -> Result<Option<MsmPending>> {
+    if bd.num_active_buckets == 0 {
+        return Ok(None);
+    }
+    let meta = upload_bucket_metadata::<G>(gpu, "b2", &bd, G2_GPU_BYTES);
+    gpu.execute_msm(
+        true,
+        &meta.as_msm_buffers(bases_buf),
+        bd.num_active_buckets,
+        bd.num_dispatched,
+        bd.has_chunks,
+        bd.num_windows,
+        true,
+    );
+    Ok(Some(MsmPending {
+        sums_buf: meta.sums_buf,
         num_windows: bd.num_windows,
         bucket_width: bd.bucket_width,
     }))
@@ -481,6 +674,7 @@ pub(crate) async fn gpu_msm_batch_bytes<G: GpuCurve>(
                 bd.num_dispatched,
                 bd.has_chunks,
                 bd.num_windows,
+                false,
             );
             Ok(Some(MsmPending {
                 sums_buf: uploaded.sums_buf,
@@ -501,6 +695,7 @@ pub(crate) async fn gpu_msm_batch_bytes<G: GpuCurve>(
             bd.num_dispatched,
             bd.has_chunks,
             bd.num_windows,
+            false,
         );
         Ok(Some(MsmPending {
             sums_buf: uploaded.sums_buf,

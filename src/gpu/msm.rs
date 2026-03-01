@@ -44,6 +44,7 @@ impl<C: GpuCurve> GpuContext<C> {
         num_dispatched: u32,
         has_chunks: bool,
         num_windows: u32,
+        skip_montgomery: bool,
     ) {
         let bases_buf = bufs.bases;
         let base_indices_buf = bufs.base_indices;
@@ -120,7 +121,8 @@ impl<C: GpuCurve> GpuContext<C> {
 
         // Pre-pass: convert bases to Montgomery form in-place so aggregate
         // can skip per-point to_montgomery calls (saves 3 muls/load for G1, 6 for G2).
-        {
+        // Skipped when using persistent bases that are already in Montgomery form.
+        if !skip_montgomery {
             let mont_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("MSM Bases Mont Bind Group"),
                 layout: &self.montgomery_bind_group_layout,
@@ -129,7 +131,8 @@ impl<C: GpuCurve> GpuContext<C> {
                     resource: bases_buf.as_entire_binding(),
                 }],
             });
-            let point_size: u64 = if is_g2 { G2_GPU_BYTES as u64 } else { G1_GPU_BYTES as u64 };
+            let point_size: u64 =
+                if is_g2 { G2_GPU_BYTES as u64 } else { G1_GPU_BYTES as u64 };
             let num_bases = (bases_buf.size() / point_size) as u32;
             let mut cpass = compute_pass!(scope, encoder, "to_montgomery_bases");
             cpass.set_pipeline(if is_g2 {
@@ -343,6 +346,39 @@ impl<C: GpuCurve> GpuContext<C> {
             profiler_guard.resolve_queries(&mut encoder);
         }
 
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    /// Convert a bases buffer to Montgomery form in-place (one-time, for persistent bases).
+    pub fn convert_to_montgomery(&self, buf: &wgpu::Buffer, is_g2: bool) {
+        let mont_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Convert To Montgomery BG"),
+            layout: &self.montgomery_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf.as_entire_binding(),
+            }],
+        });
+        let point_size: u64 = if is_g2 { G2_GPU_BYTES as u64 } else { G1_GPU_BYTES as u64 };
+        let num_bases = (buf.size() / point_size) as u32;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Convert To Montgomery Encoder"),
+            });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("to_montgomery"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(if is_g2 {
+                &self.msm_to_mont_g2_pipeline
+            } else {
+                &self.msm_to_mont_g1_pipeline
+            });
+            cpass.set_bind_group(0, &mont_bind_group, &[]);
+            cpass.dispatch_workgroups(num_bases.div_ceil(MSM_WORKGROUP_SIZE), 1, 1);
+        }
         self.queue.submit(Some(encoder.finish()));
     }
 }

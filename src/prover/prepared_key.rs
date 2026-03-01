@@ -50,6 +50,24 @@ pub(crate) fn serialize_g2_bases<G: GpuCurve>(bases: &[G::G2Affine]) -> Vec<u8> 
     bytes
 }
 
+/// Interleave base bytes and phi bytes into [P₀, φ(P₀), P₁, φ(P₁), ...] layout.
+pub(crate) fn interleave_glv_bases(
+    bases_bytes: &[u8],
+    phi_bytes: &[u8],
+    point_size: usize,
+) -> Vec<u8> {
+    let n = bases_bytes.len() / point_size;
+    debug_assert_eq!(bases_bytes.len(), n * point_size);
+    debug_assert_eq!(phi_bytes.len(), n * point_size);
+    let mut combined = Vec::with_capacity(n * 2 * point_size);
+    for i in 0..n {
+        let start = i * point_size;
+        combined.extend_from_slice(&bases_bytes[start..start + point_size]);
+        combined.extend_from_slice(&phi_bytes[start..start + point_size]);
+    }
+    combined
+}
+
 pub fn prepare_proving_key<E, G>(pk: &bellman::groth16::Parameters<E>) -> PreparedProvingKey<G>
 where
     E: pairing::MultiMillerLoop,

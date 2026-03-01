@@ -4,10 +4,12 @@
 // how much VRAM the host has).
 
 mod constraint_system;
+mod gpu_key;
 mod h_poly;
 mod msm;
 mod prepared_key;
 
+pub use gpu_key::{prepare_gpu_proving_key, GpuProvingKey};
 pub use h_poly::compute_h_poly;
 pub use msm::{gpu_msm_batch, gpu_msm_g1};
 pub use prepared_key::{prepare_proving_key, PreparedProvingKey};
@@ -17,13 +19,18 @@ use ff::{Field, PrimeField};
 use rand_core::RngCore;
 
 use crate::bellman;
-use crate::bucket::{compute_bucket_sorting_with_width, compute_glv_bucket_sorting};
+use crate::bucket::{
+    compute_bucket_sorting_with_width, compute_glv_bucket_data, compute_glv_bucket_sorting,
+};
 use crate::gpu::curve::GpuCurve;
 use crate::gpu::GpuContext;
 
 use constraint_system::GpuConstraintSystem;
 use h_poly::{read_h_poly_result, submit_h_poly};
-use msm::{enqueue_msm_g1, enqueue_msm_g2, readback_msms};
+use msm::{
+    enqueue_msm_g1, enqueue_msm_g1_persistent, enqueue_msm_g2, enqueue_msm_g2_persistent,
+    readback_msms,
+};
 
 fn marshal_scalars<G: GpuCurve>(scalars: &[G::Scalar]) -> Vec<u8> {
     let mut buffer = Vec::with_capacity(scalars.len() * 32);
@@ -72,6 +79,7 @@ async fn create_proof_with_fixed_randomness<E, G, C>(
     pk: &bellman::groth16::Parameters<E>,
     ppk: &PreparedProvingKey<G>,
     gpu: &GpuContext<G>,
+    gpu_pk: Option<&GpuProvingKey>,
     r: G::Scalar,
     s: G::Scalar,
 ) -> Result<bellman::groth16::Proof<E>>
@@ -155,16 +163,45 @@ where
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     let glv_c = G::glv_bucket_width();
-    let (a_glv_bytes, a_bd) = compute_glv_bucket_sorting::<G>(
-        &a_assignment, &ppk.a_bytes, &ppk.a_phi_bytes, glv_c,
-    );
-    let (b1_glv_bytes, b1_bd) = compute_glv_bucket_sorting::<G>(
-        &b_assignment, &ppk.b_g1_bytes, &ppk.b_g1_phi_bytes, glv_c,
-    );
-    let (l_glv_bytes, l_bd) = compute_glv_bucket_sorting::<G>(
-        &cs.aux, &ppk.l_bytes, &ppk.l_phi_bytes, glv_c,
-    );
-    let b2_bd = compute_bucket_sorting_with_width::<G>(&b_assignment, G::g2_bucket_width());
+
+    // Bucket sorting: with persistent GPU key, GLV negation is folded into sign bits
+    // and no combined bases buffer is built. Without it, the original path is used.
+    let a_bd;
+    let b1_bd;
+    let l_bd;
+    let b2_bd;
+    // Only needed for the non-persistent path:
+    let a_glv_bytes;
+    let b1_glv_bytes;
+    let l_glv_bytes;
+
+    if gpu_pk.is_some() {
+        a_bd = compute_glv_bucket_data::<G>(&a_assignment, glv_c);
+        b1_bd = compute_glv_bucket_data::<G>(&b_assignment, glv_c);
+        l_bd = compute_glv_bucket_data::<G>(&cs.aux, glv_c);
+        b2_bd = compute_bucket_sorting_with_width::<G>(&b_assignment, G::g2_bucket_width());
+        a_glv_bytes = Vec::new();
+        b1_glv_bytes = Vec::new();
+        l_glv_bytes = Vec::new();
+    } else {
+        let (a_bytes, a_bd_tmp) = compute_glv_bucket_sorting::<G>(
+            &a_assignment, &ppk.a_bytes, &ppk.a_phi_bytes, glv_c,
+        );
+        let (b1_bytes, b1_bd_tmp) = compute_glv_bucket_sorting::<G>(
+            &b_assignment, &ppk.b_g1_bytes, &ppk.b_g1_phi_bytes, glv_c,
+        );
+        let (l_bytes, l_bd_tmp) = compute_glv_bucket_sorting::<G>(
+            &cs.aux, &ppk.l_bytes, &ppk.l_phi_bytes, glv_c,
+        );
+        a_bd = a_bd_tmp;
+        b1_bd = b1_bd_tmp;
+        l_bd = l_bd_tmp;
+        b2_bd = compute_bucket_sorting_with_width::<G>(&b_assignment, G::g2_bucket_width());
+        a_glv_bytes = a_bytes;
+        b1_glv_bytes = b1_bytes;
+        l_glv_bytes = l_bytes;
+    }
+
     #[cfg(feature = "timing")]
     {
         eprintln!("[proof] bucket sorting (4x GLV): {:?}", t_phase.elapsed());
@@ -185,10 +222,18 @@ where
     // them immediately while CPU computes h bucket sorting below.
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
-    let a_job = enqueue_msm_g1::<G>(gpu, "a", &a_glv_bytes, a_bd)?;
-    let b1_job = enqueue_msm_g1::<G>(gpu, "b1", &b1_glv_bytes, b1_bd)?;
-    let l_job = enqueue_msm_g1::<G>(gpu, "l", &l_glv_bytes, l_bd)?;
-    let b2_job = enqueue_msm_g2::<G>(gpu, &ppk.b_g2_bytes, b2_bd)?;
+    let (a_job, b1_job, l_job, b2_job);
+    if let Some(gpk) = gpu_pk {
+        a_job = enqueue_msm_g1_persistent::<G>(gpu, "a", &gpk.a_bases_buf, a_bd)?;
+        b1_job = enqueue_msm_g1_persistent::<G>(gpu, "b1", &gpk.b_g1_bases_buf, b1_bd)?;
+        l_job = enqueue_msm_g1_persistent::<G>(gpu, "l", &gpk.l_bases_buf, l_bd)?;
+        b2_job = enqueue_msm_g2_persistent::<G>(gpu, &gpk.b_g2_bases_buf, b2_bd)?;
+    } else {
+        a_job = enqueue_msm_g1::<G>(gpu, "a", &a_glv_bytes, a_bd)?;
+        b1_job = enqueue_msm_g1::<G>(gpu, "b1", &b1_glv_bytes, b1_bd)?;
+        l_job = enqueue_msm_g1::<G>(gpu, "l", &l_glv_bytes, l_bd)?;
+        b2_job = enqueue_msm_g2::<G>(gpu, &ppk.b_g2_bytes, b2_bd)?;
+    }
     #[cfg(feature = "timing")]
     eprintln!("[proof] msm enqueue a/b1/l/b2: {:?}", t_phase.elapsed());
 
@@ -196,21 +241,34 @@ where
     // While CPU computes this, GPU is already processing a/b1/l/b2 MSMs.
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
-    let (h_glv_bytes, h_bd) = compute_glv_bucket_sorting::<G>(
-        &h_coeffs[..pk.h.len()], &ppk.h_bytes, &ppk.h_phi_bytes, glv_c,
-    );
-    #[cfg(feature = "timing")]
-    {
-        eprintln!("[proof] h bucket sorting (GLV): {:?}", t_phase.elapsed());
-        h_bd.print_distribution_stats("h_g1_glv");
+    let h_job;
+    if let Some(gpk) = gpu_pk {
+        let h_bd = compute_glv_bucket_data::<G>(&h_coeffs[..pk.h.len()], glv_c);
+        #[cfg(feature = "timing")]
+        {
+            eprintln!("[proof] h bucket sorting (GLV): {:?}", t_phase.elapsed());
+            h_bd.print_distribution_stats("h_g1_glv");
+        }
+        #[cfg(feature = "timing")]
+        let t_phase = std::time::Instant::now();
+        h_job = enqueue_msm_g1_persistent::<G>(gpu, "h", &gpk.h_bases_buf, h_bd)?;
+        #[cfg(feature = "timing")]
+        eprintln!("[proof] msm enqueue h: {:?}", t_phase.elapsed());
+    } else {
+        let (h_glv_bytes, h_bd) = compute_glv_bucket_sorting::<G>(
+            &h_coeffs[..pk.h.len()], &ppk.h_bytes, &ppk.h_phi_bytes, glv_c,
+        );
+        #[cfg(feature = "timing")]
+        {
+            eprintln!("[proof] h bucket sorting (GLV): {:?}", t_phase.elapsed());
+            h_bd.print_distribution_stats("h_g1_glv");
+        }
+        #[cfg(feature = "timing")]
+        let t_phase = std::time::Instant::now();
+        h_job = enqueue_msm_g1::<G>(gpu, "h", &h_glv_bytes, h_bd)?;
+        #[cfg(feature = "timing")]
+        eprintln!("[proof] msm enqueue h: {:?}", t_phase.elapsed());
     }
-
-    // Enqueue h MSM and read back all 5 results.
-    #[cfg(feature = "timing")]
-    let t_phase = std::time::Instant::now();
-    let h_job = enqueue_msm_g1::<G>(gpu, "h", &h_glv_bytes, h_bd)?;
-    #[cfg(feature = "timing")]
-    eprintln!("[proof] msm enqueue h: {:?}", t_phase.elapsed());
 
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
@@ -283,7 +341,37 @@ where
 {
     let r = G::Scalar::random(&mut *rng);
     let s = G::Scalar::random(&mut *rng);
-    create_proof_with_fixed_randomness::<E, G, C>(circuit, pk, ppk, gpu, r, s).await
+    create_proof_with_fixed_randomness::<E, G, C>(circuit, pk, ppk, gpu, None, r, s).await
+}
+
+/// Create a Groth16 proof using persistent GPU base buffers.
+///
+/// Like [`create_proof`] but uses a [`GpuProvingKey`] to skip per-proof base uploads
+/// and Montgomery conversion, reusing pre-uploaded GPU buffers across proofs.
+pub async fn create_proof_with_gpu_key<E, G, C, R>(
+    circuit: C,
+    pk: &bellman::groth16::Parameters<E>,
+    ppk: &PreparedProvingKey<G>,
+    gpu: &GpuContext<G>,
+    gpu_pk: &GpuProvingKey,
+    rng: &mut R,
+) -> Result<bellman::groth16::Proof<E>>
+where
+    E: pairing::MultiMillerLoop,
+    C: bellman::Circuit<G::Scalar>,
+    G: GpuCurve<
+            Engine = E,
+            Scalar = E::Fr,
+            G1 = E::G1,
+            G2 = E::G2,
+            G1Affine = E::G1Affine,
+            G2Affine = E::G2Affine,
+        > + Send,
+    R: RngCore,
+{
+    let r = G::Scalar::random(&mut *rng);
+    let s = G::Scalar::random(&mut *rng);
+    create_proof_with_fixed_randomness::<E, G, C>(circuit, pk, ppk, gpu, Some(gpu_pk), r, s).await
 }
 
 #[cfg(test)]
@@ -384,6 +472,43 @@ mod tests {
             !is_valid_wrong,
             "The verifier should reject a proof with tampered public inputs"
         );
+    }
+
+    #[tokio::test]
+    async fn test_gpu_groth16_prover_persistent_key() {
+        let mut rng = OsRng;
+
+        let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
+        let params =
+            bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+                .expect("Failed to generate trusted setup parameters");
+
+        let gpu_ctx = GpuContext::<Bls12>::new()
+            .await
+            .expect("Failed to initialize WebGPU context");
+
+        let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
+        let gpu_pk = prepare_gpu_proving_key::<Bls12>(&ppk, &gpu_ctx);
+
+        let x_value = Scalar::from(3u64);
+        let y_value = Scalar::from(27u64);
+
+        let circuit = DummyCircuit {
+            x: Some(x_value),
+            y: Some(y_value),
+        };
+
+        let proof = create_proof_with_gpu_key::<Bls12, Bls12, _, _>(
+            circuit, &params, &ppk, &gpu_ctx, &gpu_pk, &mut rng,
+        )
+        .await
+        .expect("Failed to generate Groth16 proof with persistent GPU key");
+
+        let pvk = bellman::groth16::prepare_verifying_key(&params.vk);
+        let public_inputs = vec![y_value];
+        let is_valid = bellman::groth16::verify_proof(&pvk, &proof, &public_inputs)
+            .expect("Failed during proof verification step");
+        assert!(is_valid, "Proof with persistent GPU key is invalid!");
     }
 
     #[test]
@@ -525,10 +650,16 @@ mod tests {
         let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
         eprintln!("[diag] ppk serialization: {:?}", t.elapsed());
 
+        let t = Instant::now();
+        let gpu_pk = prepare_gpu_proving_key::<Bls12>(&ppk, &gpu_ctx);
+        eprintln!("[diag] gpu_pk upload+montgomery: {:?}", t.elapsed());
+
         let t0 = Instant::now();
-        let _proof = create_proof::<Bls12, Bls12, _, _>(circuit, &params, &ppk, &gpu_ctx, &mut rng)
-            .await
-            .expect("gpu sapling output proof failed");
+        let _proof = create_proof_with_gpu_key::<Bls12, Bls12, _, _>(
+            circuit, &params, &ppk, &gpu_ctx, &gpu_pk, &mut rng,
+        )
+        .await
+        .expect("gpu sapling output proof failed");
         let dt = t0.elapsed();
         eprintln!("[diag] total proof: {:?}", dt);
     }
@@ -950,6 +1081,7 @@ mod tests {
             &params,
             &ppk,
             &gpu_ctx,
+            None,
             r,
             s,
         )

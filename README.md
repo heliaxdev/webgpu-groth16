@@ -339,6 +339,23 @@ Also refactored `gpu_msm_batch_bytes` into reusable `enqueue_msm_g1`, `enqueue_m
 
 - **sapling_output:** 997 ms → 982 ms (~1.5% improvement)
 
+### OPT-22: Persistent GPU bases across proofs
+
+Pre-upload and convert base point buffers to the GPU once via `GpuProvingKey`, then reuse
+across all proofs for the same circuit. Eliminates ~102 MB of per-proof base uploads and
+5 `to_montgomery` GPU dispatches.
+
+The key challenge was that `compute_glv_bucket_sorting` baked per-proof GLV negation into
+the bases buffer, making it proof-dependent. Solved by folding GLV negation into the
+`base_indices` sign bit (XOR with signed-digit window sign) via a new
+`compute_glv_bucket_data` function, making the interleaved bases buffer circuit-fixed.
+
+One-time setup cost: ~39ms for upload + Montgomery conversion (amortized across proofs).
+
+- **sapling_output:** 982 ms → 965 ms (~1.7% improvement per proof)
+  - msm enqueue a/b1/l/b2: 15.9ms → 2.3ms (no base upload)
+  - bucket sorting: 57.6ms → 45.0ms (no combined_bases building)
+
 ## Latest Benchmark Results
 
 Measured on Apple M3 Max. Criterion median times.
@@ -363,7 +380,7 @@ Measured on Apple M3 Max. Criterion median times.
 | ntt/h_poly_n=8 | 3.95 ms |
 | ntt/h_poly_n=1024 | 11.3 ms |
 | ntt/h_poly_n=16384 | 112 ms |
-| sapling_output/proof | 982 ms |
+| sapling_output/proof | 965 ms |
 
 ## Discarded optimizations
 
@@ -468,3 +485,30 @@ The fundamental limitation is that point additions dominate GPU compute cost, an
 approach that adds an O(N) scan pass before the existing O(N) tree reduction cannot be
 faster — regardless of how cheap the scalar multiplication becomes. (Note: the
 `@workgroup_size(1)` constraint has since been resolved by OPT-20.)
+
+### Intra-bucket parallel tree reduction for aggregate_buckets_g1
+**Idea:** Replace the sequential per-thread bucket aggregation (one thread iterates over
+all points in a sub-bucket) with a parallel tree reduction: one workgroup of 64 threads
+per sub-bucket, each thread loads one point, then 6-stage binary tree reduction in shared
+memory (`var<workgroup> agg_shared_g1: array<PointG1, 64>`, 24KB). This mirrors the
+existing `subsum_phase1_g1` pattern and reduces per-bucket latency from O(bucket_size)
+sequential additions to O(log2(64))=6 parallel levels.
+
+**Why discarded:** Caused a +73% regression (982ms → 1.70s). Three compounding problems:
+
+1. **64x workgroup explosion:** Changed from 605 workgroups (38,701 threads total) to
+   38,701 workgroups (2.5M threads). Most buckets have only 3-16 points (mean=16.1 for
+   h MSM), so 48-61 of 64 threads per workgroup are completely idle, loading identity
+   and participating in barriers for no useful work.
+
+2. **Shared memory pressure:** 24KB per workgroup (64 × 384 bytes) limits GPU occupancy
+   to ~1 workgroup per compute unit on Metal (32KB threadgroup limit), causing massive
+   serialization of the 38,701 workgroups.
+
+3. **Barrier overhead:** 6 `workgroupBarrier()` calls per bucket × 38,701 workgroups.
+   For small buckets (size 3-16), the barrier synchronization cost dominates the actual
+   addition work.
+
+The approach works well for `subsum_phase1_g1` because it dispatches only ~10 workgroups
+(one per window), but fails catastrophically when dispatching ~38,700 workgroups for
+per-bucket parallelism.

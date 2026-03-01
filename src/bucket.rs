@@ -315,6 +315,48 @@ pub fn compute_glv_bucket_sorting<G: GpuCurve>(
     (combined_bases, build_bucket_data(&all_windows, c))
 }
 
+/// GLV-aware bucket sorting that returns only BucketData (no bases buffer).
+///
+/// Used with persistent GPU bases: GLV negation is folded into the `base_indices`
+/// sign bits (XOR with signed-digit window sign) instead of mutating base bytes.
+/// The caller must provide bases in fixed interleaved layout:
+///   [P₀, φ(P₀), P₁, φ(P₁), ...]
+pub fn compute_glv_bucket_data<G: GpuCurve>(
+    scalars: &[G::Scalar],
+    c: usize,
+) -> BucketData {
+    let n = scalars.len();
+    let mut all_windows: Vec<Vec<(u32, bool)>> = Vec::with_capacity(n * 2);
+
+    for i in 0..n {
+        let (k1, k1_neg, k2, k2_neg) = glv::glv_decompose(&scalars[i]);
+
+        // Entry 2i: k1 windows — fold GLV negation into sign bits
+        let mut k1_windows = glv::u128_to_signed_windows(k1, c);
+        if k1_neg {
+            for w in &mut k1_windows {
+                if w.0 != 0 {
+                    w.1 = !w.1;
+                }
+            }
+        }
+        all_windows.push(k1_windows);
+
+        // Entry 2i+1: k2 windows — fold GLV negation into sign bits
+        let mut k2_windows = glv::u128_to_signed_windows(k2, c);
+        if k2_neg {
+            for w in &mut k2_windows {
+                if w.0 != 0 {
+                    w.1 = !w.1;
+                }
+            }
+        }
+        all_windows.push(k2_windows);
+    }
+
+    build_bucket_data(&all_windows, c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
