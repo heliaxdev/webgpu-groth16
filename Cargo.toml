@@ -11,7 +11,7 @@ default = ["bellman-provider-nam-bellperson"]
 bellman-provider-bellman = ["dep:bellman"]
 bellman-provider-nam-bellperson = ["dep:nam-bellperson"]
 timing = []
-profiling = ["dep:wgpu-profiler", "dep:tracy-client"]
+profiling = ["dep:wgpu-profiler"]
 
 [dependencies]
 anyhow = "1.0.102"
@@ -25,10 +25,9 @@ nam-bellperson = { version = "0.26.6-nam.1", optional = true }
 pairing = "0.23.0"
 rand_core = "0.6.4"
 subtle = "2.5"
-tracy-client = { version = "0.18", optional = true }
 wasm-bindgen = "0.2.113"
 wgpu = "28.0.0"
-wgpu-profiler = { version = "0.26", optional = true, features = ["tracy"] }
+wgpu-profiler = { version = "0.26", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }

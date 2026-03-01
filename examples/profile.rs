@@ -1,13 +1,14 @@
-//! GPU profiling harness using wgpu-profiler + tracy.
+//! GPU profiling / benchmarking harness.
 //!
-//! Usage:
+//! Without features (wall-clock timing only):
+//!   cargo run --release --example profile -- [NUM_SQUARINGS] [ITERATIONS]
+//!
+//! With wgpu-profiler (GPU timing + chrome trace output):
 //!   cargo run --release --example profile --features profiling -- [NUM_SQUARINGS] [ITERATIONS]
-//!
-//! Then connect Tracy profiler to see the flamegraph.
+//!   Then open the generated `profile.json` in chrome://tracing or https://ui.perfetto.dev
 //!
 //! Defaults: NUM_SQUARINGS=10000, ITERATIONS=5
 
-use std::io::Read as _;
 use std::time::Instant;
 
 use blstrs::{Bls12, Scalar};
@@ -69,7 +70,10 @@ fn main() {
     let iterations: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
 
     eprintln!("=== Groth16 GPU Profiling ===");
-    eprintln!("  Connect Tracy profiler to view the flamegraph");
+    #[cfg(feature = "profiling")]
+    eprintln!("  GPU profiling enabled — trace will be written to profile.json");
+    #[cfg(not(feature = "profiling"))]
+    eprintln!("  Wall-clock timing only (enable 'profiling' feature for GPU breakdown)");
     eprintln!("  constraints: {num_squarings}");
     eprintln!("  iterations:  {iterations}");
 
@@ -97,7 +101,6 @@ fn main() {
     // --- Warmup (shader compilation) ---
     eprintln!("  warmup...");
     {
-        tracy_client::Client::start();
         let circuit = RepeatedSquaringCircuit::<Scalar> {
             x: Some(Scalar::from(3u64)),
             num_squarings,
@@ -106,18 +109,23 @@ fn main() {
             circuit, &params, &ppk, &gpu, &mut rng,
         ))
         .expect("warmup proof failed");
-        gpu.end_profiler_frame();
-        // Drain warmup results.
-        let _ = gpu.process_profiler_results();
+
+        #[cfg(feature = "profiling")]
+        {
+            gpu.end_profiler_frame();
+            let _ = gpu.process_profiler_results();
+        }
     }
 
     // --- Profiled iterations ---
     eprintln!("  profiling {iterations} iterations...");
     let x = Scalar::from(3u64);
     let t_total = Instant::now();
-    for i in 0..iterations {
-        tracy_client::Client::running().expect("tracy client").frame_mark();
 
+    #[cfg(feature = "profiling")]
+    let mut all_profiling_data = Vec::new();
+
+    for i in 0..iterations {
         let t_iter = Instant::now();
         let circuit = RepeatedSquaringCircuit::<Scalar> {
             x: Some(x),
@@ -129,14 +137,28 @@ fn main() {
             ))
             .expect("proof failed");
 
-        gpu.end_profiler_frame();
-
-        if let Some(results) = gpu.process_profiler_results() {
-            eprintln!("  iter {}: {:?} (GPU breakdown below)", i + 1, t_iter.elapsed());
-            print_gpu_results(&results, 2);
-        } else {
-            eprintln!("  iter {}: {:?} (GPU results pending)", i + 1, t_iter.elapsed());
+        #[cfg(feature = "profiling")]
+        {
+            gpu.end_profiler_frame();
+            if let Some(results) = gpu.process_profiler_results() {
+                eprintln!(
+                    "  iter {}: {:?} (GPU breakdown below)",
+                    i + 1,
+                    t_iter.elapsed()
+                );
+                print_gpu_results(&results, 2);
+                all_profiling_data.extend(results);
+            } else {
+                eprintln!(
+                    "  iter {}: {:?} (GPU results pending)",
+                    i + 1,
+                    t_iter.elapsed()
+                );
+            }
         }
+
+        #[cfg(not(feature = "profiling"))]
+        eprintln!("  iter {}: {:?}", i + 1, t_iter.elapsed());
     }
     eprintln!("  total:   {:?} ({iterations} proofs)", t_total.elapsed());
     eprintln!(
@@ -144,11 +166,18 @@ fn main() {
         t_total.elapsed() / iterations as u32
     );
 
-    eprintln!();
-    eprintln!("Press Enter to exit (keep Tracy open to inspect results)...");
-    let _ = std::io::stdin().read(&mut [0u8]);
+    #[cfg(feature = "profiling")]
+    {
+        let trace_path = std::path::Path::new("profile.json");
+        wgpu_profiler::chrometrace::write_chrometrace(trace_path, &all_profiling_data)
+            .expect("failed to write chrome trace");
+        eprintln!();
+        eprintln!("  Trace written to {}", trace_path.display());
+        eprintln!("  Open in chrome://tracing or https://ui.perfetto.dev");
+    }
 }
 
+#[cfg(feature = "profiling")]
 fn print_gpu_results(results: &[wgpu_profiler::GpuTimerQueryResult], indent: usize) {
     let pad = " ".repeat(indent);
     for r in results {
