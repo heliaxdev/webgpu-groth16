@@ -28,6 +28,9 @@ const MSM_WORKGROUP_SIZE: u32 = 64;
 /// Number of workgroup chunks per window in G1 two-phase subsum reduction.
 const G1_SUBSUM_CHUNKS_PER_WINDOW: u32 = 32;
 
+/// Number of workgroup chunks per window in G2 two-phase subsum reduction.
+const G2_SUBSUM_CHUNKS_PER_WINDOW: u32 = 32;
+
 /// Creates a compute pass, optionally wrapped in a profiling scope.
 /// With the `profiling` feature, wraps the pass in `scope.scoped_compute_pass()`.
 /// Without it, uses a plain `encoder.begin_compute_pass()`.
@@ -168,6 +171,9 @@ pub struct GpuContext<C> {
     pub msm_weight_g1_pipeline: wgpu::ComputePipeline,
     pub msm_subsum_phase1_g1_pipeline: wgpu::ComputePipeline,
     pub msm_subsum_phase2_g1_pipeline: wgpu::ComputePipeline,
+    pub msm_weight_g2_pipeline: wgpu::ComputePipeline,
+    pub msm_subsum_phase1_g2_pipeline: wgpu::ComputePipeline,
+    pub msm_subsum_phase2_g2_pipeline: wgpu::ComputePipeline,
 
     // Bind Group Layouts
     pub ntt_bind_group_layout: wgpu::BindGroupLayout,
@@ -178,6 +184,7 @@ pub struct GpuContext<C> {
     pub msm_agg_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_sum_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_weight_g1_bind_group_layout: wgpu::BindGroupLayout,
+    pub msm_weight_g2_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_subsum_phase1_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_subsum_phase2_bind_group_layout: wgpu::BindGroupLayout,
 
@@ -265,6 +272,7 @@ impl<C: GpuCurve> GpuContext<C> {
         let msm_sum_bind_group_layout = create_bind_group_layout(&device, "MSM Sum", &[RO, RO, RO, RO, RW]);
         // Weight buckets: [data(rw), bucket_values(read)]
         let msm_weight_g1_bind_group_layout = create_bind_group_layout(&device, "MSM Weight G1", &[RW, RO]);
+        let msm_weight_g2_bind_group_layout = create_bind_group_layout(&device, "MSM Weight G2", &[RW, RO]);
         // Phase1: [agg_buckets(read), window_starts(read), window_counts(read),
         //          partial_sums(rw), subsum_params(uniform)]
         let msm_subsum_phase1_bind_group_layout = create_bind_group_layout(&device, "MSM Subsum Phase1", &[RO, RO, RO, RW, UF]);
@@ -328,6 +336,14 @@ impl<C: GpuCurve> GpuContext<C> {
             create_pipeline(&device, "MSM Subsum Phase1 G1", &msm_subsum_phase1_layout, &msm_module, "subsum_phase1_g1"));
         let msm_subsum_phase2_g1_pipeline = timed!("pipeline: MSM Subsum Ph2 G1",
             create_pipeline(&device, "MSM Subsum Phase2 G1", &msm_subsum_phase2_layout, &msm_module, "subsum_phase2_g1"));
+
+        let msm_weight_g2_layout = pipeline_layout(&device, &[&msm_weight_g2_bind_group_layout]);
+        let msm_weight_g2_pipeline = timed!("pipeline: MSM Weight G2",
+            create_pipeline(&device, "MSM Weight G2", &msm_weight_g2_layout, &msm_module, "weight_buckets_g2"));
+        let msm_subsum_phase1_g2_pipeline = timed!("pipeline: MSM Subsum Ph1 G2",
+            create_pipeline(&device, "MSM Subsum Phase1 G2", &msm_subsum_phase1_layout, &msm_module, "subsum_phase1_g2"));
+        let msm_subsum_phase2_g2_pipeline = timed!("pipeline: MSM Subsum Ph2 G2",
+            create_pipeline(&device, "MSM Subsum Phase2 G2", &msm_subsum_phase2_layout, &msm_module, "subsum_phase2_g2"));
         #[cfg(feature = "timing")]
         {
             let pipelines_total = pipelines_start.elapsed();
@@ -367,6 +383,9 @@ impl<C: GpuCurve> GpuContext<C> {
             msm_weight_g1_pipeline,
             msm_subsum_phase1_g1_pipeline,
             msm_subsum_phase2_g1_pipeline,
+            msm_weight_g2_pipeline,
+            msm_subsum_phase1_g2_pipeline,
+            msm_subsum_phase2_g2_pipeline,
             ntt_bind_group_layout,
             ntt_params_bind_group_layout,
             coset_shift_bind_group_layout,
@@ -375,6 +394,7 @@ impl<C: GpuCurve> GpuContext<C> {
             msm_agg_bind_group_layout,
             msm_sum_bind_group_layout,
             msm_weight_g1_bind_group_layout,
+            msm_weight_g2_bind_group_layout,
             msm_subsum_phase1_bind_group_layout,
             msm_subsum_phase2_bind_group_layout,
             _marker: PhantomData,
@@ -926,33 +946,6 @@ impl<C: GpuCurve> GpuContext<C> {
             ],
         });
 
-        let sum_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("MSM Sum Bind Group"),
-            layout: &self.msm_sum_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: aggregated_buckets_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: bucket_values_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: window_starts_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: window_counts_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: window_sums_buf.as_entire_binding(),
-                },
-            ],
-        });
-
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1001,13 +994,15 @@ impl<C: GpuCurve> GpuContext<C> {
             cpass.dispatch_workgroups(num_active_buckets.div_ceil(MSM_WORKGROUP_SIZE).max(1), 1, 1);
         }
 
-        // G1-only: weight each bucket sum by its bucket value in a separate kernel.
-        // Split from aggregate_buckets_g1 to avoid Metal shader miscompilation when
-        // add_g1_mixed and scalar_mul_g1 code are combined in one kernel.
-        if !is_g2 {
+        // Weight each bucket sum by its bucket value in a separate kernel.
+        {
             let weight_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("MSM Weight G1 BG"),
-                layout: &self.msm_weight_g1_bind_group_layout,
+                label: Some(if is_g2 { "MSM Weight G2 BG" } else { "MSM Weight G1 BG" }),
+                layout: if is_g2 {
+                    &self.msm_weight_g2_bind_group_layout
+                } else {
+                    &self.msm_weight_g1_bind_group_layout
+                },
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -1020,27 +1015,35 @@ impl<C: GpuCurve> GpuContext<C> {
                 ],
             });
             let mut cpass = compute_pass!(scope, encoder, "bucket_weighting");
-            cpass.set_pipeline(&self.msm_weight_g1_pipeline);
+            cpass.set_pipeline(if is_g2 {
+                &self.msm_weight_g2_pipeline
+            } else {
+                &self.msm_weight_g1_pipeline
+            });
             cpass.set_bind_group(0, &weight_bind_group, &[]);
             cpass.dispatch_workgroups(num_active_buckets.div_ceil(MSM_WORKGROUP_SIZE).max(1), 1, 1);
         }
 
-        if is_g2 {
-            // G2: single-pass subsum (running sum, blocked by Metal double_g2 bug).
-            let mut cpass = compute_pass!(scope, encoder, "tree_reduction");
-            cpass.set_pipeline(&self.msm_sum_g2_pipeline);
-            cpass.set_bind_group(0, &sum_bind_group, &[]);
-            cpass.dispatch_workgroups(num_windows, 1, 1);
-        } else {
-            // G1: two-pass multi-workgroup reduction for better GPU utilization.
+        // Both G1 and G2: two-pass multi-workgroup tree reduction.
+        {
+            let chunks_per_window = if is_g2 {
+                G2_SUBSUM_CHUNKS_PER_WINDOW
+            } else {
+                G1_SUBSUM_CHUNKS_PER_WINDOW
+            };
+            let point_gpu_bytes: u64 = if is_g2 {
+                G2_GPU_BYTES as u64
+            } else {
+                G1_GPU_BYTES as u64
+            };
 
             let partial_sums_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("MSM Partial Sums"),
-                size: (num_windows * G1_SUBSUM_CHUNKS_PER_WINDOW) as u64 * G1_GPU_BYTES as u64,
+                size: (num_windows * chunks_per_window) as u64 * point_gpu_bytes,
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             });
-            let subsum_params: [u32; 4] = [G1_SUBSUM_CHUNKS_PER_WINDOW, 0, 0, 0];
+            let subsum_params: [u32; 4] = [chunks_per_window, 0, 0, 0];
             let subsum_params_buf = self.device.create_buffer_init(
                 &wgpu::util::BufferInitDescriptor {
                     label: Some("Subsum Params"),
@@ -1100,15 +1103,23 @@ impl<C: GpuCurve> GpuContext<C> {
             // Phase 1: many workgroups per window → partial sums.
             {
                 let mut cpass = compute_pass!(scope, encoder, "tree_reduction_ph1");
-                cpass.set_pipeline(&self.msm_subsum_phase1_g1_pipeline);
+                cpass.set_pipeline(if is_g2 {
+                    &self.msm_subsum_phase1_g2_pipeline
+                } else {
+                    &self.msm_subsum_phase1_g1_pipeline
+                });
                 cpass.set_bind_group(0, &phase1_bind_group, &[]);
-                cpass.dispatch_workgroups(num_windows * G1_SUBSUM_CHUNKS_PER_WINDOW, 1, 1);
+                cpass.dispatch_workgroups(num_windows * chunks_per_window, 1, 1);
             }
 
             // Phase 2: reduce partial sums → final window sums.
             {
                 let mut cpass = compute_pass!(scope, encoder, "tree_reduction_ph2");
-                cpass.set_pipeline(&self.msm_subsum_phase2_g1_pipeline);
+                cpass.set_pipeline(if is_g2 {
+                    &self.msm_subsum_phase2_g2_pipeline
+                } else {
+                    &self.msm_subsum_phase2_g1_pipeline
+                });
                 cpass.set_bind_group(0, &phase2_bind_group, &[]);
                 cpass.dispatch_workgroups(num_windows, 1, 1);
             }
@@ -1607,6 +1618,150 @@ mod tests {
             .expect("GPU double_g1 produced invalid curve point");
         let gpu_affine: G1Affine = parsed.into();
         assert_eq!(gpu_affine, expected, "GPU double_g1 mismatch");
+    }
+
+    #[tokio::test]
+    async fn test_g2_add_complete_roundtrip() {
+        use blstrs::{G2Affine, G2Projective};
+        use group::Curve;
+
+        let gpu = GpuContext::<Bls12>::new()
+            .await
+            .expect("failed to init gpu context");
+
+        let generator = G2Affine::generator();
+        // Use two distinct points: G and 3G.
+        let g_proj: G2Projective = generator.into();
+        let three_g: G2Affine = (g_proj + g_proj + g_proj).to_affine();
+
+        // Test 1: G + 3G = 4G (distinct points)
+        let a_bytes = <Bls12 as GpuCurve>::serialize_g2(&generator);
+        let b_bytes = <Bls12 as GpuCurve>::serialize_g2(&three_g);
+
+        let a_buf = gpu.create_storage_buffer("rt_add_g2_a", &a_bytes);
+        let b_buf = gpu.create_storage_buffer("rt_add_g2_b", &b_bytes);
+        let out_buf = gpu.create_empty_buffer("rt_add_g2_out", a_bytes.len() as u64);
+
+        let shader = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("MSM Shader Add G2 Complete RT"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(<Bls12 as GpuCurve>::MSM_SOURCE)),
+            });
+
+        let bgl = create_bind_group_layout(
+            &gpu.device,
+            "RT Add G2 BGL",
+            &[BufKind::ReadOnly, BufKind::ReadOnly, BufKind::ReadWrite],
+        );
+        let layout = pipeline_layout(&gpu.device, &[&bgl]);
+        let pipeline = create_pipeline(
+            &gpu.device,
+            "RT Add G2 Complete",
+            &layout,
+            &shader,
+            "roundtrip_add_g2_complete",
+        );
+
+        let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("RT Add G2 BG"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: a_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: b_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: out_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("RT Add G2 Encoder"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("RT Add G2 Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        gpu.queue.submit(Some(encoder.finish()));
+
+        let out_bytes = gpu
+            .read_buffer(&out_buf, a_bytes.len() as u64)
+            .await
+            .expect("failed to read rt add g2 bytes");
+
+        // CPU expected: G + 3G = 4G
+        let expected: G2Affine = (g_proj + g_proj + g_proj + g_proj).to_affine();
+        let parsed = <Bls12 as GpuCurve>::deserialize_g2(&out_bytes)
+            .expect("GPU add_g2_complete produced invalid curve point");
+        let gpu_affine: G2Affine = parsed.into();
+        assert_eq!(gpu_affine, expected, "GPU add_g2_complete G+3G mismatch");
+
+        // Test 2: G + G = 2G (doubling via complete formula)
+        let b_buf_2 = gpu.create_storage_buffer("rt_add_g2_b2", &a_bytes);
+        let out_buf_2 = gpu.create_empty_buffer("rt_add_g2_out2", a_bytes.len() as u64);
+
+        let bg2 = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("RT Add G2 BG2"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: a_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: b_buf_2.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: out_buf_2.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder2 = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("RT Add G2 Encoder 2"),
+            });
+        {
+            let mut pass = encoder2.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("RT Add G2 Pass 2"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg2, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        gpu.queue.submit(Some(encoder2.finish()));
+
+        let out_bytes_2 = gpu
+            .read_buffer(&out_buf_2, a_bytes.len() as u64)
+            .await
+            .expect("failed to read rt add g2 doubling bytes");
+
+        let expected_double: G2Affine = (g_proj + g_proj).to_affine();
+        let parsed_double = <Bls12 as GpuCurve>::deserialize_g2(&out_bytes_2)
+            .expect("GPU add_g2_complete doubling produced invalid curve point");
+        let gpu_affine_double: G2Affine = parsed_double.into();
+        assert_eq!(
+            gpu_affine_double, expected_double,
+            "GPU add_g2_complete G+G (doubling) mismatch"
+        );
     }
 
 }

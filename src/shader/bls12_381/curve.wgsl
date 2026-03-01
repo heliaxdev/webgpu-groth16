@@ -260,6 +260,23 @@ fn sqr_fp2(a: Fq2) -> Fq2 {
     return Fq2(c0_out, c1_out);
 }
 
+// Multiply a reduced Fq element by 12 (mod q) using repeated doubling.
+// 12x = 8x + 4x. Each step uses add_mod_q to stay in [0, q).
+fn mul_by_12_mod_q(a: U384) -> U384 {
+    let x2 = add_mod_q(a, a);
+    let x4 = add_mod_q(x2, x2);
+    let x8 = add_mod_q(x4, x4);
+    return add_mod_q(x8, x4);
+}
+
+// Multiply Fq2 element by 3b = Fq2(12, 12) for BLS12-381 G2 (b = 4(1+i)).
+// (a0 + a1*u) * (12 + 12*u) = 12*(a0 - a1) + 12*(a0 + a1)*u
+fn mul_by_b3_fp2(a: Fq2) -> Fq2 {
+    let diff = sub_mod_q(a.c0, a.c1);
+    let sum = add_mod_q(a.c0, a.c1);
+    return Fq2(mul_by_12_mod_q(diff), mul_by_12_mod_q(sum));
+}
+
 // ============================================================================
 // G2 CURVE ARITHMETIC (Extension Field F_q^2)
 // ============================================================================
@@ -268,6 +285,47 @@ struct PointG2 {
     x: Fq2,
     y: Fq2,
     z: Fq2,
+}
+
+// Complete addition formula for G2 (Renes-Costello-Batina 2015, EFD add-2015-rcb, a=0).
+// Handles all cases: P+Q, P+P (doubling), P+(-P), P+O, O+P in a single branchless formula.
+// Uses PROJECTIVE coordinates (not Jacobian): affine (x,y) = (X/Z, Y/Z).
+// Identity element is (0:1:0), not (0:0:0).
+// Eliminates double_g2 from the call graph (avoids Metal shader miscompilation).
+// BLS12-381 G2: y² = x³ + 4(1+i), b = 4(1+i), 3b = 12(1+i) = Fq2(12, 12).
+// Cost: 12 Fq2 multiplications + 2 cheap mul-by-b3.
+fn add_g2_complete(p1: PointG2, p2: PointG2) -> PointG2 {
+    let t0 = mul_fp2(p1.x, p2.x);                                    // M1
+    let t1 = mul_fp2(p1.y, p2.y);                                    // M2
+    let t2 = mul_fp2(p1.z, p2.z);                                    // M3
+    let t3 = sub_fp2(sub_fp2(mul_fp2(add_fp2(p1.x, p1.y),           // M4
+                                      add_fp2(p2.x, p2.y)), t0), t1); // X1Y2+X2Y1
+    let t4 = sub_fp2(sub_fp2(mul_fp2(add_fp2(p1.x, p1.z),           // M5
+                                      add_fp2(p2.x, p2.z)), t0), t2); // X1Z2+X2Z1
+    let t5 = sub_fp2(sub_fp2(mul_fp2(add_fp2(p1.y, p1.z),           // M6
+                                      add_fp2(p2.y, p2.z)), t1), t2); // Y1Z2+Y2Z1
+
+    let c1 = mul_by_b3_fp2(t2);                                      // cheap: b3 * Z1Z2
+    let x_tmp = sub_fp2(t1, c1);                                     // Y1Y2 - b3*Z1Z2
+    let z_tmp = add_fp2(t1, c1);                                     // Y1Y2 + b3*Z1Z2
+
+    let y3_a = mul_fp2(x_tmp, z_tmp);                                // M7: (Y1Y2)²-(b3*Z1Z2)²
+
+    let t1n = add_fp2(add_fp2(t0, t0), t0);                          // 3*X1X2 (additions only)
+    let c2 = mul_by_b3_fp2(t4);                                      // cheap: b3*(X1Z2+X2Z1)
+
+    let y_corr = mul_fp2(t1n, c2);                                   // M8: 3*X1X2 * b3*(X1Z2+X2Z1)
+    let y3 = add_fp2(y3_a, y_corr);
+
+    let x3_a = mul_fp2(t3, x_tmp);                                   // M9: (X1Y2+X2Y1)*(Y1Y2-b3*Z1Z2)
+    let x3_b = mul_fp2(t5, c2);                                      // M10: (Y1Z2+Y2Z1)*b3*(X1Z2+X2Z1)
+    let x3 = sub_fp2(x3_a, x3_b);
+
+    let z3_a = mul_fp2(t5, z_tmp);                                   // M11: (Y1Z2+Y2Z1)*(Y1Y2+b3*Z1Z2)
+    let z3_b = mul_fp2(t3, t1n);                                     // M12: (X1Y2+X2Y1)*3*X1X2
+    let z3 = add_fp2(z3_a, z3_b);
+
+    return PointG2(x3, y3, z3);
 }
 
 // Computes 2 * P in Jacobian coordinates for G2.

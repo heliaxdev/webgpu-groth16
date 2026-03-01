@@ -214,9 +214,10 @@ pub trait GpuCurve: 'static {
     /// windows but more buckets — the sweet spot for BLS12-381 G1 is c=13.
     fn bucket_width() -> usize;
 
-    /// Bucket width for G2 MSM. Smaller than G1 (default c=8) because G2 point
-    /// operations are ~3× more expensive (Fq2 vs Fq) and the current G2 subsum
-    /// kernel is single-threaded, making O(2^c) bucket reduction the bottleneck.
+    /// Bucket width for G2 MSM. Smaller than G1 because G2 point operations are
+    /// ~3× more expensive (Fq2 vs Fq). G2 now uses parallel tree reduction (like G1)
+    /// via add_g2_complete, so c=10/12 are viable but show negligible improvement
+    /// at current point set sizes (~21K).
     fn g2_bucket_width() -> usize {
         8
     }

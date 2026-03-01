@@ -15,6 +15,11 @@ const G1_INFINITY = PointG1(U384_ZERO, U384_ZERO, U384_ZERO);
 const FQ2_ZERO = Fq2(U384_ZERO, U384_ZERO);
 const G2_INFINITY = PointG2(FQ2_ZERO, FQ2_ZERO, FQ2_ZERO);
 
+// Projective identity for G2: (0:1:0) in Montgomery form.
+// Used with add_g2_complete which operates in projective coordinates.
+const FQ2_ONE_MONT = Fq2(MONT_ONE, U384_ZERO);
+const G2_PROJ_IDENTITY = PointG2(FQ2_ZERO, FQ2_ONE_MONT, FQ2_ZERO);
+
 fn is_gte_q(a: U384) -> bool {
     for (var i = 29u; i < 30u; i = i - 1u) {
         if a.limbs[i] > Q_MODULUS[i] { return true; }
@@ -192,6 +197,30 @@ fn store_g2(p: PointG2) -> PointG2 {
 
     let x_aff = mul_fp2(p.x, z_inv2);
     let y_aff = mul_fp2(p.y, z_inv3);
+
+    let z_std = Fq2(
+        U384(array<u32, 30>(
+            1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+            0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+            0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+        )),
+        U384_ZERO
+    );
+    return PointG2(
+        normalize_fp2(from_montgomery_fp2(x_aff)),
+        normalize_fp2(from_montgomery_fp2(y_aff)),
+        z_std
+    );
+}
+
+// Convert PROJECTIVE Montgomery → Standard Affine: x = X/Z, y = Y/Z.
+// Used by add_g2_complete pipeline (projective coords, not Jacobian).
+fn store_g2_proj(p: PointG2) -> PointG2 {
+    if is_inf_g2(p) { return G2_INFINITY; }
+    let z_inv = invert_fp2(p.z);
+
+    let x_aff = mul_fp2(p.x, z_inv);
+    let y_aff = mul_fp2(p.y, z_inv);
 
     let z_std = Fq2(
         U384(array<u32, 30>(
@@ -432,6 +461,8 @@ fn negate_g2(p: PointG2) -> PointG2 {
     );
 }
 
+// Aggregate uses fast Jacobian mixed addition (base points are affine with Z=(R,0)).
+// Output is in JACOBIAN coordinates; weight_buckets_g2 converts to projective inline.
 @compute @workgroup_size(64)
 fn aggregate_buckets_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let bucket_idx = global_id.x;
@@ -459,6 +490,9 @@ fn aggregate_buckets_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @group(0) @binding(3) var<storage, read> window_counts_g2: array<u32>;
 @group(0) @binding(4) var<storage, read_write> window_sums_g2: array<PointG2>;
 
+// Legacy running-sum subsum (NOT dispatched — tree reduction replaced it).
+// NOTE: This reads Jacobian output from aggregate but uses add_g2_complete (projective).
+// Would need jacobian_to_proj_g2 conversion if ever re-enabled.
 @compute @workgroup_size(1)
 fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let window_id = global_id.x;
@@ -471,15 +505,15 @@ fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    var S = G2_INFINITY;
-    var running_sum = G2_INFINITY;
+    var S = G2_PROJ_IDENTITY;
+    var running_sum = G2_PROJ_IDENTITY;
 
     var bucket_ptr = start + count - 1u;
     var next_active_b = bucket_values_g2[bucket_ptr];
 
     for (var b = next_active_b; b > 0u; b = b - 1u) {
         if b == next_active_b {
-            running_sum = add_g2_safe(running_sum, aggregated_buckets_in_g2[bucket_ptr]);
+            running_sum = add_g2_complete(running_sum, aggregated_buckets_in_g2[bucket_ptr]);
             if bucket_ptr > start {
                 bucket_ptr = bucket_ptr - 1u;
                 next_active_b = bucket_values_g2[bucket_ptr];
@@ -487,10 +521,109 @@ fn subsum_accumulation_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 next_active_b = 0u;
             }
         }
-        S = add_g2_safe(S, running_sum);
+        S = add_g2_complete(S, running_sum);
     }
 
-    window_sums_g2[window_id] = store_g2(S);
+    window_sums_g2[window_id] = store_g2_proj(S);
+}
+
+// ==== G2 Projective Pipeline: Weight + Tree Reduction ====
+//
+// Uses add_g2_complete (projective, no double_g2) throughout.
+// Aggregate outputs Jacobian; weight_buckets_g2 converts inline before scalar_mul.
+
+// Convert Jacobian (X,Y,Z) → Projective (X*Z, Y, Z³).
+// Jacobian: affine = (X/Z², Y/Z³). Projective: affine = (X'/Z', Y'/Z').
+// So X' = X*Z, Y' = Y, Z' = Z³ gives X'/Z' = X/Z², Y'/Z' = Y/Z³.
+fn jacobian_to_proj_g2(p: PointG2) -> PointG2 {
+    if is_inf_g2(p) { return G2_PROJ_IDENTITY; }
+    let x_proj = mul_fp2(p.x, p.z);       // X * Z
+    let z_sq = sqr_fp2(p.z);
+    let z_proj = mul_fp2(z_sq, p.z);       // Z³
+    return PointG2(x_proj, p.y, z_proj);
+}
+
+// Computes k * P using double-and-add via add_g2_complete.
+// No separate doubling function — doubling is add_g2_complete(P, P).
+fn scalar_mul_g2(p: PointG2, k: u32) -> PointG2 {
+    if k == 0u { return G2_PROJ_IDENTITY; }
+    if k == 1u { return p; }
+    var result = G2_PROJ_IDENTITY;
+    var base = p;
+    var scalar = k;
+    for (var bit = 0u; bit < 14u; bit = bit + 1u) {
+        if scalar == 0u { break; }
+        if (scalar & 1u) != 0u {
+            result = add_g2_complete(result, base);
+        }
+        base = add_g2_complete(base, base);
+        scalar = scalar >> 1u;
+    }
+    return result;
+}
+
+// Phase 1b: Weight each bucket sum by its bucket value: v * B[v].
+@group(0) @binding(0) var<storage, read_write> weight_buckets_g2_data: array<PointG2>;
+@group(0) @binding(1) var<storage, read> weight_bucket_values_g2: array<u32>;
+
+@compute @workgroup_size(64)
+fn weight_buckets_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    if i >= arrayLength(&weight_buckets_g2_data) { return; }
+    // Aggregate outputs Jacobian; convert to projective before scalar mul.
+    let p = jacobian_to_proj_g2(weight_buckets_g2_data[i]);
+    weight_buckets_g2_data[i] = scalar_mul_g2(p, weight_bucket_values_g2[i]);
+}
+
+// Phase 1 of tree reduction: split each window's buckets into chunks, sum each chunk.
+@group(0) @binding(0) var<storage, read> agg_ph1_g2: array<PointG2>;
+@group(0) @binding(1) var<storage, read> win_starts_ph1_g2: array<u32>;
+@group(0) @binding(2) var<storage, read> win_counts_ph1_g2: array<u32>;
+@group(0) @binding(3) var<storage, read_write> partial_sums_g2: array<PointG2>;
+@group(0) @binding(4) var<uniform> subsum_params_ph1_g2: SubsumParams;
+
+@compute @workgroup_size(1)
+fn subsum_phase1_g2(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+) {
+    let chunks = subsum_params_ph1_g2.chunks_per_window;
+    let flat_id = global_id.x;
+    let window_id = flat_id / chunks;
+    let chunk_id = flat_id % chunks;
+
+    if window_id >= arrayLength(&win_starts_ph1_g2) { return; }
+
+    let start = win_starts_ph1_g2[window_id];
+    let count = win_counts_ph1_g2[window_id];
+
+    let chunk_size = (count + chunks - 1u) / chunks;
+    let chunk_begin = chunk_id * chunk_size;
+    let chunk_end = min(chunk_begin + chunk_size, count);
+
+    var local_sum = G2_PROJ_IDENTITY;
+    for (var idx = chunk_begin; idx < chunk_end; idx = idx + 1u) {
+        local_sum = add_g2_complete(local_sum, agg_ph1_g2[start + idx]);
+    }
+    partial_sums_g2[window_id * chunks + chunk_id] = local_sum;
+}
+
+// Phase 2: reduce partial sums into final window sums, converting to standard affine.
+@group(0) @binding(0) var<storage, read> partial_sums_ph2_g2: array<PointG2>;
+@group(0) @binding(1) var<storage, read_write> win_sums_ph2_g2: array<PointG2>;
+@group(0) @binding(2) var<uniform> subsum_params_ph2_g2: SubsumParams;
+
+@compute @workgroup_size(1)
+fn subsum_phase2_g2(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+) {
+    let window_id = global_id.x;
+    let chunks = subsum_params_ph2_g2.chunks_per_window;
+
+    var sum = G2_PROJ_IDENTITY;
+    for (var i = 0u; i < chunks; i = i + 1u) {
+        sum = add_g2_complete(sum, partial_sums_ph2_g2[window_id * chunks + i]);
+    }
+    win_sums_ph2_g2[window_id] = store_g2_proj(sum);
 }
 
 // ==== Debug round-trip kernels (test-only usage from Rust) ====
@@ -523,6 +656,23 @@ fn roundtrip_g2(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let i = global_id.x;
     if i >= arrayLength(&rt_in_g2) { return; }
     rt_out_g2[i] = store_g2(load_g2(rt_in_g2[i]));
+}
+
+// Debug: load two G2 points, add with add_g2_complete, store result (projective→affine).
+@group(0) @binding(0) var<storage, read> rt_add_g2_in_a: array<PointG2>;
+@group(0) @binding(1) var<storage, read> rt_add_g2_in_b: array<PointG2>;
+@group(0) @binding(2) var<storage, read_write> rt_add_g2_out: array<PointG2>;
+
+@compute @workgroup_size(1)
+fn roundtrip_add_g2_complete(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    if i >= arrayLength(&rt_add_g2_in_a) { return; }
+    // Load points into Montgomery projective form.
+    // Input Z = (1,0) standard → (R,0) Montgomery = projective Z=1.
+    let a = load_g2(rt_add_g2_in_a[i]);
+    let b = load_g2(rt_add_g2_in_b[i]);
+    let sum = add_g2_complete(a, b);
+    rt_add_g2_out[i] = store_g2_proj(sum);
 }
 
 @group(0) @binding(0) var<storage, read> rt_in_coords_g1: array<PointG1>;
