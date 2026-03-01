@@ -5,14 +5,12 @@
 //!
 //! 1. **To Montgomery**: Convert A, B, C, twiddle factors, shift arrays, and Z⁻¹
 //!    into Montgomery domain for efficient modular arithmetic
-//! 2. **iNTT(A, B, C)**: Inverse NTT to get coefficient representations
-//! 3. **Coset shift(A, B, C)**: Multiply by powers of the multiplicative generator
-//!    to evaluate on a coset (avoids division-by-zero at roots of Z)
-//! 4. **NTT(A, B, C)**: Forward NTT to get evaluation representations on the coset
-//! 5. **Pointwise H = (A·B − C) · Z⁻¹**: Element-wise computation in evaluation domain
-//! 6. **iNTT(H)**: Convert H back to coefficient representation
-//! 7. **Inverse coset shift(H)**: Undo the coset shift
-//! 8. **From Montgomery(H)**: Convert H out of Montgomery domain
+//! 2. **Fused iNTT + Coset shift(A, B, C)**: Inverse NTT with shift factors
+//!    multiplied during write-back (avoids separate coset_shift dispatch)
+//! 3. **NTT(A, B, C)**: Forward NTT to get evaluation representations on the coset
+//! 4. **Pointwise H = (A·B − C) · Z⁻¹**: Element-wise computation in evaluation domain
+//! 5. **Fused iNTT + Inverse coset shift(H)**: iNTT with inverse shift fused in
+//! 6. **From Montgomery(H)**: Convert H out of Montgomery domain
 
 use super::curve::GpuCurve;
 use super::{compute_pass, GpuContext, HPolyBuffers, NTT_TILE_SIZE, SCALAR_WORKGROUP_SIZE};
@@ -62,20 +60,14 @@ impl<C: GpuCurve> GpuContext<C> {
             })
         };
 
-        let shift_bg = |data: &wgpu::Buffer, shifts: &wgpu::Buffer| {
+        let fused_shift_bg = |shifts: &wgpu::Buffer| {
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Coset Shift BG"),
-                layout: &self.coset_shift_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: data.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: shifts.as_entire_binding(),
-                    },
-                ],
+                label: Some("NTT Fused Shift BG"),
+                layout: &self.ntt_fused_shift_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: shifts.as_entire_binding(),
+                }],
             })
         };
 
@@ -128,28 +120,18 @@ impl<C: GpuCurve> GpuContext<C> {
             pass.dispatch_workgroups(n.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
         }
 
-        // iNTT on A/B/C.
+        // Fused iNTT + coset shift on A/B/C.
+        let shifts_group1 = fused_shift_bg(shifts_buf);
         for bg in [
             ntt_bg(a_buf, tw_inv_n_buf),
             ntt_bg(b_buf, tw_inv_n_buf),
             ntt_bg(c_buf, tw_inv_n_buf),
         ] {
-            let mut pass = compute_pass!(scope, encoder, "intt_abc");
-            pass.set_pipeline(&self.ntt_pipeline);
+            let mut pass = compute_pass!(scope, encoder, "intt_shift_abc");
+            pass.set_pipeline(&self.ntt_fused_pipeline);
             pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(1, &shifts_group1, &[]);
             pass.dispatch_workgroups(n.div_ceil(NTT_TILE_SIZE), 1, 1);
-        }
-
-        // Coset shift A/B/C.
-        for bg in [
-            shift_bg(a_buf, shifts_buf),
-            shift_bg(b_buf, shifts_buf),
-            shift_bg(c_buf, shifts_buf),
-        ] {
-            let mut pass = compute_pass!(scope, encoder, "coset_shift_abc");
-            pass.set_pipeline(&self.coset_shift_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(n.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
         }
 
         // NTT on A/B/C.
@@ -172,22 +154,15 @@ impl<C: GpuCurve> GpuContext<C> {
             pass.dispatch_workgroups(n.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
         }
 
-        // iNTT(H).
+        // Fused iNTT + inverse coset shift on H.
         {
             let bg = ntt_bg(h_buf, tw_inv_n_buf);
-            let mut pass = compute_pass!(scope, encoder, "intt_h");
-            pass.set_pipeline(&self.ntt_pipeline);
+            let inv_shifts_group1 = fused_shift_bg(inv_shifts_buf);
+            let mut pass = compute_pass!(scope, encoder, "intt_shift_h");
+            pass.set_pipeline(&self.ntt_fused_pipeline);
             pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(1, &inv_shifts_group1, &[]);
             pass.dispatch_workgroups(n.div_ceil(NTT_TILE_SIZE), 1, 1);
-        }
-
-        // Inverse coset shift on H.
-        {
-            let bg = shift_bg(h_buf, inv_shifts_buf);
-            let mut pass = compute_pass!(scope, encoder, "inv_coset_shift_h");
-            pass.set_pipeline(&self.coset_shift_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(n.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
         }
 
         // From Montgomery on H.

@@ -141,6 +141,8 @@ pub trait GpuCurve: 'static {
 
     /// WGSL source for NTT kernels (Fr field + Fp field + NTT entry points).
     const NTT_SOURCE: &'static str;
+    /// WGSL source for fused NTT+coset-shift kernel (NTT source + fused entry point).
+    const NTT_FUSED_SOURCE: &'static str;
     /// WGSL source for MSM kernels (Fr + Fp + curve arithmetic + MSM entry points).
     const MSM_SOURCE: &'static str;
     /// WGSL source for polynomial-evaluation kernels (Fr + Fp + poly_ops).
@@ -277,6 +279,16 @@ impl GpuCurve for blstrs::Bls12 {
         include_str!("../shader/bls12_381/fp.wgsl"),
         "\n",
         include_str!("../shader/bls12_381/ntt.wgsl"),
+    );
+
+    const NTT_FUSED_SOURCE: &'static str = concat!(
+        include_str!("../shader/bls12_381/fr.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/fp.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/ntt.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/ntt_fused.wgsl"),
     );
 
     const MSM_SOURCE: &'static str = concat!(

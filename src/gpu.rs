@@ -166,6 +166,7 @@ pub struct GpuContext<C> {
 
     // Polynomial Pipelines
     pub ntt_pipeline: wgpu::ComputePipeline,
+    pub ntt_fused_pipeline: wgpu::ComputePipeline,
     pub ntt_global_stage_pipeline: wgpu::ComputePipeline,
     pub ntt_bitreverse_pipeline: wgpu::ComputePipeline,
     pub coset_shift_pipeline: wgpu::ComputePipeline,
@@ -191,6 +192,7 @@ pub struct GpuContext<C> {
 
     // Bind Group Layouts
     pub ntt_bind_group_layout: wgpu::BindGroupLayout,
+    pub ntt_fused_shift_bgl: wgpu::BindGroupLayout,
     pub ntt_params_bind_group_layout: wgpu::BindGroupLayout,
     pub coset_shift_bind_group_layout: wgpu::BindGroupLayout,
     pub pointwise_poly_bind_group_layout: wgpu::BindGroupLayout,
@@ -270,6 +272,11 @@ impl<C: GpuCurve> GpuContext<C> {
             label: Some("Poly Ops Shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::POLY_OPS_SOURCE)),
         }));
+
+        let ntt_fused_module = timed!("shader: NTT Fused", device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("NTT Fused Shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::NTT_FUSED_SOURCE)),
+        }));
         #[cfg(feature = "timing")]
         let shader_total = shader_start.elapsed();
 
@@ -279,6 +286,7 @@ impl<C: GpuCurve> GpuContext<C> {
         use BufKind::{ReadOnly as RO, ReadWrite as RW, Uniform as UF};
 
         let ntt_bind_group_layout = create_bind_group_layout(&device, "NTT", &[RW, RO]);
+        let ntt_fused_shift_bgl = create_bind_group_layout(&device, "NTT Fused Shift", &[RO]);
         let ntt_params_bind_group_layout = create_bind_group_layout(&device, "NTT Global", &[RW, RO, UF]);
         let coset_shift_bind_group_layout = create_bind_group_layout(&device, "Coset Shift", &[RW, RO]);
         let pointwise_poly_bind_group_layout = create_bind_group_layout(&device, "Pointwise Poly", &[RO, RO, RO, RW, RO]);
@@ -310,6 +318,9 @@ impl<C: GpuCurve> GpuContext<C> {
         let ntt_global_layout = pipeline_layout(&device, &[&ntt_params_bind_group_layout]);
         let ntt_pipeline = timed!("pipeline: NTT Tile",
             create_pipeline(&device, "NTT Tile", &ntt_tile_layout, &ntt_module, "ntt_tile"));
+        let ntt_fused_layout = pipeline_layout(&device, &[&ntt_bind_group_layout, &ntt_fused_shift_bgl]);
+        let ntt_fused_pipeline = timed!("pipeline: NTT Fused",
+            create_pipeline(&device, "NTT Fused", &ntt_fused_layout, &ntt_fused_module, "ntt_tile_with_shift"));
         let ntt_global_stage_pipeline = timed!("pipeline: NTT Global Stage",
             create_pipeline(&device, "NTT Global Stage", &ntt_global_layout, &ntt_module, "ntt_global_stage"));
         let ntt_bitreverse_pipeline = timed!("pipeline: NTT BitReverse",
@@ -391,6 +402,7 @@ impl<C: GpuCurve> GpuContext<C> {
             device,
             queue,
             ntt_pipeline,
+            ntt_fused_pipeline,
             ntt_global_stage_pipeline,
             ntt_bitreverse_pipeline,
             coset_shift_pipeline,
@@ -412,6 +424,7 @@ impl<C: GpuCurve> GpuContext<C> {
             msm_reduce_g1_pipeline,
             msm_reduce_g2_pipeline,
             ntt_bind_group_layout,
+            ntt_fused_shift_bgl,
             ntt_params_bind_group_layout,
             coset_shift_bind_group_layout,
             pointwise_poly_bind_group_layout,
