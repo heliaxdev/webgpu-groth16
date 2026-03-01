@@ -4,3 +4,7 @@ flamegraph.svg
 perf.data
 perf.data.old
 *.trace.json
+.DS_Store
+EXPLAIN.md
+scripts/__pycache__
+profile.json

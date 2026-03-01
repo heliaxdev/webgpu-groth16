@@ -169,7 +169,7 @@ fn main() {
     #[cfg(feature = "profiling")]
     {
         let trace_path = std::path::Path::new("profile.json");
-        wgpu_profiler::chrometrace::write_chrometrace(trace_path, &all_profiling_data)
+        write_chrometrace(trace_path, &all_profiling_data)
             .expect("failed to write chrome trace");
         eprintln!();
         eprintln!("  Trace written to {}", trace_path.display());
@@ -177,15 +177,47 @@ fn main() {
     }
 }
 
+/// Compute the time range for a result.
+///
+/// For parent scopes (with children), always synthesize from children's
+/// min(start)..max(end) — encoder-level timestamps from `scope()` are
+/// unreliable on Metal (negative/zero/bogus durations).
+///
+/// For leaf scopes (no children), use the direct timestamp if it has a
+/// positive duration; otherwise return None to skip broken events.
+#[cfg(feature = "profiling")]
+fn effective_time(r: &wgpu_profiler::GpuTimerQueryResult) -> Option<std::ops::Range<f64>> {
+    if !r.nested_queries.is_empty() {
+        // Parent scope: always synthesize from children.
+        let mut start = f64::MAX;
+        let mut end = f64::MIN;
+        for child in &r.nested_queries {
+            if let Some(ct) = effective_time(child) {
+                start = start.min(ct.start);
+                end = end.max(ct.end);
+            }
+        }
+        if start < end { Some(start..end) } else { None }
+    } else if let Some(ref t) = r.time {
+        // Leaf scope: use direct timestamp only if valid.
+        let dur = t.end - t.start;
+        if dur > 0.0 && t.start > 0.0 {
+            Some(t.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
 #[cfg(feature = "profiling")]
 fn print_gpu_results(results: &[wgpu_profiler::GpuTimerQueryResult], indent: usize) {
     let pad = " ".repeat(indent);
     for r in results {
-        if let Some(ref time) = r.time {
+        if let Some(time) = effective_time(r) {
             let duration_s = time.end - time.start;
-            if duration_s < 0.0 {
-                eprintln!("{pad}{}: <invalid: negative duration>", r.label);
-            } else if duration_s < 0.001 {
+            if duration_s < 0.001 {
                 eprintln!("{pad}{}: {:.1} us", r.label, duration_s * 1_000_000.0);
             } else {
                 eprintln!("{pad}{}: {:.2} ms", r.label, duration_s * 1_000.0);
@@ -197,4 +229,104 @@ fn print_gpu_results(results: &[wgpu_profiler::GpuTimerQueryResult], indent: usi
             print_gpu_results(&r.nested_queries, indent + 2);
         }
     }
+}
+
+/// Find the earliest timestamp across all results (recursively).
+#[cfg(feature = "profiling")]
+fn find_min_time(results: &[wgpu_profiler::GpuTimerQueryResult]) -> f64 {
+    let mut min_t = f64::MAX;
+    for r in results {
+        if let Some(t) = effective_time(r) {
+            min_t = min_t.min(t.start);
+        }
+        min_t = min_t.min(find_min_time(&r.nested_queries));
+    }
+    min_t
+}
+
+/// Write a Chrome trace JSON file, synthesizing parent spans from children
+/// when the parent has no direct timestamps.  All timestamps are normalised
+/// relative to the earliest event so Perfetto shows human-readable times.
+#[cfg(feature = "profiling")]
+fn write_chrometrace(
+    path: &std::path::Path,
+    results: &[wgpu_profiler::GpuTimerQueryResult],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let t0 = find_min_time(results);
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    write!(file, "{{\n\"traceEvents\": [\n")?;
+    let mut first = true;
+    for r in results {
+        write_trace_event(&mut file, r, &mut first, t0)?;
+    }
+    write!(file, "\n]\n}}\n")?;
+    Ok(())
+}
+
+#[cfg(feature = "profiling")]
+fn tid_int(r: &wgpu_profiler::GpuTimerQueryResult) -> u64 {
+    let raw = format!("{:?}", r.tid);
+    raw.chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse::<u64>()
+        .unwrap_or(1)
+}
+
+#[cfg(feature = "profiling")]
+fn write_trace_event(
+    w: &mut impl std::io::Write,
+    r: &wgpu_profiler::GpuTimerQueryResult,
+    first: &mut bool,
+    t0: f64,
+) -> std::io::Result<()> {
+    let has_children = !r.nested_queries.is_empty();
+    if let Some(time) = effective_time(r) {
+        let ts_us = (time.start - t0) * 1_000_000.0;
+        let pid = r.pid;
+        let tid = tid_int(r);
+
+        if has_children {
+            // Use B/E (begin/end) for parent scopes to avoid overlapping
+            // complete events on the same track.  Nudge the B timestamp
+            // slightly before and E slightly after children so Perfetto
+            // doesn't treat them as misplaced.
+            let b_us = ts_us - 0.01;
+            let comma = if *first { "" } else { ",\n" };
+            write!(
+                w,
+                "{comma}{{ \"pid\":{pid}, \"tid\":{tid}, \"ts\":{b_us}, \"ph\":\"B\", \"name\":\"{}\" }}",
+                r.label,
+            )?;
+            *first = false;
+
+            for child in &r.nested_queries {
+                write_trace_event(w, child, first, t0)?;
+            }
+
+            let e_us = (time.end - t0) * 1_000_000.0 + 0.01;
+            write!(
+                w,
+                ",\n{{ \"pid\":{pid}, \"tid\":{tid}, \"ts\":{e_us}, \"ph\":\"E\", \"name\":\"{}\" }}",
+                r.label,
+            )?;
+        } else {
+            // Leaf event: use X (complete) — no overlap risk.
+            let dur_us = (time.end - time.start) * 1_000_000.0;
+            let comma = if *first { "" } else { ",\n" };
+            write!(
+                w,
+                "{comma}{{ \"pid\":{pid}, \"tid\":{tid}, \"ts\":{ts_us}, \"dur\":{dur_us}, \"ph\":\"X\", \"name\":\"{}\" }}",
+                r.label,
+            )?;
+            *first = false;
+        }
+    } else {
+        // No timing at all — still recurse into children
+        for child in &r.nested_queries {
+            write_trace_event(w, child, first, t0)?;
+        }
+    }
+    Ok(())
 }

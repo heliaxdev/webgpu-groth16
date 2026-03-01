@@ -383,6 +383,8 @@ fn weight_buckets_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     weight_buckets_g1_data[i] = scalar_mul_g1(weight_buckets_g1_data[i], weight_bucket_values[i]);
 }
 
+// ==== Suffix Scan + Gap-Weight Pipeline (G1) ====
+//
 @group(0) @binding(0) var<storage, read> aggregated_buckets_in_g1: array<PointG1>;
 @group(0) @binding(1) var<storage, read> bucket_values: array<u32>;
 @group(0) @binding(2) var<storage, read> window_starts: array<u32>;

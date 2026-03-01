@@ -404,3 +404,29 @@ circuit (19.66s vs 16.65s readback). This confirms that `aggregate_buckets_g1` d
 MSM cost and the weight+subsum passes are efficiently parallelized. Future optimization
 should target aggregate_buckets directly (e.g., reducing per-addition cost or improving
 GPU occupancy).
+
+### Suffix scan + gap-weight (Pippenger running-sum via parallel scan)
+**Idea:** Replace the `weight_buckets` scalar multiplication pass with a three-phase
+parallel suffix scan followed by a gap-weighted multiplication. Uses the Pippenger
+identity `sum(v * B[v]) = sum(gap_j * R[j])` where `R[j]` is the suffix sum of bucket
+points and `gap_j = v_j - v_{j-1}`. Since gaps are typically small (avg ~8 = 3 bits),
+the `scalar_mul` per bucket drops from ~11-bit (22ms) to ~3-bit (0.8ms) average.
+
+**Why discarded:** While the gap-weight pass was 27x faster than the original weight
+pass (0.8ms vs 22ms), the three-phase suffix scan itself costs ~55ms of additional point
+additions (43ms phase1 + 10ms phase2 + 1.6ms phase3). The suffix scan is O(N) point
+additions — the same cost as the tree reduction subsum it runs alongside. This results
+in two O(N) addition passes instead of one, producing a net regression of +33ms
+(114ms total vs 81ms original for weight+subsum). GPU profiling confirmed:
+
+| Pass | Old (ms) | New (ms) |
+|------|----------|----------|
+| weight / gap_weight | 22.0 | 0.8 |
+| suffix_scan (3 phases) | — | 55.0 |
+| tree_reduction_ph1 | 43.0 | 43.0 |
+| **Total** | **65.0** | **98.8** |
+
+The fundamental limitation is that point additions dominate the cost at `@workgroup_size(1)`
+(~9µs per G1 addition), and any approach that adds an O(N) scan pass before the existing
+O(N) tree reduction cannot be faster — regardless of how cheap the scalar multiplication
+becomes.

@@ -126,8 +126,18 @@ const SIGN_BIT: u32 = 1 << 31;
 /// `all_windows[i]` contains the (absolute_value, is_negative) pairs for point `i`.
 /// `c` is the bucket width (window size in bits).
 ///
-/// Large buckets (size > MAX_CHUNK_SIZE) are split into sub-buckets to ensure
-/// uniform GPU thread workload in the aggregate pass.
+/// ## Algorithm (two-pass Pippenger bucket sorting with sub-bucket chunking)
+///
+/// **Pass 1 — Group points by (window, bucket_value):**
+/// For each window w, iterate over all points and place each into the bucket
+/// corresponding to its signed-digit value. Produces flat arrays of:
+/// base_indices (point IDs, sign-encoded), pointers, sizes, and values per bucket.
+///
+/// **Pass 2 — Split oversized buckets for GPU load balancing:**
+/// Buckets with more than `MAX_CHUNK_SIZE` (64) points are split into sub-buckets.
+/// Each sub-bucket becomes an independent GPU thread. A reduce_starts/reduce_counts
+/// table records which sub-buckets belong to the same logical bucket, so a later
+/// GPU reduce pass can sum the sub-bucket partials back together.
 fn build_bucket_data(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
     let num_windows = all_windows.iter().map(|w| w.len()).max().unwrap_or(0);
     let num_buckets = (1usize << (c - 1)) + 1;
@@ -220,6 +230,7 @@ fn build_bucket_data(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
     }
 
     let num_dispatched = bucket_pointers.len() as u32;
+
     BucketData {
         base_indices,
         bucket_pointers,
