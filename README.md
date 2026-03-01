@@ -326,6 +326,19 @@ strided subset of weighted buckets, then the tree reduction produces the final w
 - **proof/n=10000:** 690 ms → 612 ms (1.13x speedup)
 - **sapling_output:** 1.04s → 1.02s (1.02x speedup)
 
+### 21. Two-phase MSM submission (overlap GPU MSM with CPU h bucket sorting)
+
+Previously, all 5 MSMs (a, b1, l, h, b2) were submitted together in a single batch after
+h bucket sorting completed. This left the GPU idle for ~38ms while the CPU computed h bucket
+data and enqueued all 5 MSMs. By splitting the batch into two phases — submitting a/b1/l/b2
+immediately after h_poly read, then h after its bucket sorting — the GPU begins processing
+the first 4 MSMs while the CPU computes h bucket data in parallel.
+
+Also refactored `gpu_msm_batch_bytes` into reusable `enqueue_msm_g1`, `enqueue_msm_g2`, and
+`readback_msms` functions for more flexible MSM scheduling.
+
+- **sapling_output:** 997 ms → 982 ms (~1.5% improvement)
+
 ## Latest Benchmark Results
 
 Measured on Apple M3 Max. Criterion median times.
@@ -350,7 +363,7 @@ Measured on Apple M3 Max. Criterion median times.
 | ntt/h_poly_n=8 | 3.95 ms |
 | ntt/h_poly_n=1024 | 11.3 ms |
 | ntt/h_poly_n=16384 | 112 ms |
-| sapling_output/proof | 1.02 s |
+| sapling_output/proof | 982 ms |
 
 ## Discarded optimizations
 

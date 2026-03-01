@@ -335,10 +335,123 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
 }
 
 /// Pending MSM job handle for batch dispatch.
-struct MsmPending {
+pub(crate) struct MsmPending {
     sums_buf: wgpu::Buffer,
     num_windows: u32,
     bucket_width: usize,
+}
+
+/// Enqueue a single G1 MSM onto the GPU command queue (non-blocking).
+pub(crate) fn enqueue_msm_g1<G: GpuCurve>(
+    gpu: &GpuContext<G>,
+    name: &str,
+    bases_bytes: &[u8],
+    bd: BucketData,
+) -> Result<Option<MsmPending>> {
+    if bd.num_active_buckets == 0 {
+        return Ok(None);
+    }
+    let uploaded = upload_bucket_data::<G>(gpu, name, bases_bytes, &bd, G1_GPU_BYTES);
+    gpu.execute_msm(
+        false,
+        &uploaded.as_msm_buffers(),
+        bd.num_active_buckets,
+        bd.num_dispatched,
+        bd.has_chunks,
+        bd.num_windows,
+    );
+    Ok(Some(MsmPending {
+        sums_buf: uploaded.sums_buf,
+        num_windows: bd.num_windows,
+        bucket_width: bd.bucket_width,
+    }))
+}
+
+/// Enqueue a single G2 MSM onto the GPU command queue (non-blocking).
+pub(crate) fn enqueue_msm_g2<G: GpuCurve>(
+    gpu: &GpuContext<G>,
+    bases_bytes: &[u8],
+    bd: BucketData,
+) -> Result<Option<MsmPending>> {
+    if bd.num_active_buckets == 0 {
+        return Ok(None);
+    }
+    let uploaded = upload_bucket_data::<G>(gpu, "b2", bases_bytes, &bd, G2_GPU_BYTES);
+    gpu.execute_msm(
+        true,
+        &uploaded.as_msm_buffers(),
+        bd.num_active_buckets,
+        bd.num_dispatched,
+        bd.has_chunks,
+        bd.num_windows,
+    );
+    Ok(Some(MsmPending {
+        sums_buf: uploaded.sums_buf,
+        num_windows: bd.num_windows,
+        bucket_width: bd.bucket_width,
+    }))
+}
+
+/// Read back and fold results for 5 MSM jobs (4 G1 + 1 G2).
+#[allow(clippy::type_complexity)]
+pub(crate) async fn readback_msms<G: GpuCurve>(
+    gpu: &GpuContext<G>,
+    a_job: Option<MsmPending>,
+    b1_job: Option<MsmPending>,
+    l_job: Option<MsmPending>,
+    h_job: Option<MsmPending>,
+    b2_job: Option<MsmPending>,
+) -> Result<(G::G1, G::G1, G::G1, G::G1, G::G2)> {
+    let mut read_targets: Vec<(&wgpu::Buffer, wgpu::BufferAddress)> = Vec::new();
+    if let Some(job) = &a_job {
+        read_targets.push((&job.sums_buf, (job.num_windows as usize * G1_GPU_BYTES) as u64));
+    }
+    if let Some(job) = &b1_job {
+        read_targets.push((&job.sums_buf, (job.num_windows as usize * G1_GPU_BYTES) as u64));
+    }
+    if let Some(job) = &l_job {
+        read_targets.push((&job.sums_buf, (job.num_windows as usize * G1_GPU_BYTES) as u64));
+    }
+    if let Some(job) = &h_job {
+        read_targets.push((&job.sums_buf, (job.num_windows as usize * G1_GPU_BYTES) as u64));
+    }
+    if let Some(job) = &b2_job {
+        read_targets.push((&job.sums_buf, (job.num_windows as usize * G2_GPU_BYTES) as u64));
+    }
+
+    #[cfg(feature = "timing")]
+    let t_readback = std::time::Instant::now();
+    let mut read_results = gpu.read_buffers_batch(&read_targets).await?.into_iter();
+    #[cfg(feature = "timing")]
+    eprintln!("[msm] readback: {:?}", t_readback.elapsed());
+
+    let a = if let Some(job) = &a_job {
+        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, job.bucket_width)?
+    } else {
+        G::g1_identity()
+    };
+    let b1 = if let Some(job) = &b1_job {
+        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, job.bucket_width)?
+    } else {
+        G::g1_identity()
+    };
+    let l = if let Some(job) = &l_job {
+        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, job.bucket_width)?
+    } else {
+        G::g1_identity()
+    };
+    let h = if let Some(job) = &h_job {
+        fold_window_sums_g1::<G>(&read_results.next().unwrap(), job.num_windows, job.bucket_width)?
+    } else {
+        G::g1_identity()
+    };
+    let b2 = if let Some(job) = &b2_job {
+        fold_window_sums_g2::<G>(&read_results.next().unwrap(), job.num_windows, job.bucket_width)?
+    } else {
+        G::g2_identity()
+    };
+
+    Ok((a, b1, l, h, b2))
 }
 
 #[allow(clippy::type_complexity)]

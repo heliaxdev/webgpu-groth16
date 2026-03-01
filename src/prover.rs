@@ -23,7 +23,7 @@ use crate::gpu::GpuContext;
 
 use constraint_system::GpuConstraintSystem;
 use h_poly::{read_h_poly_result, submit_h_poly};
-use msm::gpu_msm_batch_bytes;
+use msm::{enqueue_msm_g1, enqueue_msm_g2, readback_msms};
 
 fn marshal_scalars<G: GpuCurve>(scalars: &[G::Scalar]) -> Vec<u8> {
     let mut buffer = Vec::with_capacity(scalars.len() * 32);
@@ -181,7 +181,19 @@ where
     #[cfg(feature = "timing")]
     eprintln!("[proof] h_poly read: {:?}", t_phase.elapsed());
 
+    // Enqueue a/b1/l/b2 MSMs right after h_poly completes — GPU starts processing
+    // them immediately while CPU computes h bucket sorting below.
+    #[cfg(feature = "timing")]
+    let t_phase = std::time::Instant::now();
+    let a_job = enqueue_msm_g1::<G>(gpu, "a", &a_glv_bytes, a_bd)?;
+    let b1_job = enqueue_msm_g1::<G>(gpu, "b1", &b1_glv_bytes, b1_bd)?;
+    let l_job = enqueue_msm_g1::<G>(gpu, "l", &l_glv_bytes, l_bd)?;
+    let b2_job = enqueue_msm_g2::<G>(gpu, &ppk.b_g2_bytes, b2_bd)?;
+    #[cfg(feature = "timing")]
+    eprintln!("[proof] msm enqueue a/b1/l/b2: {:?}", t_phase.elapsed());
+
     // H bucket data depends on h_coeffs — also uses GLV.
+    // While CPU computes this, GPU is already processing a/b1/l/b2 MSMs.
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     let (h_glv_bytes, h_bd) = compute_glv_bucket_sorting::<G>(
@@ -193,25 +205,19 @@ where
         h_bd.print_distribution_stats("h_g1_glv");
     }
 
-    // Dispatch all MSMs in batch and read back results.
+    // Enqueue h MSM and read back all 5 results.
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
-    let (a_msm, b_g1_msm, l_msm, h_msm, b_g2_msm) = gpu_msm_batch_bytes::<G>(
-        gpu,
-        &a_glv_bytes,
-        a_bd,
-        &b1_glv_bytes,
-        b1_bd,
-        &l_glv_bytes,
-        l_bd,
-        &h_glv_bytes,
-        h_bd,
-        &ppk.b_g2_bytes,
-        b2_bd,
-    )
-    .await?;
+    let h_job = enqueue_msm_g1::<G>(gpu, "h", &h_glv_bytes, h_bd)?;
     #[cfg(feature = "timing")]
-    eprintln!("[proof] msm_batch: {:?}", t_phase.elapsed());
+    eprintln!("[proof] msm enqueue h: {:?}", t_phase.elapsed());
+
+    #[cfg(feature = "timing")]
+    let t_phase = std::time::Instant::now();
+    let (a_msm, b_g1_msm, l_msm, h_msm, b_g2_msm) =
+        readback_msms::<G>(gpu, a_job, b1_job, l_job, h_job, b2_job).await?;
+    #[cfg(feature = "timing")]
+    eprintln!("[proof] msm readback: {:?}", t_phase.elapsed());
 
     // Assemble the final Groth16 proof from MSM results and random blinding factors.
     //
