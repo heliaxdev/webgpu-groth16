@@ -4,8 +4,8 @@
 
 use futures::channel::oneshot;
 
-use super::curve::GpuCurve;
 use super::GpuContext;
+use super::curve::GpuCurve;
 
 impl<C: GpuCurve> GpuContext<C> {
     pub async fn read_buffer(

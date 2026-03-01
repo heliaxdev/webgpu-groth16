@@ -89,7 +89,9 @@ fn setup(num_squarings: usize) -> BenchSetup {
             .expect("param gen failed");
 
     let ppk = prover::prepare_proving_key::<Bls12, Bls12>(&params);
-    let gpu = rt.block_on(GpuContext::<Bls12>::new()).expect("gpu init failed");
+    let gpu = rt
+        .block_on(GpuContext::<Bls12>::new())
+        .expect("gpu init failed");
 
     BenchSetup {
         params,
@@ -120,11 +122,7 @@ fn bench_full_proof(c: &mut Criterion) {
                 };
                 let mut rng = OsRng;
                 rt.block_on(prover::create_proof::<Bls12, Bls12, _, _>(
-                    circuit,
-                    &bs.params,
-                    &bs.ppk,
-                    &bs.gpu,
-                    &mut rng,
+                    circuit, &bs.params, &bs.ppk, &bs.gpu, &mut rng,
                 ))
                 .expect("proof failed");
             });
@@ -278,9 +276,7 @@ fn sample_sapling_output_circuit() -> SaplingOutputCircuit {
     let vk = pgk.to_viewing_key();
     let mut payment_address = None;
     for d0 in 0u8..=255 {
-        if let Some(addr) =
-            vk.to_payment_address(Diversifier([d0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
-        {
+        if let Some(addr) = vk.to_payment_address(Diversifier([d0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])) {
             payment_address = Some(addr);
             break;
         }
@@ -314,7 +310,9 @@ fn bench_sapling_output(c: &mut Criterion) {
         bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
             .expect("param gen failed");
     let ppk = prover::prepare_proving_key::<Bls12, Bls12>(&params);
-    let gpu = rt.block_on(GpuContext::<Bls12>::new()).expect("gpu init failed");
+    let gpu = rt
+        .block_on(GpuContext::<Bls12>::new())
+        .expect("gpu init failed");
 
     let mut group = c.benchmark_group("sapling_output");
     group.sample_size(10);

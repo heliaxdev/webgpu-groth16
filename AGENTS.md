@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This is a GPU-accelerated Groth16 zero-knowledge proof system built on wgpu, targeting the BLS12-381 curve. The two most expensive operations — multi-scalar multiplication (MSM) and the Number Theoretic Transform (NTT) — are offloaded to GPU compute shaders written in WGSL. The rest of the proof construction (constraint synthesis, witness generation, random blinding) runs on the CPU.
+This is a GPU-accelerated Groth16 zero-knowledge proof system built on wgpu, targeting the BLS12-381 curve. The two most expensive operations — multi-scalar multiplication (MSM) and the Number Theoretic Transform (NTT) — are offloaded to GPU compute shaders written in WGSL. The rest of the proof construction (constraint synthesis, witness generation, random blinding) runs on the CPU. Make sure to only allow optimizations that are compatible with wasm.
 
 Key implementation details:
 - Field arithmetic uses 13-bit limbs for F_q (30x13-bit) and 32-bit limbs for F_r (8x32-bit)

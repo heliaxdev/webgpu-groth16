@@ -169,8 +169,7 @@ fn main() {
     #[cfg(feature = "profiling")]
     {
         let trace_path = std::path::Path::new("profile.json");
-        write_chrometrace(trace_path, &all_profiling_data)
-            .expect("failed to write chrome trace");
+        write_chrometrace(trace_path, &all_profiling_data).expect("failed to write chrome trace");
         eprintln!();
         eprintln!("  Trace written to {}", trace_path.display());
         eprintln!("  Open in chrome://tracing or https://ui.perfetto.dev");

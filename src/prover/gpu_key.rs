@@ -4,10 +4,10 @@
 //! already converted to Montgomery form. Reused across multiple proofs
 //! to eliminate per-proof base uploads and Montgomery conversion.
 
-use crate::gpu::curve::{GpuCurve, G1_GPU_BYTES};
 use crate::gpu::GpuContext;
+use crate::gpu::curve::{G1_GPU_BYTES, GpuCurve};
 
-use super::prepared_key::{interleave_glv_bases, PreparedProvingKey};
+use super::prepared_key::{PreparedProvingKey, interleave_glv_bases};
 
 /// Pre-uploaded GPU base point buffers for a specific circuit.
 ///

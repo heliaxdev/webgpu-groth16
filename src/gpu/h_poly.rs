@@ -13,7 +13,7 @@
 //! 6. **From Montgomery(H)**: Convert H out of Montgomery domain
 
 use super::curve::GpuCurve;
-use super::{compute_pass, GpuContext, HPolyBuffers, NTT_TILE_SIZE, SCALAR_WORKGROUP_SIZE};
+use super::{GpuContext, HPolyBuffers, NTT_TILE_SIZE, SCALAR_WORKGROUP_SIZE, compute_pass};
 
 impl<C: GpuCurve> GpuContext<C> {
     pub fn execute_h_pipeline(&self, bufs: &HPolyBuffers<'_>, n: u32) {

@@ -6,7 +6,7 @@
 
 use crate::bellman;
 use crate::glv;
-use crate::gpu::curve::{GpuCurve, G1_GPU_BYTES, G2_GPU_BYTES};
+use crate::gpu::curve::{G1_GPU_BYTES, G2_GPU_BYTES, GpuCurve};
 
 /// Pre-serialized proving key bases for GPU. Avoids re-serialization per proof.
 ///
@@ -72,13 +72,13 @@ pub fn prepare_proving_key<E, G>(pk: &bellman::groth16::Parameters<E>) -> Prepar
 where
     E: pairing::MultiMillerLoop,
     G: GpuCurve<
-        Engine = E,
-        Scalar = E::Fr,
-        G1 = E::G1,
-        G2 = E::G2,
-        G1Affine = E::G1Affine,
-        G2Affine = E::G2Affine,
-    >,
+            Engine = E,
+            Scalar = E::Fr,
+            G1 = E::G1,
+            G2 = E::G2,
+            G1Affine = E::G1Affine,
+            G2Affine = E::G2Affine,
+        >,
 {
     PreparedProvingKey {
         a_bytes: serialize_g1_bases::<G>(&pk.a),

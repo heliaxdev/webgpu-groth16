@@ -8,8 +8,8 @@
 
 use wgpu::util::DeviceExt;
 
-use super::{GpuContext, SCALAR_WORKGROUP_SIZE, NTT_TILE_SIZE};
 use super::curve::GpuCurve;
+use super::{GpuContext, NTT_TILE_SIZE, SCALAR_WORKGROUP_SIZE};
 
 impl<C: GpuCurve> GpuContext<C> {
     pub fn execute_to_montgomery(&self, buffer: &wgpu::Buffer, num_elements: u32) {

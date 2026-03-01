@@ -25,7 +25,7 @@ use ff::PrimeField;
 use group::prime::PrimeCurveAffine;
 
 use crate::gpu::curve::{
-    fq_13bit_to_bytes, fq_bytes_to_13bit, FQ_GPU_BYTES, FQ_GPU_PADDED_BYTES, G1_GPU_BYTES,
+    FQ_GPU_BYTES, FQ_GPU_PADDED_BYTES, G1_GPU_BYTES, fq_13bit_to_bytes, fq_bytes_to_13bit,
 };
 
 // ============================================================================
@@ -36,10 +36,9 @@ use crate::gpu::curve::{
 /// β^3 = 1 (mod q), β ≠ 1. Equivalently: β = g^((q-1)/3) where g generates Fq*.
 /// Reference: https://eprint.iacr.org/2013/158 Section 4
 const BETA_LE_BYTES: [u8; 48] = [
-    0xfe, 0xff, 0xfe, 0xff, 0xff, 0xff, 0x01, 0x2e, 0x02, 0x00, 0x0a, 0x62,
-    0x13, 0xd8, 0x17, 0xde, 0x88, 0x96, 0xf8, 0xe6, 0x3b, 0xa9, 0xb3, 0xdd,
-    0xea, 0x77, 0x0f, 0x6a, 0x07, 0xc6, 0x69, 0xba, 0x51, 0xce, 0x76, 0xdf,
-    0x2f, 0x67, 0x19, 0x5f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xfe, 0xff, 0xfe, 0xff, 0xff, 0xff, 0x01, 0x2e, 0x02, 0x00, 0x0a, 0x62, 0x13, 0xd8, 0x17, 0xde,
+    0x88, 0x96, 0xf8, 0xe6, 0x3b, 0xa9, 0xb3, 0xdd, 0xea, 0x77, 0x0f, 0x6a, 0x07, 0xc6, 0x69, 0xba,
+    0x51, 0xce, 0x76, 0xdf, 0x2f, 0x67, 0x19, 0x5f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
 /// Lattice vector component N11 = x² where x = -0xd201000000010000 (BLS parameter).
@@ -54,18 +53,13 @@ const N22_HI: u64 = 0xac45a4010001a402;
 
 /// Precomputed constant g = round(N22 · 2^256 / r) for efficient Babai rounding.
 /// Used to approximate c2 = round(k · N22 / r) as c2 ≈ (k · g) >> 256.
-const G_LIMBS: [u64; 3] = [
-    0x63f6e522f6cfee2e,
-    0x7c6becf1e01faadd,
-    0x0000000000000001,
-];
+const G_LIMBS: [u64; 3] = [0x63f6e522f6cfee2e, 0x7c6becf1e01faadd, 0x0000000000000001];
 
 /// Fq modulus in 48-byte little-endian format (for point negation: y → q - y).
 const Q_MODULUS_LE: [u8; 48] = [
-    0xab, 0xaa, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xb9, 0xff, 0xff, 0x53, 0xb1,
-    0xfe, 0xff, 0xab, 0x1e, 0x24, 0xf6, 0xb0, 0xf6, 0xa0, 0xd2, 0x30, 0x67,
-    0xbf, 0x12, 0x85, 0xf3, 0x84, 0x4b, 0x77, 0x64, 0xd7, 0xac, 0x4b, 0x43,
-    0xb6, 0xa7, 0x1b, 0x4b, 0x9a, 0xe6, 0x7f, 0x39, 0xea, 0x11, 0x01, 0x1a,
+    0xab, 0xaa, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xb9, 0xff, 0xff, 0x53, 0xb1, 0xfe, 0xff, 0xab, 0x1e,
+    0x24, 0xf6, 0xb0, 0xf6, 0xa0, 0xd2, 0x30, 0x67, 0xbf, 0x12, 0x85, 0xf3, 0x84, 0x4b, 0x77, 0x64,
+    0xd7, 0xac, 0x4b, 0x43, 0xb6, 0xa7, 0x1b, 0x4b, 0x9a, 0xe6, 0x7f, 0x39, 0xea, 0x11, 0x01, 0x1a,
 ];
 
 /// Half of the scalar field modulus r, used to determine c1 = round(k/r).
@@ -114,7 +108,7 @@ fn compute_k1(k: &[u64; 4], c1: u64, c2: u128) -> (u128, bool) {
     let prod = mul_u128_u128(c2, (N11_LO as u128) | ((N11_HI as u128) << 64));
 
     // k - c1 as [u64; 4]
-    let (k_sub, _) = sub_u64(k[0], c1);
+    let (k_sub, _) = k[0].overflowing_sub(c1);
     let k_minus_c1 = [
         k_sub,
         k[1].wrapping_sub(if k[0] < c1 { 1 } else { 0 }),
@@ -129,11 +123,17 @@ fn compute_k1(k: &[u64; 4], c1: u64, c2: u128) -> (u128, bool) {
         // Result is negative: negate the 256-bit value
         let neg = negate_u256(&diff);
         let val = neg[0] as u128 | ((neg[1] as u128) << 64);
-        debug_assert!(neg[2] == 0 && neg[3] == 0, "k1 overflow: doesn't fit in 128 bits");
+        debug_assert!(
+            neg[2] == 0 && neg[3] == 0,
+            "k1 overflow: doesn't fit in 128 bits"
+        );
         (val, true)
     } else {
         let val = diff[0] as u128 | ((diff[1] as u128) << 64);
-        debug_assert!(diff[2] == 0 && diff[3] == 0, "k1 overflow: doesn't fit in 128 bits");
+        debug_assert!(
+            diff[2] == 0 && diff[3] == 0,
+            "k1 overflow: doesn't fit in 128 bits"
+        );
         (val, false)
     }
 }
@@ -163,12 +163,11 @@ pub fn endomorphism_g1(p: &G1Affine) -> G1Affine {
         return G1Affine::identity();
     }
 
-    let beta: Fp = Fp::from_bytes_le(&BETA_LE_BYTES)
-        .expect("BETA constant is a valid Fp element");
+    let beta: Fp = Fp::from_bytes_le(&BETA_LE_BYTES).expect("BETA constant is a valid Fp element");
 
     // φ(x, y) = (β * x, y)
     let beta_x = beta * p.x();
-    let y = p.y().clone();
+    let y = p.y();
 
     // Reconstruct affine point via uncompressed serialization.
     // BLS12-381 uncompressed format: x_BE(48 bytes) || y_BE(48 bytes)
@@ -338,16 +337,16 @@ pub fn u128_to_signed_windows(k: u128, c: usize) -> Vec<(u32, bool)> {
 
 fn bytes_to_u64x4(bytes: &[u8]) -> [u64; 4] {
     let mut limbs = [0u64; 4];
-    for i in 0..4 {
+    for (i, limb) in limbs.iter_mut().enumerate() {
         let offset = i * 8;
         if offset + 8 <= bytes.len() {
-            limbs[i] = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+            *limb = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
         } else {
             // Handle partial last limb
             let mut buf = [0u8; 8];
             let end = bytes.len().min(offset + 8);
             buf[..end - offset].copy_from_slice(&bytes[offset..end]);
-            limbs[i] = u64::from_le_bytes(buf);
+            *limb = u64::from_le_bytes(buf);
         }
     }
     limbs
@@ -376,9 +375,9 @@ fn mul_u256_u192_high(k: &[u64; 4], g: &[u64; 3]) -> u128 {
 
     for i in 0..4 {
         let mut carry = 0u64;
-        for j in 0..3 {
+        for (j, &gj) in g.iter().enumerate() {
             let idx = i + j;
-            let (lo, hi) = mul_u64(k[i], g[j]);
+            let (lo, hi) = mul_u64(k[i], gj);
             let (sum1, c1) = result[idx].overflowing_add(lo);
             let (sum2, c2) = sum1.overflowing_add(carry);
             result[idx] = sum2;
@@ -447,10 +446,6 @@ fn negate_u256(a: &[u64; 4]) -> [u64; 4] {
     result
 }
 
-fn sub_u64(a: u64, b: u64) -> (u64, bool) {
-    a.overflowing_sub(b)
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -477,11 +472,11 @@ mod tests {
     fn glv_decompose_roundtrip() {
         // λ = -x² mod r (the endomorphism eigenvalue in Fr)
         let lambda = Scalar::from_repr_vartime([
-            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff,
-            0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00, 0x78, 0xa7,
-            0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33,
-            0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
-        ]).expect("LAMBDA is a valid scalar");
+            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00,
+            0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29,
+            0x53, 0xa7, 0xed, 0x73,
+        ])
+        .expect("LAMBDA is a valid scalar");
 
         // Verify λ³ = 1
         let lambda_cubed = lambda * lambda * lambda;
@@ -515,8 +510,16 @@ mod tests {
         for _ in 0..1000 {
             let k = Scalar::random(&mut OsRng);
             let (k1, _, k2, _) = glv_decompose(&k);
-            assert!(k1 < (1u128 << 127) + (1u128 << 126), "k1 too large: {} bits", 128 - k1.leading_zeros());
-            assert!(k2 < (1u128 << 127) + (1u128 << 126), "k2 too large: {} bits", 128 - k2.leading_zeros());
+            assert!(
+                k1 < (1u128 << 127) + (1u128 << 126),
+                "k1 too large: {} bits",
+                128 - k1.leading_zeros()
+            );
+            assert!(
+                k2 < (1u128 << 127) + (1u128 << 126),
+                "k2 too large: {} bits",
+                128 - k2.leading_zeros()
+            );
         }
     }
 
@@ -524,11 +527,11 @@ mod tests {
     #[test]
     fn endomorphism_matches_scalar_mul() {
         let lambda = Scalar::from_repr_vartime([
-            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff,
-            0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00, 0x78, 0xa7,
-            0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33,
-            0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
-        ]).unwrap();
+            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00,
+            0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29,
+            0x53, 0xa7, 0xed, 0x73,
+        ])
+        .unwrap();
 
         let g = G1Affine::generator();
         let phi_g = endomorphism_g1(&g);
@@ -561,7 +564,10 @@ mod tests {
             .expect("endomorphism bytes should deserialize");
         let phi_affine = blstrs::G1Projective::from(phi_g);
 
-        assert_eq!(phi_from_bytes, phi_affine, "byte-level endomorphism should match affine-level");
+        assert_eq!(
+            phi_from_bytes, phi_affine,
+            "byte-level endomorphism should match affine-level"
+        );
     }
 
     /// Verify that negating serialized bytes twice returns the original.
@@ -620,7 +626,14 @@ mod tests {
     /// Test u128_to_windows matches bit-by-bit extraction.
     #[test]
     fn u128_to_windows_matches_bit_extraction() {
-        let vals = [0u128, 1, 0xdeadbeef, u128::MAX, 1u128 << 127, (1u128 << 127) - 1];
+        let vals = [
+            0u128,
+            1,
+            0xdeadbeef,
+            u128::MAX,
+            1u128 << 127,
+            (1u128 << 127) - 1,
+        ];
         for val in vals {
             let windows = u128_to_windows(val, 15);
             let expected = reference_u128_windows(val, 15);
@@ -659,11 +672,11 @@ mod tests {
     #[test]
     fn glv_decompose_one() {
         let lambda = Scalar::from_repr_vartime([
-            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff,
-            0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00, 0x78, 0xa7,
-            0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33,
-            0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
-        ]).unwrap();
+            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00,
+            0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29,
+            0x53, 0xa7, 0xed, 0x73,
+        ])
+        .unwrap();
 
         let (k1, k1_neg, k2, k2_neg) = glv_decompose(&Scalar::ONE);
         let k1_s = scalar_from_u128(k1, k1_neg);
@@ -676,11 +689,11 @@ mod tests {
     #[test]
     fn glv_decompose_r_minus_one() {
         let lambda = Scalar::from_repr_vartime([
-            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff,
-            0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00, 0x78, 0xa7,
-            0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33,
-            0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
-        ]).unwrap();
+            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00,
+            0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29,
+            0x53, 0xa7, 0xed, 0x73,
+        ])
+        .unwrap();
 
         let k = -Scalar::ONE; // r - 1
         let (k1, k1_neg, k2, k2_neg) = glv_decompose(&k);
@@ -700,11 +713,11 @@ mod tests {
     #[test]
     fn glv_decompose_lambda() {
         let lambda = Scalar::from_repr_vartime([
-            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff,
-            0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00, 0x78, 0xa7,
-            0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33,
-            0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
-        ]).unwrap();
+            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00,
+            0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29,
+            0x53, 0xa7, 0xed, 0x73,
+        ])
+        .unwrap();
 
         let (k1, k1_neg, k2, k2_neg) = glv_decompose(&lambda);
         let k1_s = scalar_from_u128(k1, k1_neg);
@@ -802,7 +815,12 @@ mod tests {
     /// Verify bytes_to_u64x4 with known input.
     #[test]
     fn bytes_to_u64x4_roundtrip() {
-        let limbs = [0x0102030405060708u64, 0x090a0b0c0d0e0f10, 0x1112131415161718, 0x191a1b1c1d1e1f20];
+        let limbs = [
+            0x0102030405060708u64,
+            0x090a0b0c0d0e0f10,
+            0x1112131415161718,
+            0x191a1b1c1d1e1f20,
+        ];
         let mut bytes = Vec::new();
         for l in &limbs {
             bytes.extend_from_slice(&l.to_le_bytes());

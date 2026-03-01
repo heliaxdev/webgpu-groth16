@@ -1,5 +1,18 @@
-pub mod curve;
+//! GPU context, compute pipeline management, and kernel dispatch.
+//!
+//! [`GpuContext`] owns the wgpu device/queue and all pre-compiled compute pipelines
+//! needed for MSM, NTT, and polynomial operations. Submodules provide dispatch
+//! methods as `impl GpuContext` blocks:
+//!
+//! - [`msm`] — MSM 5-kernel Pippenger pipeline (to_montgomery, aggregate, reduce,
+//!   weight, subsum)
+//! - [`ntt`] — NTT dispatchers (tile-local and multi-stage global), Montgomery
+//!   conversion, coset shift, pointwise polynomial evaluation
+//! - [`h_poly`] — H-polynomial pipeline (fused NTT+shift → pointwise → iNTT)
+//! - [`curve`] — CPU↔GPU serialization bridge for BLS12-381 curve elements
+
 mod buffers;
+pub mod curve;
 mod h_poly;
 mod msm;
 mod ntt;
@@ -36,9 +49,13 @@ const G1_SUBSUM_CHUNKS_PER_WINDOW: u32 = 1;
 /// Number of workgroup chunks per window in G2 two-phase subsum reduction.
 const G2_SUBSUM_CHUNKS_PER_WINDOW: u32 = 32;
 
-/// Creates a compute pass, optionally wrapped in a profiling scope.
-/// With the `profiling` feature, wraps the pass in `scope.scoped_compute_pass()`.
-/// Without it, uses a plain `encoder.begin_compute_pass()`.
+/// Creates a compute pass, optionally wrapped in a GPU profiling scope.
+///
+/// With the `profiling` feature enabled, wraps the pass in
+/// `scope.scoped_compute_pass()` for per-kernel GPU timing via
+/// [`wgpu_profiler`]. Without it, creates a plain compute pass.
+///
+/// Usage: `let mut cpass = compute_pass!(scope, encoder, "kernel_label");`
 macro_rules! compute_pass {
     ($scope:expr, $encoder:expr, $label:expr) => {{
         #[cfg(feature = "profiling")]
@@ -249,7 +266,11 @@ impl<C: GpuCurve> GpuContext<C> {
                 let _t = Instant::now();
                 let _r = $expr;
                 #[cfg(feature = "timing")]
-                eprintln!("[init] {:<30} {:>8.1}ms", $label, _t.elapsed().as_secs_f64() * 1000.0);
+                eprintln!(
+                    "[init] {:<30} {:>8.1}ms",
+                    $label,
+                    _t.elapsed().as_secs_f64() * 1000.0
+                );
                 _r
             }};
         }
@@ -260,25 +281,37 @@ impl<C: GpuCurve> GpuContext<C> {
         // 1. Compile Shader Modules
         #[cfg(feature = "timing")]
         let shader_start = Instant::now();
-        let ntt_module = timed!("shader: NTT", device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("NTT Shader"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::NTT_SOURCE)),
-        }));
+        let ntt_module = timed!(
+            "shader: NTT",
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("NTT Shader"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::NTT_SOURCE)),
+            })
+        );
 
-        let msm_module = timed!("shader: MSM", device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("MSM Shader"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_SOURCE)),
-        }));
+        let msm_module = timed!(
+            "shader: MSM",
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("MSM Shader"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_SOURCE)),
+            })
+        );
 
-        let poly_ops_module = timed!("shader: Poly Ops", device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Poly Ops Shader"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::POLY_OPS_SOURCE)),
-        }));
+        let poly_ops_module = timed!(
+            "shader: Poly Ops",
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Poly Ops Shader"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::POLY_OPS_SOURCE)),
+            })
+        );
 
-        let ntt_fused_module = timed!("shader: NTT Fused", device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("NTT Fused Shader"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::NTT_FUSED_SOURCE)),
-        }));
+        let ntt_fused_module = timed!(
+            "shader: NTT Fused",
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("NTT Fused Shader"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::NTT_FUSED_SOURCE)),
+            })
+        );
         #[cfg(feature = "timing")]
         let shader_total = shader_start.elapsed();
 
@@ -289,27 +322,41 @@ impl<C: GpuCurve> GpuContext<C> {
 
         let ntt_bind_group_layout = create_bind_group_layout(&device, "NTT", &[RW, RO]);
         let ntt_fused_shift_bgl = create_bind_group_layout(&device, "NTT Fused Shift", &[RO]);
-        let ntt_params_bind_group_layout = create_bind_group_layout(&device, "NTT Global", &[RW, RO, UF]);
-        let coset_shift_bind_group_layout = create_bind_group_layout(&device, "Coset Shift", &[RW, RO]);
-        let pointwise_poly_bind_group_layout = create_bind_group_layout(&device, "Pointwise Poly", &[RO, RO, RO, RW, RO]);
+        let ntt_params_bind_group_layout =
+            create_bind_group_layout(&device, "NTT Global", &[RW, RO, UF]);
+        let coset_shift_bind_group_layout =
+            create_bind_group_layout(&device, "Coset Shift", &[RW, RO]);
+        let pointwise_poly_bind_group_layout =
+            create_bind_group_layout(&device, "Pointwise Poly", &[RO, RO, RO, RW, RO]);
         let montgomery_bind_group_layout = create_bind_group_layout(&device, "Montgomery", &[RW]);
-        let msm_agg_bind_group_layout = create_bind_group_layout(&device, "MSM Agg", &[RO, RO, RO, RO, RW, RO]);
-        let msm_sum_bind_group_layout = create_bind_group_layout(&device, "MSM Sum", &[RO, RO, RO, RO, RW]);
+        let msm_agg_bind_group_layout =
+            create_bind_group_layout(&device, "MSM Agg", &[RO, RO, RO, RO, RW, RO]);
+        let msm_sum_bind_group_layout =
+            create_bind_group_layout(&device, "MSM Sum", &[RO, RO, RO, RO, RW]);
         // Weight buckets: [data(rw), bucket_values(read)]
-        let msm_weight_g1_bind_group_layout = create_bind_group_layout(&device, "MSM Weight G1", &[RW, RO]);
-        let msm_weight_g2_bind_group_layout = create_bind_group_layout(&device, "MSM Weight G2", &[RW, RO]);
+        let msm_weight_g1_bind_group_layout =
+            create_bind_group_layout(&device, "MSM Weight G1", &[RW, RO]);
+        let msm_weight_g2_bind_group_layout =
+            create_bind_group_layout(&device, "MSM Weight G2", &[RW, RO]);
         // Phase1: [agg_buckets(read), window_starts(read), window_counts(read),
         //          partial_sums(rw), subsum_params(uniform)]
-        let msm_subsum_phase1_bind_group_layout = create_bind_group_layout(&device, "MSM Subsum Phase1", &[RO, RO, RO, RW, UF]);
+        let msm_subsum_phase1_bind_group_layout =
+            create_bind_group_layout(&device, "MSM Subsum Phase1", &[RO, RO, RO, RW, UF]);
         // Phase2: [partial_sums(read), window_sums(rw), subsum_params(uniform)]
-        let msm_subsum_phase2_bind_group_layout = create_bind_group_layout(&device, "MSM Subsum Phase2", &[RO, RW, UF]);
+        let msm_subsum_phase2_bind_group_layout =
+            create_bind_group_layout(&device, "MSM Subsum Phase2", &[RO, RW, UF]);
         // Reduce sub-buckets: [input(read), starts(read), counts(read), output(rw)]
-        let msm_reduce_bind_group_layout = create_bind_group_layout(&device, "MSM Reduce", &[RO, RO, RO, RW]);
+        let msm_reduce_bind_group_layout =
+            create_bind_group_layout(&device, "MSM Reduce", &[RO, RO, RO, RW]);
 
         #[cfg(feature = "timing")]
         let layouts_total = layouts_start.elapsed();
         #[cfg(feature = "timing")]
-        eprintln!("[init] {:<30} {:>8.1}ms", "bind group layouts (total)", layouts_total.as_secs_f64() * 1000.0);
+        eprintln!(
+            "[init] {:<30} {:>8.1}ms",
+            "bind group layouts (total)",
+            layouts_total.as_secs_f64() * 1000.0
+        );
 
         // 3. Create Compute Pipelines
         #[cfg(feature = "timing")]
@@ -318,76 +365,271 @@ impl<C: GpuCurve> GpuContext<C> {
         // NTT pipelines
         let ntt_tile_layout = pipeline_layout(&device, &[&ntt_bind_group_layout]);
         let ntt_global_layout = pipeline_layout(&device, &[&ntt_params_bind_group_layout]);
-        let ntt_pipeline = timed!("pipeline: NTT Tile",
-            create_pipeline(&device, "NTT Tile", &ntt_tile_layout, &ntt_module, "ntt_tile"));
-        let ntt_fused_layout = pipeline_layout(&device, &[&ntt_bind_group_layout, &ntt_fused_shift_bgl]);
-        let ntt_fused_pipeline = timed!("pipeline: NTT Fused",
-            create_pipeline(&device, "NTT Fused", &ntt_fused_layout, &ntt_fused_module, "ntt_tile_with_shift"));
-        let ntt_global_stage_pipeline = timed!("pipeline: NTT Global Stage",
-            create_pipeline(&device, "NTT Global Stage", &ntt_global_layout, &ntt_module, "ntt_global_stage"));
-        let ntt_bitreverse_pipeline = timed!("pipeline: NTT BitReverse",
-            create_pipeline(&device, "NTT BitReverse", &ntt_global_layout, &ntt_module, "bitreverse_inplace"));
+        let ntt_pipeline = timed!(
+            "pipeline: NTT Tile",
+            create_pipeline(
+                &device,
+                "NTT Tile",
+                &ntt_tile_layout,
+                &ntt_module,
+                "ntt_tile"
+            )
+        );
+        let ntt_fused_layout =
+            pipeline_layout(&device, &[&ntt_bind_group_layout, &ntt_fused_shift_bgl]);
+        let ntt_fused_pipeline = timed!(
+            "pipeline: NTT Fused",
+            create_pipeline(
+                &device,
+                "NTT Fused",
+                &ntt_fused_layout,
+                &ntt_fused_module,
+                "ntt_tile_with_shift"
+            )
+        );
+        let ntt_global_stage_pipeline = timed!(
+            "pipeline: NTT Global Stage",
+            create_pipeline(
+                &device,
+                "NTT Global Stage",
+                &ntt_global_layout,
+                &ntt_module,
+                "ntt_global_stage"
+            )
+        );
+        let ntt_bitreverse_pipeline = timed!(
+            "pipeline: NTT BitReverse",
+            create_pipeline(
+                &device,
+                "NTT BitReverse",
+                &ntt_global_layout,
+                &ntt_module,
+                "bitreverse_inplace"
+            )
+        );
 
         // Polynomial pipelines
         let coset_shift_layout = pipeline_layout(&device, &[&coset_shift_bind_group_layout]);
         let pointwise_layout = pipeline_layout(&device, &[&pointwise_poly_bind_group_layout]);
         let montgomery_layout = pipeline_layout(&device, &[&montgomery_bind_group_layout]);
-        let coset_shift_pipeline = timed!("pipeline: Coset Shift",
-            create_pipeline(&device, "Coset Shift", &coset_shift_layout, &poly_ops_module, "coset_shift"));
-        let pointwise_poly_pipeline = timed!("pipeline: Pointwise Poly",
-            create_pipeline(&device, "Pointwise Poly", &pointwise_layout, &poly_ops_module, "pointwise_poly"));
-        let to_montgomery_pipeline = timed!("pipeline: To Montgomery",
-            create_pipeline(&device, "To Montgomery", &montgomery_layout, &poly_ops_module, "to_montgomery_array"));
-        let from_montgomery_pipeline = timed!("pipeline: From Montgomery",
-            create_pipeline(&device, "From Montgomery", &montgomery_layout, &poly_ops_module, "from_montgomery_array"));
+        let coset_shift_pipeline = timed!(
+            "pipeline: Coset Shift",
+            create_pipeline(
+                &device,
+                "Coset Shift",
+                &coset_shift_layout,
+                &poly_ops_module,
+                "coset_shift"
+            )
+        );
+        let pointwise_poly_pipeline = timed!(
+            "pipeline: Pointwise Poly",
+            create_pipeline(
+                &device,
+                "Pointwise Poly",
+                &pointwise_layout,
+                &poly_ops_module,
+                "pointwise_poly"
+            )
+        );
+        let to_montgomery_pipeline = timed!(
+            "pipeline: To Montgomery",
+            create_pipeline(
+                &device,
+                "To Montgomery",
+                &montgomery_layout,
+                &poly_ops_module,
+                "to_montgomery_array"
+            )
+        );
+        let from_montgomery_pipeline = timed!(
+            "pipeline: From Montgomery",
+            create_pipeline(
+                &device,
+                "From Montgomery",
+                &montgomery_layout,
+                &poly_ops_module,
+                "from_montgomery_array"
+            )
+        );
 
         // MSM pipelines
         let msm_agg_layout = pipeline_layout(&device, &[&msm_agg_bind_group_layout]);
         let msm_sum_layout = pipeline_layout(&device, &[&msm_sum_bind_group_layout]);
         let msm_weight_g1_layout = pipeline_layout(&device, &[&msm_weight_g1_bind_group_layout]);
-        let msm_subsum_phase1_layout = pipeline_layout(&device, &[&msm_subsum_phase1_bind_group_layout]);
-        let msm_subsum_phase2_layout = pipeline_layout(&device, &[&msm_subsum_phase2_bind_group_layout]);
+        let msm_subsum_phase1_layout =
+            pipeline_layout(&device, &[&msm_subsum_phase1_bind_group_layout]);
+        let msm_subsum_phase2_layout =
+            pipeline_layout(&device, &[&msm_subsum_phase2_bind_group_layout]);
 
-        let msm_agg_g1_pipeline = timed!("pipeline: MSM Agg G1",
-            create_pipeline(&device, "MSM Agg G1", &msm_agg_layout, &msm_module, "aggregate_buckets_g1"));
-        let msm_sum_g1_pipeline = timed!("pipeline: MSM Sum G1",
-            create_pipeline(&device, "MSM Sum G1", &msm_sum_layout, &msm_module, "subsum_accumulation_g1"));
-        let msm_agg_g2_pipeline = timed!("pipeline: MSM Agg G2",
-            create_pipeline(&device, "MSM Agg G2", &msm_agg_layout, &msm_module, "aggregate_buckets_g2"));
-        let msm_sum_g2_pipeline = timed!("pipeline: MSM Sum G2",
-            create_pipeline(&device, "MSM Sum G2", &msm_sum_layout, &msm_module, "subsum_accumulation_g2"));
-        let msm_to_mont_g1_pipeline = timed!("pipeline: MSM To Mont G1",
-            create_pipeline(&device, "MSM To Montgomery G1", &montgomery_layout, &msm_module, "to_montgomery_bases_g1"));
-        let msm_to_mont_g2_pipeline = timed!("pipeline: MSM To Mont G2",
-            create_pipeline(&device, "MSM To Montgomery G2", &montgomery_layout, &msm_module, "to_montgomery_bases_g2"));
-        let msm_weight_g1_pipeline = timed!("pipeline: MSM Weight G1",
-            create_pipeline(&device, "MSM Weight G1", &msm_weight_g1_layout, &msm_module, "weight_buckets_g1"));
-        let msm_subsum_phase1_g1_pipeline = timed!("pipeline: MSM Subsum Ph1 G1",
-            create_pipeline(&device, "MSM Subsum Phase1 G1", &msm_subsum_phase1_layout, &msm_module, "subsum_phase1_g1"));
-        let msm_subsum_phase2_g1_pipeline = timed!("pipeline: MSM Subsum Ph2 G1",
-            create_pipeline(&device, "MSM Subsum Phase2 G1", &msm_subsum_phase2_layout, &msm_module, "subsum_phase2_g1"));
+        let msm_agg_g1_pipeline = timed!(
+            "pipeline: MSM Agg G1",
+            create_pipeline(
+                &device,
+                "MSM Agg G1",
+                &msm_agg_layout,
+                &msm_module,
+                "aggregate_buckets_g1"
+            )
+        );
+        let msm_sum_g1_pipeline = timed!(
+            "pipeline: MSM Sum G1",
+            create_pipeline(
+                &device,
+                "MSM Sum G1",
+                &msm_sum_layout,
+                &msm_module,
+                "subsum_accumulation_g1"
+            )
+        );
+        let msm_agg_g2_pipeline = timed!(
+            "pipeline: MSM Agg G2",
+            create_pipeline(
+                &device,
+                "MSM Agg G2",
+                &msm_agg_layout,
+                &msm_module,
+                "aggregate_buckets_g2"
+            )
+        );
+        let msm_sum_g2_pipeline = timed!(
+            "pipeline: MSM Sum G2",
+            create_pipeline(
+                &device,
+                "MSM Sum G2",
+                &msm_sum_layout,
+                &msm_module,
+                "subsum_accumulation_g2"
+            )
+        );
+        let msm_to_mont_g1_pipeline = timed!(
+            "pipeline: MSM To Mont G1",
+            create_pipeline(
+                &device,
+                "MSM To Montgomery G1",
+                &montgomery_layout,
+                &msm_module,
+                "to_montgomery_bases_g1"
+            )
+        );
+        let msm_to_mont_g2_pipeline = timed!(
+            "pipeline: MSM To Mont G2",
+            create_pipeline(
+                &device,
+                "MSM To Montgomery G2",
+                &montgomery_layout,
+                &msm_module,
+                "to_montgomery_bases_g2"
+            )
+        );
+        let msm_weight_g1_pipeline = timed!(
+            "pipeline: MSM Weight G1",
+            create_pipeline(
+                &device,
+                "MSM Weight G1",
+                &msm_weight_g1_layout,
+                &msm_module,
+                "weight_buckets_g1"
+            )
+        );
+        let msm_subsum_phase1_g1_pipeline = timed!(
+            "pipeline: MSM Subsum Ph1 G1",
+            create_pipeline(
+                &device,
+                "MSM Subsum Phase1 G1",
+                &msm_subsum_phase1_layout,
+                &msm_module,
+                "subsum_phase1_g1"
+            )
+        );
+        let msm_subsum_phase2_g1_pipeline = timed!(
+            "pipeline: MSM Subsum Ph2 G1",
+            create_pipeline(
+                &device,
+                "MSM Subsum Phase2 G1",
+                &msm_subsum_phase2_layout,
+                &msm_module,
+                "subsum_phase2_g1"
+            )
+        );
 
         let msm_weight_g2_layout = pipeline_layout(&device, &[&msm_weight_g2_bind_group_layout]);
-        let msm_weight_g2_pipeline = timed!("pipeline: MSM Weight G2",
-            create_pipeline(&device, "MSM Weight G2", &msm_weight_g2_layout, &msm_module, "weight_buckets_g2"));
-        let msm_subsum_phase1_g2_pipeline = timed!("pipeline: MSM Subsum Ph1 G2",
-            create_pipeline(&device, "MSM Subsum Phase1 G2", &msm_subsum_phase1_layout, &msm_module, "subsum_phase1_g2"));
-        let msm_subsum_phase2_g2_pipeline = timed!("pipeline: MSM Subsum Ph2 G2",
-            create_pipeline(&device, "MSM Subsum Phase2 G2", &msm_subsum_phase2_layout, &msm_module, "subsum_phase2_g2"));
+        let msm_weight_g2_pipeline = timed!(
+            "pipeline: MSM Weight G2",
+            create_pipeline(
+                &device,
+                "MSM Weight G2",
+                &msm_weight_g2_layout,
+                &msm_module,
+                "weight_buckets_g2"
+            )
+        );
+        let msm_subsum_phase1_g2_pipeline = timed!(
+            "pipeline: MSM Subsum Ph1 G2",
+            create_pipeline(
+                &device,
+                "MSM Subsum Phase1 G2",
+                &msm_subsum_phase1_layout,
+                &msm_module,
+                "subsum_phase1_g2"
+            )
+        );
+        let msm_subsum_phase2_g2_pipeline = timed!(
+            "pipeline: MSM Subsum Ph2 G2",
+            create_pipeline(
+                &device,
+                "MSM Subsum Phase2 G2",
+                &msm_subsum_phase2_layout,
+                &msm_module,
+                "subsum_phase2_g2"
+            )
+        );
 
         let msm_reduce_layout = pipeline_layout(&device, &[&msm_reduce_bind_group_layout]);
-        let msm_reduce_g1_pipeline = timed!("pipeline: MSM Reduce G1",
-            create_pipeline(&device, "MSM Reduce G1", &msm_reduce_layout, &msm_module, "reduce_sub_buckets_g1"));
-        let msm_reduce_g2_pipeline = timed!("pipeline: MSM Reduce G2",
-            create_pipeline(&device, "MSM Reduce G2", &msm_reduce_layout, &msm_module, "reduce_sub_buckets_g2"));
+        let msm_reduce_g1_pipeline = timed!(
+            "pipeline: MSM Reduce G1",
+            create_pipeline(
+                &device,
+                "MSM Reduce G1",
+                &msm_reduce_layout,
+                &msm_module,
+                "reduce_sub_buckets_g1"
+            )
+        );
+        let msm_reduce_g2_pipeline = timed!(
+            "pipeline: MSM Reduce G2",
+            create_pipeline(
+                &device,
+                "MSM Reduce G2",
+                &msm_reduce_layout,
+                &msm_module,
+                "reduce_sub_buckets_g2"
+            )
+        );
         #[cfg(feature = "timing")]
         {
             let pipelines_total = pipelines_start.elapsed();
             eprintln!("\n[init] === GpuContext::new() summary ===");
-            eprintln!("[init] {:<30} {:>8.1}ms", "shader compilation", shader_total.as_secs_f64() * 1000.0);
-            eprintln!("[init] {:<30} {:>8.1}ms", "bind group layouts", layouts_total.as_secs_f64() * 1000.0);
-            eprintln!("[init] {:<30} {:>8.1}ms", "pipeline creation", pipelines_total.as_secs_f64() * 1000.0);
-            eprintln!("[init] {:<30} {:>8.1}ms", "TOTAL", init_start.elapsed().as_secs_f64() * 1000.0);
+            eprintln!(
+                "[init] {:<30} {:>8.1}ms",
+                "shader compilation",
+                shader_total.as_secs_f64() * 1000.0
+            );
+            eprintln!(
+                "[init] {:<30} {:>8.1}ms",
+                "bind group layouts",
+                layouts_total.as_secs_f64() * 1000.0
+            );
+            eprintln!(
+                "[init] {:<30} {:>8.1}ms",
+                "pipeline creation",
+                pipelines_total.as_secs_f64() * 1000.0
+            );
+            eprintln!(
+                "[init] {:<30} {:>8.1}ms",
+                "TOTAL",
+                init_start.elapsed().as_secs_f64() * 1000.0
+            );
             eprintln!();
         }
 
@@ -484,654 +726,4 @@ impl<C: GpuCurve> GpuContext<C> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::gpu::curve::GpuCurve;
-    use blstrs::{Bls12, G1Affine, Scalar};
-    use ff::Field;
-    use group::prime::PrimeCurveAffine;
-    use std::borrow::Cow;
-
-    #[tokio::test]
-    async fn test_g1_cpu_gpu_cpu_roundtrip_bytes_and_deserialize() {
-        let gpu = GpuContext::<Bls12>::new()
-            .await
-            .expect("failed to init gpu context");
-
-        let point = G1Affine::generator();
-        let bytes = <Bls12 as GpuCurve>::serialize_g1(&point);
-        let buf = gpu.create_storage_buffer("g1_roundtrip", &bytes);
-        let read_back = gpu
-            .read_buffer(&buf, bytes.len() as u64)
-            .await
-            .expect("failed to read back g1 bytes");
-
-        assert_eq!(bytes, read_back, "raw gpu roundtrip bytes differ");
-
-        let parsed = <Bls12 as GpuCurve>::deserialize_g1(&read_back)
-            .expect("deserializing round-tripped g1 bytes failed");
-        let parsed_affine: G1Affine = parsed.into();
-        assert_eq!(parsed_affine, point, "g1 roundtrip point mismatch");
-    }
-
-    #[tokio::test]
-    async fn test_g1_shader_load_store_roundtrip() {
-        let gpu = GpuContext::<Bls12>::new()
-            .await
-            .expect("failed to init gpu context");
-
-        let point = G1Affine::generator();
-        let in_bytes = <Bls12 as GpuCurve>::serialize_g1(&point);
-
-        let in_buf = gpu.create_storage_buffer("rt_in_g1", &in_bytes);
-        let out_buf = gpu.create_empty_buffer("rt_out_g1", in_bytes.len() as u64);
-
-        let shader = gpu
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("MSM Shader Roundtrip"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(<Bls12 as GpuCurve>::MSM_SOURCE)),
-            });
-
-        let bgl = gpu
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("RT G1 BGL"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-
-        let layout = gpu
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("RT G1 Pipeline Layout"),
-                bind_group_layouts: &[&bgl],
-                immediate_size: 0,
-            });
-
-        let pipeline = gpu
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("RT G1 Pipeline"),
-                layout: Some(&layout),
-                module: &shader,
-                entry_point: Some("roundtrip_g1"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-
-        let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("RT G1 BG"),
-            layout: &bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: in_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: out_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("RT G1 Encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("RT G1 Pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        gpu.queue.submit(Some(encoder.finish()));
-
-        let out_bytes = gpu
-            .read_buffer(&out_buf, in_bytes.len() as u64)
-            .await
-            .expect("failed to read rt g1 bytes");
-
-        let parsed = <Bls12 as GpuCurve>::deserialize_g1(&out_bytes)
-            .expect("deserializing shader round-tripped g1 bytes failed");
-        let parsed_affine: G1Affine = parsed.into();
-        assert_eq!(parsed_affine, point, "g1 shader roundtrip point mismatch");
-    }
-
-    #[tokio::test]
-    async fn test_g1_shader_coord_only_montgomery_roundtrip() {
-        let gpu = GpuContext::<Bls12>::new()
-            .await
-            .expect("failed to init gpu context");
-
-        let point = G1Affine::generator();
-        let in_bytes = <Bls12 as GpuCurve>::serialize_g1(&point);
-
-        let in_buf = gpu.create_storage_buffer("rt_in_coords_g1", &in_bytes);
-        let out_buf = gpu.create_empty_buffer("rt_out_coords_g1", in_bytes.len() as u64);
-
-        let shader = gpu
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("MSM Shader Coord Roundtrip"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(<Bls12 as GpuCurve>::MSM_SOURCE)),
-            });
-
-        let bgl = gpu
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("RT Coords G1 BGL"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-
-        let layout = gpu
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("RT Coords G1 Pipeline Layout"),
-                bind_group_layouts: &[&bgl],
-                immediate_size: 0,
-            });
-
-        let pipeline = gpu
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("RT Coords G1 Pipeline"),
-                layout: Some(&layout),
-                module: &shader,
-                entry_point: Some("roundtrip_coords_g1"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-
-        let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("RT Coords G1 BG"),
-            layout: &bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: in_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: out_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("RT Coords G1 Encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("RT Coords G1 Pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        gpu.queue.submit(Some(encoder.finish()));
-
-        let out_bytes = gpu
-            .read_buffer(&out_buf, in_bytes.len() as u64)
-            .await
-            .expect("failed to read rt coords g1 bytes");
-
-        let parsed = <Bls12 as GpuCurve>::deserialize_g1(&out_bytes)
-            .expect("deserializing coord round-tripped g1 bytes failed");
-        let parsed_affine: G1Affine = parsed.into();
-        assert_eq!(parsed_affine, point, "g1 coord roundtrip point mismatch");
-    }
-
-    #[tokio::test]
-    async fn test_scalar_to_from_montgomery_roundtrip() {
-        let gpu = GpuContext::<Bls12>::new()
-            .await
-            .expect("failed to init gpu context");
-
-        let scalars = vec![
-            Scalar::ZERO,
-            Scalar::ONE,
-            Scalar::from(2u64),
-            Scalar::from(3u64),
-            Scalar::from(0x1234_5678_9abc_def0u64),
-            -Scalar::from(5u64),
-        ];
-
-        let mut bytes = Vec::with_capacity(scalars.len() * 32);
-        for s in &scalars {
-            bytes.extend_from_slice(&<Bls12 as GpuCurve>::serialize_scalar(s));
-        }
-
-        let buf = gpu.create_storage_buffer("scalar_roundtrip", &bytes);
-        gpu.execute_to_montgomery(&buf, scalars.len() as u32);
-        gpu.execute_from_montgomery(&buf, scalars.len() as u32);
-        let out = gpu
-            .read_buffer(&buf, bytes.len() as u64)
-            .await
-            .expect("failed to read scalar roundtrip");
-
-        for (i, chunk) in out.chunks_exact(32).enumerate() {
-            let got =
-                <Bls12 as GpuCurve>::deserialize_scalar(chunk).expect("deserialize scalar failed");
-            assert_eq!(got, scalars[i], "scalar mismatch at index {i}");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_g1_shader_double_roundtrip() {
-        use group::Curve;
-
-        let gpu = GpuContext::<Bls12>::new()
-            .await
-            .expect("failed to init gpu context");
-
-        let point = G1Affine::generator();
-        let in_bytes = <Bls12 as GpuCurve>::serialize_g1(&point);
-
-        let in_buf = gpu.create_storage_buffer("rt_in_g1", &in_bytes);
-        let out_buf = gpu.create_empty_buffer("rt_out_g1", in_bytes.len() as u64);
-
-        let shader = gpu
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("MSM Shader Double Roundtrip"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(<Bls12 as GpuCurve>::MSM_SOURCE)),
-            });
-
-        let bgl = gpu
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("RT Double G1 BGL"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-
-        let layout = gpu
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("RT Double G1 Pipeline Layout"),
-                bind_group_layouts: &[&bgl],
-                immediate_size: 0,
-            });
-
-        let pipeline = gpu
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("RT Double G1 Pipeline"),
-                layout: Some(&layout),
-                module: &shader,
-                entry_point: Some("roundtrip_double_g1"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-
-        let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("RT Double G1 BG"),
-            layout: &bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: in_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: out_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("RT Double G1 Encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("RT Double G1 Pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        gpu.queue.submit(Some(encoder.finish()));
-
-        let out_bytes = gpu
-            .read_buffer(&out_buf, in_bytes.len() as u64)
-            .await
-            .expect("failed to read rt double g1 bytes");
-
-        // Compute expected 2G on CPU
-        let g_proj: blstrs::G1Projective = point.into();
-        let expected: G1Affine = (g_proj + g_proj).to_affine();
-
-        let parsed = <Bls12 as GpuCurve>::deserialize_g1(&out_bytes)
-            .expect("GPU double_g1 produced invalid curve point");
-        let gpu_affine: G1Affine = parsed.into();
-        assert_eq!(gpu_affine, expected, "GPU double_g1 mismatch");
-    }
-
-    #[tokio::test]
-    async fn test_g2_add_complete_roundtrip() {
-        use blstrs::{G2Affine, G2Projective};
-        use group::Curve;
-
-        let gpu = GpuContext::<Bls12>::new()
-            .await
-            .expect("failed to init gpu context");
-
-        let generator = G2Affine::generator();
-        // Use two distinct points: G and 3G.
-        let g_proj: G2Projective = generator.into();
-        let three_g: G2Affine = (g_proj + g_proj + g_proj).to_affine();
-
-        // Test 1: G + 3G = 4G (distinct points)
-        let a_bytes = <Bls12 as GpuCurve>::serialize_g2(&generator);
-        let b_bytes = <Bls12 as GpuCurve>::serialize_g2(&three_g);
-
-        let a_buf = gpu.create_storage_buffer("rt_add_g2_a", &a_bytes);
-        let b_buf = gpu.create_storage_buffer("rt_add_g2_b", &b_bytes);
-        let out_buf = gpu.create_empty_buffer("rt_add_g2_out", a_bytes.len() as u64);
-
-        let shader = gpu
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("MSM Shader Add G2 Complete RT"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(<Bls12 as GpuCurve>::MSM_SOURCE)),
-            });
-
-        let bgl = create_bind_group_layout(
-            &gpu.device,
-            "RT Add G2 BGL",
-            &[BufKind::ReadOnly, BufKind::ReadOnly, BufKind::ReadWrite],
-        );
-        let layout = pipeline_layout(&gpu.device, &[&bgl]);
-        let pipeline = create_pipeline(
-            &gpu.device,
-            "RT Add G2 Complete",
-            &layout,
-            &shader,
-            "roundtrip_add_g2_complete",
-        );
-
-        let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("RT Add G2 BG"),
-            layout: &bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: a_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: b_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: out_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("RT Add G2 Encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("RT Add G2 Pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        gpu.queue.submit(Some(encoder.finish()));
-
-        let out_bytes = gpu
-            .read_buffer(&out_buf, a_bytes.len() as u64)
-            .await
-            .expect("failed to read rt add g2 bytes");
-
-        // CPU expected: G + 3G = 4G
-        let expected: G2Affine = (g_proj + g_proj + g_proj + g_proj).to_affine();
-        let parsed = <Bls12 as GpuCurve>::deserialize_g2(&out_bytes)
-            .expect("GPU add_g2_complete produced invalid curve point");
-        let gpu_affine: G2Affine = parsed.into();
-        assert_eq!(gpu_affine, expected, "GPU add_g2_complete G+3G mismatch");
-
-        // Test 2: G + G = 2G (doubling via complete formula)
-        let b_buf_2 = gpu.create_storage_buffer("rt_add_g2_b2", &a_bytes);
-        let out_buf_2 = gpu.create_empty_buffer("rt_add_g2_out2", a_bytes.len() as u64);
-
-        let bg2 = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("RT Add G2 BG2"),
-            layout: &bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: a_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: b_buf_2.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: out_buf_2.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder2 = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("RT Add G2 Encoder 2"),
-            });
-        {
-            let mut pass = encoder2.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("RT Add G2 Pass 2"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bg2, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        gpu.queue.submit(Some(encoder2.finish()));
-
-        let out_bytes_2 = gpu
-            .read_buffer(&out_buf_2, a_bytes.len() as u64)
-            .await
-            .expect("failed to read rt add g2 doubling bytes");
-
-        let expected_double: G2Affine = (g_proj + g_proj).to_affine();
-        let parsed_double = <Bls12 as GpuCurve>::deserialize_g2(&out_bytes_2)
-            .expect("GPU add_g2_complete doubling produced invalid curve point");
-        let gpu_affine_double: G2Affine = parsed_double.into();
-        assert_eq!(
-            gpu_affine_double, expected_double,
-            "GPU add_g2_complete G+G (doubling) mismatch"
-        );
-    }
-
-    /// Test: parallel tree reduction of 64 G1 points in var<workgroup> memory.
-    ///
-    /// Exercises `var<workgroup> shared: array<PointG1, 64>` with `@workgroup_size(64)`
-    /// to diagnose whether Metal threadgroup memory works correctly with 360-byte
-    /// PointG1 structs.
-    #[tokio::test]
-    async fn test_g1_workgroup_tree_reduction() {
-        use group::{Curve, Group};
-
-        let gpu = GpuContext::<Bls12>::new()
-            .await
-            .expect("failed to init gpu context");
-
-        let generator = G1Affine::generator();
-        let gen_proj: blstrs::G1Projective = generator.into();
-
-        // Generate 64 distinct points: i*G for i=1..=64
-        let mut points = Vec::with_capacity(64);
-        let mut running = gen_proj;
-        for _ in 0..64 {
-            points.push(running.to_affine());
-            running += gen_proj;
-        }
-
-        // Compute expected sum on CPU: sum(i*G, i=1..64) = (64*65/2)*G = 2080*G
-        let mut cpu_sum = blstrs::G1Projective::identity();
-        for p in &points {
-            let proj: blstrs::G1Projective = (*p).into();
-            cpu_sum += proj;
-        }
-        let expected: G1Affine = cpu_sum.to_affine();
-
-        // Serialize 64 points to GPU format
-        let mut in_bytes = Vec::with_capacity(64 * crate::gpu::curve::G1_GPU_BYTES);
-        for p in &points {
-            in_bytes.extend_from_slice(&<Bls12 as GpuCurve>::serialize_g1(p));
-        }
-
-        let in_buf = gpu.create_storage_buffer("wg_test_in_g1", &in_bytes);
-        let out_buf = gpu.create_empty_buffer(
-            "wg_test_out_g1",
-            crate::gpu::curve::G1_GPU_BYTES as u64,
-        );
-
-        let shader = gpu
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("Workgroup Reduction Test Shader"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(
-                    <Bls12 as GpuCurve>::MSM_SOURCE,
-                )),
-            });
-
-        let bgl = create_bind_group_layout(
-            &gpu.device,
-            "WG Test G1 BGL",
-            &[BufKind::ReadOnly, BufKind::ReadWrite],
-        );
-        let layout = pipeline_layout(&gpu.device, &[&bgl]);
-        let pipeline = create_pipeline(
-            &gpu.device,
-            "WG Test G1 Reduction",
-            &layout,
-            &shader,
-            "test_workgroup_reduction_g1",
-        );
-
-        let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("WG Test G1 BG"),
-            layout: &bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: in_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: out_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("WG Test G1 Encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("WG Test G1 Pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        gpu.queue.submit(Some(encoder.finish()));
-
-        let out_bytes = gpu
-            .read_buffer(&out_buf, crate::gpu::curve::G1_GPU_BYTES as u64)
-            .await
-            .expect("failed to read workgroup reduction output");
-
-        let parsed = <Bls12 as GpuCurve>::deserialize_g1(&out_bytes)
-            .expect("GPU workgroup tree reduction produced invalid curve point");
-        let gpu_affine: G1Affine = parsed.into();
-        assert_eq!(
-            gpu_affine, expected,
-            "GPU workgroup tree reduction mismatch: sum of i*G for i=1..64 should be 2080*G"
-        );
-    }
-}
+mod tests;
