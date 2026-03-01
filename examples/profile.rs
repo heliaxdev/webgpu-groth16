@@ -1,9 +1,9 @@
-//! GPU profiling harness using wgpu-profiler + puffin.
+//! GPU profiling harness using wgpu-profiler + tracy.
 //!
 //! Usage:
 //!   cargo run --release --example profile --features profiling -- [NUM_SQUARINGS] [ITERATIONS]
 //!
-//! Then open puffin_viewer (cargo install puffin_viewer && puffin_viewer) to see the flamegraph.
+//! Then connect Tracy profiler to see the flamegraph.
 //!
 //! Defaults: NUM_SQUARINGS=10000, ITERATIONS=5
 
@@ -68,16 +68,8 @@ fn main() {
     let num_squarings: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10_000);
     let iterations: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
 
-    // --- Puffin setup ---
-    puffin::set_scopes_on(true);
-    let server_addr = format!("127.0.0.1:{}", puffin_http::DEFAULT_PORT);
-    let _puffin_server =
-        puffin_http::Server::new(&server_addr).expect("Failed to start puffin server");
-    eprintln!("puffin server started on {server_addr}");
-    eprintln!("  run `puffin_viewer` in another terminal to view the flamegraph");
-    eprintln!();
-
     eprintln!("=== Groth16 GPU Profiling ===");
+    eprintln!("  Connect Tracy profiler to view the flamegraph");
     eprintln!("  constraints: {num_squarings}");
     eprintln!("  iterations:  {iterations}");
 
@@ -105,7 +97,7 @@ fn main() {
     // --- Warmup (shader compilation) ---
     eprintln!("  warmup...");
     {
-        puffin::GlobalProfiler::lock().new_frame();
+        tracy_client::Client::start();
         let circuit = RepeatedSquaringCircuit::<Scalar> {
             x: Some(Scalar::from(3u64)),
             num_squarings,
@@ -124,8 +116,7 @@ fn main() {
     let x = Scalar::from(3u64);
     let t_total = Instant::now();
     for i in 0..iterations {
-        puffin::GlobalProfiler::lock().new_frame();
-        puffin::profile_scope!("proof_iteration");
+        tracy_client::Client::running().expect("tracy client").frame_mark();
 
         let t_iter = Instant::now();
         let circuit = RepeatedSquaringCircuit::<Scalar> {
@@ -154,7 +145,7 @@ fn main() {
     );
 
     eprintln!();
-    eprintln!("Press Enter to exit (keep puffin_viewer open to inspect results)...");
+    eprintln!("Press Enter to exit (keep Tracy open to inspect results)...");
     let _ = std::io::stdin().read(&mut [0u8]);
 }
 

@@ -47,21 +47,17 @@ Montgomery form, bit-reversal permutation, and coset shift stages.
 ## Profiling
 
 GPU-level profiling is available via [wgpu-profiler](https://github.com/Wumpf/wgpu-profiler)
-and [puffin](https://github.com/EmbarkStudios/puffin), gated behind the `profiling` feature.
+and [Tracy](https://github.com/wolfpld/tracy), gated behind the `profiling` feature.
 
 ```bash
-# Install the puffin viewer (one-time)
-cargo install puffin_viewer
-
 # Run the profiling harness (default: 10K constraints, 5 iterations)
 cargo run --release --example profile --features profiling -- [NUM_SQUARINGS] [ITERATIONS]
 
-# In another terminal, connect the viewer
-puffin_viewer
+# Connect Tracy profiler to view the flamegraph
 ```
 
-The viewer connects to `127.0.0.1:8585` and shows a live flamegraph with per-compute-pass
-GPU timing (H pipeline stages, MSM bucket aggregation / tree reduction) alongside CPU scopes.
+Tracy shows a live flamegraph with per-compute-pass GPU timing (H pipeline stages,
+MSM bucket aggregation / tree reduction).
 
 Instrumented GPU passes:
 - **H pipeline** — `to_montgomery`, `intt_abc`, `coset_shift_abc`, `ntt_abc`,
