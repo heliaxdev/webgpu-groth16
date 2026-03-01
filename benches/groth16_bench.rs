@@ -5,6 +5,10 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use blstrs::{Bls12, Scalar};
 use ff::Field;
 use group::{Curve, Group};
+use masp_primitives::asset_type::AssetType;
+use masp_primitives::jubjub;
+use masp_primitives::sapling::{Diversifier, ProofGenerationKey};
+use masp_proofs::circuit::sapling::Output as SaplingOutputCircuit;
 use rand_core::OsRng;
 
 use webgpu_groth16::bellman;
@@ -260,6 +264,75 @@ fn bench_bucket_sorting(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// MASP Sapling Output circuit helpers
+// ---------------------------------------------------------------------------
+fn sample_sapling_output_circuit() -> SaplingOutputCircuit {
+    let asset_type = AssetType::new(b"benchmark-asset").expect("asset type creation failed");
+    let value_commitment = asset_type.value_commitment(42, jubjub::Fr::from(7u64));
+
+    let pgk = ProofGenerationKey {
+        ak: jubjub::SubgroupPoint::generator(),
+        nsk: jubjub::Fr::from(11u64),
+    };
+    let vk = pgk.to_viewing_key();
+    let mut payment_address = None;
+    for d0 in 0u8..=255 {
+        if let Some(addr) =
+            vk.to_payment_address(Diversifier([d0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
+        {
+            payment_address = Some(addr);
+            break;
+        }
+    }
+    let payment_address = payment_address.expect("failed to find a valid diversifier");
+
+    SaplingOutputCircuit {
+        value_commitment: Some(value_commitment),
+        asset_identifier: asset_type.identifier_bits(),
+        payment_address: Some(payment_address),
+        commitment_randomness: Some(jubjub::Fr::from(13u64)),
+        esk: Some(jubjub::Fr::from(17u64)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: MASP Sapling Output proof (real-world circuit, ~31K constraints)
+// ---------------------------------------------------------------------------
+fn bench_sapling_output(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut rng = OsRng;
+
+    let setup_circuit = SaplingOutputCircuit {
+        value_commitment: None,
+        asset_identifier: vec![None; 256],
+        payment_address: None,
+        commitment_randomness: None,
+        esk: None,
+    };
+    let params =
+        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+            .expect("param gen failed");
+    let ppk = prover::prepare_proving_key::<Bls12, Bls12>(&params);
+    let gpu = rt.block_on(GpuContext::<Bls12>::new()).expect("gpu init failed");
+
+    let mut group = c.benchmark_group("sapling_output");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(60));
+
+    group.bench_function("proof", |b| {
+        b.iter(|| {
+            let circuit = sample_sapling_output_circuit();
+            let mut rng = OsRng;
+            rt.block_on(prover::create_proof::<Bls12, Bls12, _, _>(
+                circuit, &params, &ppk, &gpu, &mut rng,
+            ))
+            .expect("proof failed");
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_full_proof,
@@ -267,5 +340,6 @@ criterion_group!(
     bench_msm_g1,
     bench_msm_batch,
     bench_bucket_sorting,
+    bench_sapling_output,
 );
 criterion_main!(benches);
