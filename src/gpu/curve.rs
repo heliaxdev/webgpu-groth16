@@ -222,6 +222,13 @@ pub trait GpuCurve: 'static {
         8
     }
 
+    /// Bucket width for GLV-accelerated G1 MSM (~128-bit sub-scalars).
+    /// With GLV, each 255-bit scalar is decomposed into two ~128-bit sub-scalars,
+    /// halving the number of Pippenger windows.
+    fn glv_bucket_width() -> usize {
+        13
+    }
+
     /// Compute a primitive 2^n-th root of unity in the scalar field Fr.
     /// Used for NTT (Number Theoretic Transform) in H-polynomial evaluation.
     fn root_of_unity(n: usize) -> Self::Scalar;

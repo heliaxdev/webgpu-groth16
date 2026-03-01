@@ -33,6 +33,6 @@ If a new feature or optimization is added, the benchmark results must be documen
 - An explanation of what was changed and why
 - Before/after benchmark numbers with the speedup factor
 
-If an optimization is attempted but shows no improvement or causes regressions, document it in the **Discarded optimizations** section of `README.md` instead, explaining the idea and why it was discarded.
+If an optimization is attempted but shows no improvement or causes regressions, document it in the **Discarded optimizations** section of `README.md` instead, explaining the idea and why it was discarded. Always try to optimize the `bench_gpu_sapling_output` real world benchmark, this is what we want need to make faster.
 
 After any change (feature, optimization, or bug fix), update or add a **Latest Benchmark Results** section in `README.md` with the current benchmark numbers so the README always reflects the up-to-date performance of the prover.

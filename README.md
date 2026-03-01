@@ -107,13 +107,13 @@ Signed-digit scalar decomposition and bucket assignment (CPU-only, no GPU).
 Real-world proof using the MASP Sapling Output circuit (31,211 constraints,
 n=32,768).
 
-| Phase                  | Time      |
-|------------------------|-----------|
-| Synthesis              | 14.0 ms   |
-| H polynomial (GPU)     | 152 ms    |
-| Bucket sorting (CPU)   | 97.4 ms   |
-| MSM batch (GPU)        | 16.3 s    |
-| **Total proof**        | **16.6 s** |
+| Phase                       | Time      |
+|-----------------------------|-----------|
+| Synthesis                   | 14.0 ms   |
+| H polynomial (GPU)          | 152 ms    |
+| Bucket sorting (CPU, GLV)   | 90.0 ms   |
+| MSM batch (GPU)             | 16.2 s    |
+| **Total proof**             | **16.6 s** |
 
 Proving key sizes: a=28,759, b_g1=21,384, l=30,896, h=32,767, b_g2=21,384.
 
@@ -270,6 +270,22 @@ The aggregate phase keeps fast Jacobian mixed addition (unchanged); `weight_buck
 converts Jacobian→projective inline before `scalar_mul_g2`, then the parallel
 `subsum_phase1_g2`/`subsum_phase2_g2` tree reduction sums the pre-weighted buckets.
 - **sapling_output:** 16.9s → 16.6s (-1.8%)
+
+### 18. GLV endomorphism for G1 MSMs
+Integrated the pre-existing GLV (Gallant-Lambert-Vanstone) endomorphism optimization
+into the proof MSM path. GLV decomposes each 255-bit scalar k into k1·P + k2·φ(P)
+where k1, k2 are ~128-bit sub-scalars and φ(x,y) = (β·x, y) is a cheap endomorphism
+(single Fq multiplication). This halves the number of Pippenger windows from ~20 to ~10
+while doubling the point count (N → 2N), keeping aggregate work constant.
+
+The endomorphism bases φ(P) are pre-computed in `PreparedProvingKey` (one-time cost),
+and `compute_glv_bucket_sorting` handles GLV decomposition, conditional negation, and
+signed-digit window decomposition for the ~128-bit sub-scalars.
+
+At current point set sizes (~21K), the aggregate pass dominates and the window count
+reduction has negligible impact. The optimization becomes more significant at larger
+scales where weight+subsum represent a larger fraction of total GPU compute.
+- **sapling_output:** 16.6s → 16.6s (neutral at ~21K points)
 
 ## Discarded optimizations
 

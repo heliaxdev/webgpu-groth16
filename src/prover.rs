@@ -8,7 +8,8 @@ use ff::{Field, PrimeField};
 use rand_core::RngCore;
 
 use crate::bellman;
-use crate::bucket::{BucketData, compute_bucket_sorting, compute_bucket_sorting_with_width};
+use crate::bucket::{BucketData, compute_bucket_sorting_with_width, compute_glv_bucket_sorting};
+use crate::glv;
 use crate::gpu::{GpuContext, HPolyBuffers, MsmBuffers, curve::{GpuCurve, G1_GPU_BYTES, G2_GPU_BYTES}};
 
 struct GpuConstraintSystem<G: GpuCurve> {
@@ -142,11 +143,18 @@ fn lc_to_vec<S: PrimeField>(lc: bellman::LinearCombination<S>) -> Vec<(bellman::
 }
 
 /// Pre-serialized proving key bases for GPU. Avoids re-serialization per proof.
+///
+/// Includes GLV endomorphism bases φ(P) for G1 sets, pre-computed once to
+/// amortize the endomorphism cost across proofs.
 pub struct PreparedProvingKey<G: GpuCurve> {
     pub a_bytes: Vec<u8>,
+    pub a_phi_bytes: Vec<u8>,
     pub b_g1_bytes: Vec<u8>,
+    pub b_g1_phi_bytes: Vec<u8>,
     pub l_bytes: Vec<u8>,
+    pub l_phi_bytes: Vec<u8>,
     pub h_bytes: Vec<u8>,
+    pub h_phi_bytes: Vec<u8>,
     pub b_g2_bytes: Vec<u8>,
     _marker: std::marker::PhantomData<G>,
 }
@@ -155,6 +163,15 @@ fn serialize_g1_bases<G: GpuCurve>(bases: &[G::G1Affine]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(bases.len() * G1_GPU_BYTES);
     for base in bases {
         bytes.extend_from_slice(&G::serialize_g1(base));
+    }
+    bytes
+}
+
+fn serialize_g1_phi_bases<G: GpuCurve>(bases: &[G::G1Affine]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(bases.len() * G1_GPU_BYTES);
+    for base in bases {
+        let base_bytes = G::serialize_g1(base);
+        bytes.extend_from_slice(&glv::endomorphism_g1_bytes(&base_bytes));
     }
     bytes
 }
@@ -181,9 +198,13 @@ where
 {
     PreparedProvingKey {
         a_bytes: serialize_g1_bases::<G>(&pk.a),
+        a_phi_bytes: serialize_g1_phi_bases::<G>(&pk.a),
         b_g1_bytes: serialize_g1_bases::<G>(&pk.b_g1),
+        b_g1_phi_bytes: serialize_g1_phi_bases::<G>(&pk.b_g1),
         l_bytes: serialize_g1_bases::<G>(&pk.l),
+        l_phi_bytes: serialize_g1_phi_bases::<G>(&pk.l),
         h_bytes: serialize_g1_bases::<G>(&pk.h),
+        h_phi_bytes: serialize_g1_phi_bases::<G>(&pk.h),
         b_g2_bytes: serialize_g2_bases::<G>(&pk.b_g2),
         _marker: std::marker::PhantomData,
     }
@@ -225,8 +246,10 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     #[cfg(feature = "timing")]
     let t_start = std::time::Instant::now();
 
+    let glv_c = G::glv_bucket_width();
     let bases_bytes = serialize_g1_bases::<G>(bases);
-    let bd = compute_bucket_sorting::<G>(scalars);
+    let phi_bytes = serialize_g1_phi_bases::<G>(bases);
+    let (glv_bytes, bd) = compute_glv_bucket_sorting::<G>(scalars, &bases_bytes, &phi_bytes, glv_c);
     if bd.num_active_buckets == 0 {
         return Ok(G::g1_identity());
     }
@@ -234,7 +257,7 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     #[cfg(feature = "timing")]
     let t_bucket = std::time::Instant::now();
 
-    let bases_buf = gpu.create_storage_buffer("Bases", &bases_bytes);
+    let bases_buf = gpu.create_storage_buffer("Bases", &glv_bytes);
     let indices_buf = gpu.create_storage_buffer("Indices", bytemuck::cast_slice(&bd.base_indices));
     let ptrs_buf = gpu.create_storage_buffer("Ptrs", bytemuck::cast_slice(&bd.bucket_pointers));
     let sizes_buf = gpu.create_storage_buffer("Sizes", bytemuck::cast_slice(&bd.bucket_sizes));
@@ -408,25 +431,30 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
     b2_bases: &[G::G2Affine],
     b2_scalars: &[G::Scalar],
 ) -> Result<(G::G1, G::G1, G::G1, G::G1, G::G2)> {
+    let glv_c = G::glv_bucket_width();
     let a_bases_bytes = serialize_g1_bases::<G>(a_bases);
+    let a_phi_bytes = serialize_g1_phi_bases::<G>(a_bases);
     let b1_bases_bytes = serialize_g1_bases::<G>(b1_bases);
+    let b1_phi_bytes = serialize_g1_phi_bases::<G>(b1_bases);
     let l_bases_bytes = serialize_g1_bases::<G>(l_bases);
+    let l_phi_bytes = serialize_g1_phi_bases::<G>(l_bases);
     let h_bases_bytes = serialize_g1_bases::<G>(h_bases);
+    let h_phi_bytes = serialize_g1_phi_bases::<G>(h_bases);
 
-    let a_bd = compute_bucket_sorting::<G>(a_scalars);
-    let b_bd = compute_bucket_sorting::<G>(b_scalars);
-    let l_bd = compute_bucket_sorting::<G>(l_scalars);
-    let h_bd = compute_bucket_sorting::<G>(h_scalars);
+    let (a_glv, a_bd) = compute_glv_bucket_sorting::<G>(a_scalars, &a_bases_bytes, &a_phi_bytes, glv_c);
+    let (b1_glv, b_bd) = compute_glv_bucket_sorting::<G>(b_scalars, &b1_bases_bytes, &b1_phi_bytes, glv_c);
+    let (l_glv, l_bd) = compute_glv_bucket_sorting::<G>(l_scalars, &l_bases_bytes, &l_phi_bytes, glv_c);
+    let (h_glv, h_bd) = compute_glv_bucket_sorting::<G>(h_scalars, &h_bases_bytes, &h_phi_bytes, glv_c);
     let b2_bd = compute_bucket_sorting_with_width::<G>(b2_scalars, G::g2_bucket_width());
     gpu_msm_batch_bytes::<G>(
         gpu,
-        &a_bases_bytes,
+        &a_glv,
         a_bd,
-        &b1_bases_bytes,
+        &b1_glv,
         b_bd,
-        &l_bases_bytes,
+        &l_glv,
         l_bd,
-        &h_bases_bytes,
+        &h_glv,
         h_bd,
         &serialize_g2_bases::<G>(b2_bases),
         b2_bd,
@@ -821,33 +849,44 @@ where
     eprintln!("[proof] h_poly submit: {:?}", t_phase.elapsed());
 
     let t_phase = std::time::Instant::now();
-    // Pre-compute bucket data for non-H MSMs while GPU computes H
-    let a_bd = compute_bucket_sorting::<G>(&a_assignment);
-    let b1_bd = compute_bucket_sorting::<G>(&b_assignment);
-    let l_bd = compute_bucket_sorting::<G>(&cs.aux);
+    // Pre-compute GLV bucket data for non-H G1 MSMs while GPU computes H.
+    // GLV decomposes each scalar k into k1·P + k2·φ(P) with ~128-bit sub-scalars,
+    // halving the number of Pippenger windows.
+    let glv_c = G::glv_bucket_width();
+    let (a_glv_bytes, a_bd) = compute_glv_bucket_sorting::<G>(
+        &a_assignment, &ppk.a_bytes, &ppk.a_phi_bytes, glv_c,
+    );
+    let (b1_glv_bytes, b1_bd) = compute_glv_bucket_sorting::<G>(
+        &b_assignment, &ppk.b_g1_bytes, &ppk.b_g1_phi_bytes, glv_c,
+    );
+    let (l_glv_bytes, l_bd) = compute_glv_bucket_sorting::<G>(
+        &cs.aux, &ppk.l_bytes, &ppk.l_phi_bytes, glv_c,
+    );
     let b2_bd = compute_bucket_sorting_with_width::<G>(&b_assignment, G::g2_bucket_width());
-    eprintln!("[proof] bucket sorting (4x): {:?}", t_phase.elapsed());
+    eprintln!("[proof] bucket sorting (4x GLV): {:?}", t_phase.elapsed());
 
     let t_phase = std::time::Instant::now();
     // Await H result (GPU likely already done by now)
     let h_coeffs = read_h_poly_result::<G>(gpu, h_pending).await?;
     eprintln!("[proof] h_poly read: {:?}", t_phase.elapsed());
 
-    // H bucket data depends on h_coeffs
+    // H bucket data depends on h_coeffs — also uses GLV
     let t_phase = std::time::Instant::now();
-    let h_bd = compute_bucket_sorting::<G>(&h_coeffs[..pk.h.len()]);
-    eprintln!("[proof] h bucket sorting: {:?}", t_phase.elapsed());
+    let (h_glv_bytes, h_bd) = compute_glv_bucket_sorting::<G>(
+        &h_coeffs[..pk.h.len()], &ppk.h_bytes, &ppk.h_phi_bytes, glv_c,
+    );
+    eprintln!("[proof] h bucket sorting (GLV): {:?}", t_phase.elapsed());
 
     let t_phase = std::time::Instant::now();
     let (a_msm, b_g1_msm, l_msm, h_msm, b_g2_msm) = gpu_msm_batch_bytes::<G>(
         gpu,
-        &ppk.a_bytes,
+        &a_glv_bytes,
         a_bd,
-        &ppk.b_g1_bytes,
+        &b1_glv_bytes,
         b1_bd,
-        &ppk.l_bytes,
+        &l_glv_bytes,
         l_bd,
-        &ppk.h_bytes,
+        &h_glv_bytes,
         h_bd,
         &ppk.b_g2_bytes,
         b2_bd,
