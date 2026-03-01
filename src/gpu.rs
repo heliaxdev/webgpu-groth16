@@ -28,8 +28,10 @@ const NTT_TILE_SIZE: u32 = 512;
 /// Matches `@workgroup_size(64)` in msm.wgsl.
 const MSM_WORKGROUP_SIZE: u32 = 64;
 
-/// Number of workgroup chunks per window in G1 two-phase subsum reduction.
-const G1_SUBSUM_CHUNKS_PER_WINDOW: u32 = 32;
+/// G1 subsum uses single-pass parallel shared-memory tree reduction:
+/// one workgroup of 64 threads per window. chunks_per_window=1 since Phase 1
+/// produces the final window sum directly.
+const G1_SUBSUM_CHUNKS_PER_WINDOW: u32 = 1;
 
 /// Number of workgroup chunks per window in G2 two-phase subsum reduction.
 const G2_SUBSUM_CHUNKS_PER_WINDOW: u32 = 32;
@@ -1018,6 +1020,118 @@ mod tests {
         assert_eq!(
             gpu_affine_double, expected_double,
             "GPU add_g2_complete G+G (doubling) mismatch"
+        );
+    }
+
+    /// Test: parallel tree reduction of 64 G1 points in var<workgroup> memory.
+    ///
+    /// Exercises `var<workgroup> shared: array<PointG1, 64>` with `@workgroup_size(64)`
+    /// to diagnose whether Metal threadgroup memory works correctly with 360-byte
+    /// PointG1 structs.
+    #[tokio::test]
+    async fn test_g1_workgroup_tree_reduction() {
+        use group::{Curve, Group};
+
+        let gpu = GpuContext::<Bls12>::new()
+            .await
+            .expect("failed to init gpu context");
+
+        let generator = G1Affine::generator();
+        let gen_proj: blstrs::G1Projective = generator.into();
+
+        // Generate 64 distinct points: i*G for i=1..=64
+        let mut points = Vec::with_capacity(64);
+        let mut running = gen_proj;
+        for _ in 0..64 {
+            points.push(running.to_affine());
+            running += gen_proj;
+        }
+
+        // Compute expected sum on CPU: sum(i*G, i=1..64) = (64*65/2)*G = 2080*G
+        let mut cpu_sum = blstrs::G1Projective::identity();
+        for p in &points {
+            let proj: blstrs::G1Projective = (*p).into();
+            cpu_sum += proj;
+        }
+        let expected: G1Affine = cpu_sum.to_affine();
+
+        // Serialize 64 points to GPU format
+        let mut in_bytes = Vec::with_capacity(64 * crate::gpu::curve::G1_GPU_BYTES);
+        for p in &points {
+            in_bytes.extend_from_slice(&<Bls12 as GpuCurve>::serialize_g1(p));
+        }
+
+        let in_buf = gpu.create_storage_buffer("wg_test_in_g1", &in_bytes);
+        let out_buf = gpu.create_empty_buffer(
+            "wg_test_out_g1",
+            crate::gpu::curve::G1_GPU_BYTES as u64,
+        );
+
+        let shader = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Workgroup Reduction Test Shader"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(
+                    <Bls12 as GpuCurve>::MSM_SOURCE,
+                )),
+            });
+
+        let bgl = create_bind_group_layout(
+            &gpu.device,
+            "WG Test G1 BGL",
+            &[BufKind::ReadOnly, BufKind::ReadWrite],
+        );
+        let layout = pipeline_layout(&gpu.device, &[&bgl]);
+        let pipeline = create_pipeline(
+            &gpu.device,
+            "WG Test G1 Reduction",
+            &layout,
+            &shader,
+            "test_workgroup_reduction_g1",
+        );
+
+        let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("WG Test G1 BG"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: in_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: out_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("WG Test G1 Encoder"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("WG Test G1 Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        gpu.queue.submit(Some(encoder.finish()));
+
+        let out_bytes = gpu
+            .read_buffer(&out_buf, crate::gpu::curve::G1_GPU_BYTES as u64)
+            .await
+            .expect("failed to read workgroup reduction output");
+
+        let parsed = <Bls12 as GpuCurve>::deserialize_g1(&out_bytes)
+            .expect("GPU workgroup tree reduction produced invalid curve point");
+        let gpu_affine: G1Affine = parsed.into();
+        assert_eq!(
+            gpu_affine, expected,
+            "GPU workgroup tree reduction mismatch: sum of i*G for i=1..64 should be 2080*G"
         );
     }
 }

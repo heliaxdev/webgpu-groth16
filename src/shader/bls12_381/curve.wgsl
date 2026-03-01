@@ -5,9 +5,9 @@
 // ============================================================================
 
 struct PointG1 {
-    x: U384,
-    y: U384,
-    z: U384,
+    @size(128) x: U384,
+    @size(128) y: U384,
+    @size(128) z: U384,
 }
 
 // Computes 2 * P in Jacobian coordinates.

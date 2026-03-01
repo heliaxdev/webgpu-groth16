@@ -301,31 +301,56 @@ original (non-chunked) bucket metadata, unchanged.
 - **sapling_output:** 16.6s → 1.10s (15.1x speedup)
 - **proof/n=100000:** 2.83s → 2.85s (neutral — uniform scalars trigger no chunking)
 
+### 20. Parallel shared-memory G1 tree reduction (fix Metal threadgroup alignment)
+The G1 tree reduction (`tree_reduction_ph1`) was the biggest bottleneck in the MSM
+weight+subsum pipeline, accounting for ~43ms per G1 MSM pass. It ran with
+`@workgroup_size(1)` — one thread per workgroup — because an earlier attempt at
+parallel tree reduction using `var<workgroup> shared: array<PointG1, 64>` with
+`@workgroup_size(64)` produced incorrect results on Metal.
+
+The root cause was NOT a Metal GPU bug. The unpadded PointG1 struct (360 bytes) has
+an array stride that is not 16-byte aligned (360 % 16 = 8). Metal's threadgroup memory
+requires 16-byte-aligned strides. The fix: add `@size(128)` to each PointG1 struct
+member in WGSL, padding each Fq coordinate from 120 to 128 bytes. This makes
+PointG1 = 384 bytes (384 % 16 = 0), fixing the alignment for threadgroup arrays.
+
+With the fix, the parallel tree reduction is restored: one workgroup of 64 threads per
+window, with a 6-stage binary tree reduction in shared memory. Each thread sums a
+strided subset of weighted buckets, then the tree reduction produces the final window sum.
+
+- **msm_g1/n=100:** 28.0 ms → 21.7 ms (1.3x speedup)
+- **msm_g1/n=1000:** 52.3 ms → 38.6 ms (1.35x speedup)
+- **msm_g1/n=10000:** 125 ms → 99.6 ms (1.26x speedup)
+- **msm_g1/n=100000:** 367 ms → 341 ms (1.08x speedup)
+- **proof/n=1000:** 266 ms → 234 ms (1.14x speedup)
+- **proof/n=10000:** 690 ms → 612 ms (1.13x speedup)
+- **sapling_output:** 1.04s → 1.02s (1.02x speedup)
+
 ## Latest Benchmark Results
 
 Measured on Apple M3 Max. Criterion median times.
 
 | Benchmark | Time |
 |---|---|
-| proof/n=2 | 85.5 ms |
-| proof/n=1000 | 266 ms |
-| proof/n=10000 | 690 ms |
-| proof/n=100000 | 2.47 s |
-| msm_g1/n=100 | 28.0 ms |
-| msm_g1/n=1000 | 52.3 ms |
-| msm_g1/n=10000 | 125 ms |
-| msm_g1/n=100000 | 367 ms |
-| msm_batch/5x100 | 165 ms |
-| msm_batch/5x1000 | 259 ms |
-| msm_batch/5x10000 | 642 ms |
-| msm_batch/5x100000 | 2.10 s |
-| bucket_sorting/n=1000 | 2.38 ms |
-| bucket_sorting/n=10000 | 17.8 ms |
-| bucket_sorting/n=100000 | 139 ms |
-| ntt/h_poly_n=8 | 4.04 ms |
-| ntt/h_poly_n=1024 | 11.4 ms |
+| proof/n=2 | 86.6 ms |
+| proof/n=1000 | 234 ms |
+| proof/n=10000 | 612 ms |
+| proof/n=100000 | 2.41 s |
+| msm_g1/n=100 | 21.7 ms |
+| msm_g1/n=1000 | 38.6 ms |
+| msm_g1/n=10000 | 99.6 ms |
+| msm_g1/n=100000 | 341 ms |
+| msm_batch/5x100 | 140 ms |
+| msm_batch/5x1000 | 232 ms |
+| msm_batch/5x10000 | 560 ms |
+| msm_batch/5x100000 | 2.04 s |
+| bucket_sorting/n=1000 | 2.35 ms |
+| bucket_sorting/n=10000 | 17.9 ms |
+| bucket_sorting/n=100000 | 138 ms |
+| ntt/h_poly_n=8 | 3.95 ms |
+| ntt/h_poly_n=1024 | 11.3 ms |
 | ntt/h_poly_n=16384 | 112 ms |
-| sapling_output/proof | 1.04 s |
+| sapling_output/proof | 1.02 s |
 
 ## Discarded optimizations
 
@@ -426,7 +451,7 @@ in two O(N) addition passes instead of one, producing a net regression of +33ms
 | tree_reduction_ph1 | 43.0 | 43.0 |
 | **Total** | **65.0** | **98.8** |
 
-The fundamental limitation is that point additions dominate the cost at `@workgroup_size(1)`
-(~9µs per G1 addition), and any approach that adds an O(N) scan pass before the existing
-O(N) tree reduction cannot be faster — regardless of how cheap the scalar multiplication
-becomes.
+The fundamental limitation is that point additions dominate GPU compute cost, and any
+approach that adds an O(N) scan pass before the existing O(N) tree reduction cannot be
+faster — regardless of how cheap the scalar multiplication becomes. (Note: the
+`@workgroup_size(1)` constraint has since been resolved by OPT-20.)

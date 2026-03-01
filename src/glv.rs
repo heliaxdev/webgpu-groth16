@@ -24,7 +24,9 @@ use blstrs::{Fp, G1Affine};
 use ff::PrimeField;
 use group::prime::PrimeCurveAffine;
 
-use crate::gpu::curve::{fq_13bit_to_bytes, fq_bytes_to_13bit, FQ_GPU_BYTES, G1_GPU_BYTES};
+use crate::gpu::curve::{
+    fq_13bit_to_bytes, fq_bytes_to_13bit, FQ_GPU_BYTES, FQ_GPU_PADDED_BYTES, G1_GPU_BYTES,
+};
 
 // ============================================================================
 // BLS12-381 GLV constants
@@ -192,7 +194,8 @@ pub fn endomorphism_g1(p: &G1Affine) -> G1Affine {
 /// This is the byte-level equivalent of [`endomorphism_g1`], operating directly
 /// on the 30×13-bit limb GPU representation to avoid full deserialize/serialize.
 ///
-/// Format: x[120] || y[120] || z[120] = 360 bytes (each coord is 30 LE u32s).
+/// Format: x[120+8pad] || y[120+8pad] || z[120+8pad] = 384 bytes (each coord is
+/// 30 LE u32s + 8 bytes padding from `@size(128)` in WGSL).
 /// Returns new serialized bytes with x replaced by β·x.
 pub fn endomorphism_g1_bytes(point_bytes: &[u8]) -> [u8; G1_GPU_BYTES] {
     debug_assert_eq!(point_bytes.len(), G1_GPU_BYTES);
@@ -200,12 +203,16 @@ pub fn endomorphism_g1_bytes(point_bytes: &[u8]) -> [u8; G1_GPU_BYTES] {
     let mut result = [0u8; G1_GPU_BYTES];
     result.copy_from_slice(point_bytes);
 
-    // Point at infinity (z = 0): return as-is
-    if point_bytes[2 * FQ_GPU_BYTES..G1_GPU_BYTES].iter().all(|&b| b == 0) {
+    // Point at infinity (z = 0): check z data bytes (120 bytes at offset 2*128)
+    let z_start = 2 * FQ_GPU_PADDED_BYTES;
+    if point_bytes[z_start..z_start + FQ_GPU_BYTES]
+        .iter()
+        .all(|&b| b == 0)
+    {
         return result;
     }
 
-    // Convert x from 13-bit limb format (120 bytes) to 48-byte LE
+    // Convert x from 13-bit limb format (120 bytes at offset 0) to 48-byte LE
     let x_le = fq_13bit_to_bytes(&point_bytes[0..FQ_GPU_BYTES]);
     let x_le_arr: [u8; 48] = x_le.try_into().unwrap();
     let x = Fp::from_bytes_le(&x_le_arr).expect("valid Fp x-coordinate");
@@ -227,7 +234,8 @@ pub fn endomorphism_g1_bytes(point_bytes: &[u8]) -> [u8; G1_GPU_BYTES] {
 
 /// Negates a serialized G1 affine point in-place: (x, y, z) → (x, q−y, z).
 ///
-/// The point is in the GPU 13-bit limb format: x[120] || y[120] || z[120] = 360 bytes.
+/// The point is in the GPU 13-bit limb format with `@size(128)` padding:
+/// x[120+8pad] || y[120+8pad] || z[120+8pad] = 384 bytes.
 pub fn negate_g1_bytes(point_bytes: &mut [u8]) {
     debug_assert!(point_bytes.len() == G1_GPU_BYTES);
 
@@ -236,9 +244,10 @@ pub fn negate_g1_bytes(point_bytes: &mut [u8]) {
         return;
     }
 
-    // y is at bytes [FQ_GPU_BYTES..2*FQ_GPU_BYTES] in 13-bit limb format.
+    // y is at bytes [FQ_GPU_PADDED_BYTES..FQ_GPU_PADDED_BYTES+FQ_GPU_BYTES] in 13-bit limb format.
     // Convert y from 13-bit (120 bytes) to 48-byte LE, negate, convert back.
-    let y_le = fq_13bit_to_bytes(&point_bytes[FQ_GPU_BYTES..2 * FQ_GPU_BYTES]);
+    let y_start = FQ_GPU_PADDED_BYTES;
+    let y_le = fq_13bit_to_bytes(&point_bytes[y_start..y_start + FQ_GPU_BYTES]);
 
     // Compute q - y using 384-bit subtraction with borrow.
     let mut neg_y_le = [0u8; 48];
@@ -259,7 +268,7 @@ pub fn negate_g1_bytes(point_bytes: &mut [u8]) {
 
     // Convert negated y back to 13-bit limb format and write in-place.
     let neg_y_13bit = fq_bytes_to_13bit(&neg_y_le);
-    point_bytes[FQ_GPU_BYTES..2 * FQ_GPU_BYTES].copy_from_slice(&neg_y_13bit);
+    point_bytes[y_start..y_start + FQ_GPU_BYTES].copy_from_slice(&neg_y_13bit);
 }
 
 /// Decomposes a 128-bit unsigned integer into c-bit windows.

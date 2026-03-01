@@ -38,8 +38,12 @@ const ZCASH_METADATA_MASK: u8 = 0b0001_1111;
 
 /// Size of a single Fq element in GPU 13-bit limb format: 30 limbs × 4 bytes = 120 bytes.
 pub const FQ_GPU_BYTES: usize = 120;
-/// Size of a G1 point in GPU format (Jacobian: x, y, z): 3 × 120 = 360 bytes.
-pub const G1_GPU_BYTES: usize = 3 * FQ_GPU_BYTES;
+/// Padded size of each Fq member in PointG1 due to `@size(128)` in WGSL.
+pub const FQ_GPU_PADDED_BYTES: usize = 128;
+/// Size of a G1 point in GPU format (Jacobian: x, y, z): 3 × 128 = 384 bytes.
+/// Each coordinate is padded from 120 to 128 bytes via `@size(128)` in WGSL, ensuring
+/// 16-byte-aligned array strides in Metal threadgroup memory (384 % 16 = 0).
+pub const G1_GPU_BYTES: usize = 3 * FQ_GPU_PADDED_BYTES;
 /// Size of a G2 point in GPU format (Jacobian over Fq2: x.c0, x.c1, y.c0, y.c1, z.c0, z.c1):
 /// 6 × 120 = 720 bytes.
 pub const G2_GPU_BYTES: usize = 6 * FQ_GPU_BYTES;
@@ -309,11 +313,12 @@ impl GpuCurve for blstrs::Bls12 {
         include_str!("../shader/bls12_381/poly_ops.wgsl"),
     );
 
-    /// Serialize affine G1 → 360-byte GPU Jacobian.
+    /// Serialize affine G1 → 384-byte GPU Jacobian.
     ///
-    /// Layout: `[x: 120B] [y: 120B] [z: 120B]` where each coordinate is
-    /// 30×13-bit limbs (u32 LE). Z = 1 (not in Montgomery form — the GPU's
-    /// `to_montgomery_bases` kernel converts later).
+    /// Layout: `[x: 120B + 8B pad] [y: 120B + 8B pad] [z: 120B + 8B pad]` where
+    /// each coordinate is 30×13-bit limbs (u32 LE) padded to 128 bytes via `@size(128)`
+    /// in WGSL. Z = 1 (not in Montgomery form — the GPU's `to_montgomery_bases`
+    /// kernel converts later).
     fn serialize_g1(point: &Self::G1Affine) -> Vec<u8> {
         let is_inf: bool = point.is_identity().into();
         if is_inf {
@@ -329,8 +334,11 @@ impl GpuCurve for blstrs::Bls12 {
 
         let mut wgsl_bytes = Vec::with_capacity(G1_GPU_BYTES);
         wgsl_bytes.extend_from_slice(&be_coord_to_gpu_limbs(&uncompressed[..FQ_COORD_SIZE]));
+        wgsl_bytes.extend_from_slice(&[0u8; 8]); // @size(128) padding for x
         wgsl_bytes.extend_from_slice(&be_coord_to_gpu_limbs(&uncompressed[FQ_COORD_SIZE..2 * FQ_COORD_SIZE]));
+        wgsl_bytes.extend_from_slice(&[0u8; 8]); // @size(128) padding for y
         wgsl_bytes.extend_from_slice(&fq_bytes_to_13bit(&z_le));
+        wgsl_bytes.extend_from_slice(&[0u8; 8]); // @size(128) padding for z
         wgsl_bytes
     }
 
@@ -372,20 +380,22 @@ impl GpuCurve for blstrs::Bls12 {
         wgsl_bytes
     }
 
-    /// Deserialize 360-byte GPU Jacobian → projective G1.
+    /// Deserialize 384-byte GPU Jacobian → projective G1.
     ///
     /// The GPU writes results in standard (non-Montgomery) affine form, so only
     /// x and y need to be recovered. Z = 0 signals the point at infinity.
+    /// Each coordinate occupies 128 bytes (120 data + 8 padding from `@size(128)`).
     fn deserialize_g1(bytes: &[u8]) -> anyhow::Result<Self::G1> {
         if bytes.len() != G1_GPU_BYTES {
             anyhow::bail!("Invalid G1 byte length from GPU: {}", bytes.len());
         }
-        if is_all_zero(&bytes[2 * FQ_GPU_BYTES..3 * FQ_GPU_BYTES]) {
+        // Z coordinate starts at offset 2*128=256, check 120 data bytes for infinity
+        if is_all_zero(&bytes[2 * FQ_GPU_PADDED_BYTES..2 * FQ_GPU_PADDED_BYTES + FQ_GPU_BYTES]) {
             return Ok(Self::G1::identity());
         }
 
         let x_be = gpu_limbs_to_be_coord(&bytes[0..FQ_GPU_BYTES]);
-        let y_be = gpu_limbs_to_be_coord(&bytes[FQ_GPU_BYTES..2 * FQ_GPU_BYTES]);
+        let y_be = gpu_limbs_to_be_coord(&bytes[FQ_GPU_PADDED_BYTES..FQ_GPU_PADDED_BYTES + FQ_GPU_BYTES]);
 
         let mut uncompressed = [0u8; 96];
         uncompressed[..FQ_COORD_SIZE].copy_from_slice(&x_be);
@@ -553,7 +563,7 @@ impl GpuCurve for blstrs::Bls12 {
 
 #[cfg(test)]
 mod tests {
-    use super::{GpuCurve, FQ_GPU_BYTES, G1_GPU_BYTES, G2_GPU_BYTES};
+    use super::{GpuCurve, FQ_GPU_BYTES, FQ_GPU_PADDED_BYTES, G1_GPU_BYTES, G2_GPU_BYTES};
     use blstrs::{Bls12, G1Affine, G2Affine, Scalar};
     use ff::{PrimeField, PrimeFieldBits};
     use group::Group;
@@ -801,7 +811,7 @@ mod tests {
         }
     }
 
-    /// G1 serialization byte layout: x(48 LE) || y(48 LE) || z(48 LE).
+    /// G1 serialization byte layout: x(120+8pad) || y(120+8pad) || z(120+8pad).
     #[test]
     fn g1_serialization_byte_layout() {
         let g = G1Affine::generator();
@@ -811,10 +821,11 @@ mod tests {
 
         // x and y should not be all zeros for the generator
         assert!(!bytes[0..FQ_GPU_BYTES].iter().all(|&b| b == 0));
-        assert!(!bytes[FQ_GPU_BYTES..2 * FQ_GPU_BYTES].iter().all(|&b| b == 0));
+        let y_start = FQ_GPU_PADDED_BYTES;
+        assert!(!bytes[y_start..y_start + FQ_GPU_BYTES].iter().all(|&b| b == 0));
 
-        // z = 1 in 13-bit format: limb[0] = 1 (bytes [0..4] = [1,0,0,0]), rest zeros
-        let z_start = 2 * FQ_GPU_BYTES;
+        // z = 1 in 13-bit format: limb[0] = 1, rest zeros (including padding)
+        let z_start = 2 * FQ_GPU_PADDED_BYTES;
         assert_eq!(bytes[z_start], 1);
         assert!(bytes[z_start + 1..G1_GPU_BYTES].iter().all(|&b| b == 0));
     }

@@ -413,10 +413,15 @@ fn subsum_accumulation_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     window_sums_g1[window_id] = store_g1(sum);
 }
 
-// ==== Multi-Workgroup G1 Tree Reduction ====
+// ==== G1 Parallel Shared-Memory Tree Reduction ====
 //
-// Phase 1 + Phase 2: both use workgroup_size(1) without shared memory
-// to avoid Metal var<workgroup> corruption with 360-byte PointG1.
+// Single-pass: one workgroup of 64 threads per window. Each thread sums a
+// strided subset of weighted buckets, then a 6-stage binary tree reduction
+// in var<workgroup> memory produces the final window sum.
+//
+// The @size(128) padding on PointG1 members ensures 16-byte-aligned array
+// strides in Metal threadgroup memory (384 % 16 = 0), fixing the data
+// corruption that occurred with the unpadded 360-byte layout.
 
 struct SubsumParams {
     chunks_per_window: u32,
@@ -425,37 +430,57 @@ struct SubsumParams {
     _pad3: u32,
 }
 
+const G1_SUBSUM_WG_SIZE: u32 = 64u;
+var<workgroup> subsum_shared_g1: array<PointG1, 64>;
+
 @group(0) @binding(0) var<storage, read> agg_ph1_g1: array<PointG1>;
 @group(0) @binding(1) var<storage, read> win_starts_ph1: array<u32>;
 @group(0) @binding(2) var<storage, read> win_counts_ph1: array<u32>;
 @group(0) @binding(3) var<storage, read_write> partial_sums_g1: array<PointG1>;
 @group(0) @binding(4) var<uniform> subsum_params_ph1: SubsumParams;
 
-@compute @workgroup_size(1)
+@compute @workgroup_size(64)
 fn subsum_phase1_g1(
-    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) wg_id: vec3<u32>,
 ) {
-    let chunks = subsum_params_ph1.chunks_per_window;
-    let flat_id = global_id.x;
-    let window_id = flat_id / chunks;
-    let chunk_id = flat_id % chunks;
-
+    let window_id = wg_id.x;
+    let tid = local_id.x;
     if window_id >= arrayLength(&win_starts_ph1) { return; }
 
     let start = win_starts_ph1[window_id];
     let count = win_counts_ph1[window_id];
 
-    let chunk_size = (count + chunks - 1u) / chunks;
-    let chunk_begin = chunk_id * chunk_size;
-    let chunk_end = min(chunk_begin + chunk_size, count);
-
+    // Phase 1: Each thread sums a strided subset of weighted buckets.
     var local_sum = G1_INFINITY;
-    for (var idx = chunk_begin; idx < chunk_end; idx = idx + 1u) {
-        local_sum = add_g1_safe(local_sum, agg_ph1_g1[start + idx]);
+    var i = tid;
+    for (var iter = 0u; iter < 65536u; iter = iter + 1u) {
+        if i >= count { break; }
+        local_sum = add_g1_safe(local_sum, agg_ph1_g1[start + i]);
+        i = i + G1_SUBSUM_WG_SIZE;
     }
-    partial_sums_g1[window_id * chunks + chunk_id] = local_sum;
+    subsum_shared_g1[tid] = local_sum;
+    workgroupBarrier();
+
+    // Phase 2: 6-stage binary tree reduction in shared memory.
+    if tid < 32u { subsum_shared_g1[tid] = add_g1_safe(subsum_shared_g1[tid], subsum_shared_g1[tid + 32u]); }
+    workgroupBarrier();
+    if tid < 16u { subsum_shared_g1[tid] = add_g1_safe(subsum_shared_g1[tid], subsum_shared_g1[tid + 16u]); }
+    workgroupBarrier();
+    if tid < 8u { subsum_shared_g1[tid] = add_g1_safe(subsum_shared_g1[tid], subsum_shared_g1[tid + 8u]); }
+    workgroupBarrier();
+    if tid < 4u { subsum_shared_g1[tid] = add_g1_safe(subsum_shared_g1[tid], subsum_shared_g1[tid + 4u]); }
+    workgroupBarrier();
+    if tid < 2u { subsum_shared_g1[tid] = add_g1_safe(subsum_shared_g1[tid], subsum_shared_g1[tid + 2u]); }
+    workgroupBarrier();
+    if tid == 0u {
+        let result = add_g1_safe(subsum_shared_g1[0], subsum_shared_g1[1]);
+        partial_sums_g1[window_id] = store_g1(result);
+    }
 }
 
+// G1 Phase 2 is now a no-op identity copy since Phase 1 already produces
+// final window sums. Kept for pipeline compatibility.
 @group(0) @binding(0) var<storage, read> partial_sums_ph2_g1: array<PointG1>;
 @group(0) @binding(1) var<storage, read_write> win_sums_ph2_g1: array<PointG1>;
 @group(0) @binding(2) var<uniform> subsum_params_ph2: SubsumParams;
@@ -465,13 +490,7 @@ fn subsum_phase2_g1(
     @builtin(global_invocation_id) global_id: vec3<u32>,
 ) {
     let window_id = global_id.x;
-    let chunks = subsum_params_ph2.chunks_per_window;
-
-    var sum = G1_INFINITY;
-    for (var i = 0u; i < chunks; i = i + 1u) {
-        sum = add_g1_safe(sum, partial_sums_ph2_g1[window_id * chunks + i]);
-    }
-    win_sums_ph2_g1[window_id] = store_g1(sum);
+    win_sums_ph2_g1[window_id] = partial_sums_ph2_g1[window_id];
 }
 
 // ==== G2 Pipelines ====
@@ -747,4 +766,42 @@ fn roundtrip_coords_g1(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = normalize_u384(from_montgomery_u384(to_montgomery_u384(p.x)));
     let y = normalize_u384(from_montgomery_u384(to_montgomery_u384(p.y)));
     rt_out_coords_g1[i] = PointG1(x, y, p.z);
+}
+
+// ==== Workgroup Memory Diagnostic Test ====
+//
+// Tests whether var<workgroup> with PointG1 works correctly on the current GPU.
+// Uses a 64-thread parallel tree reduction in shared memory.
+
+@group(0) @binding(0) var<storage, read> wg_test_in_g1: array<PointG1>;
+@group(0) @binding(1) var<storage, read_write> wg_test_out_g1: array<PointG1>;
+
+const WG_TEST_SIZE: u32 = 64u;
+var<workgroup> wg_test_shared: array<PointG1, 64>;
+
+@compute @workgroup_size(64)
+fn test_workgroup_reduction_g1(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+) {
+    let tid = local_id.x;
+
+    // Load point into Montgomery Jacobian, store into shared memory.
+    wg_test_shared[tid] = load_g1(wg_test_in_g1[tid]);
+    workgroupBarrier();
+
+    // 6-stage binary tree reduction.
+    if tid < 32u { wg_test_shared[tid] = add_g1_safe(wg_test_shared[tid], wg_test_shared[tid + 32u]); }
+    workgroupBarrier();
+    if tid < 16u { wg_test_shared[tid] = add_g1_safe(wg_test_shared[tid], wg_test_shared[tid + 16u]); }
+    workgroupBarrier();
+    if tid < 8u { wg_test_shared[tid] = add_g1_safe(wg_test_shared[tid], wg_test_shared[tid + 8u]); }
+    workgroupBarrier();
+    if tid < 4u { wg_test_shared[tid] = add_g1_safe(wg_test_shared[tid], wg_test_shared[tid + 4u]); }
+    workgroupBarrier();
+    if tid < 2u { wg_test_shared[tid] = add_g1_safe(wg_test_shared[tid], wg_test_shared[tid + 2u]); }
+    workgroupBarrier();
+    if tid == 0u {
+        let result = add_g1_safe(wg_test_shared[0], wg_test_shared[1]);
+        wg_test_out_g1[0] = store_g1(result);
+    }
 }
