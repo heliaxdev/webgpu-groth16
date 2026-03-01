@@ -73,10 +73,10 @@ NTT/H-polynomial, all 5 MSMs (a, b_g1, l, h, b_g2), and proof assembly.
 
 | Constraints | Mean    |
 |-------------|---------|
-| 2           | 82 ms   |
-| 1K          | 285 ms  |
-| 10K         | 854 ms  |
-| 100K        | 3.83 s  |
+| 2           | 85 ms   |
+| 1K          | 266 ms  |
+| 10K         | 690 ms  |
+| 100K        | 2.47 s  |
 
 ### MSM batch (5 MSMs: a, b_g1, l, h, b_g2)
 
@@ -85,9 +85,9 @@ Isolated MSM batch — same 5-MSM workload as a real proof, with random bases an
 | Points per MSM | Mean    |
 |-----------------|---------|
 | 100             | 165 ms  |
-| 1K              | 276 ms  |
-| 10K             | 762 ms  |
-| 100K            | 3.20 s  |
+| 1K              | 259 ms  |
+| 10K             | 642 ms  |
+| 100K            | 2.10 s  |
 
 ### Bucket sorting (CPU)
 
@@ -95,9 +95,9 @@ Signed-digit scalar decomposition and bucket assignment (CPU-only, no GPU).
 
 | Points | Mean    |
 |--------|---------|
-| 1K     | 2.10 ms |
-| 10K    | 16.4 ms |
-| 100K   | 135 ms  |
+| 1K     | 2.38 ms |
+| 10K    | 17.8 ms |
+| 100K   | 139 ms  |
 
 ### MASP Sapling Output circuit
 
@@ -106,11 +106,11 @@ n=32,768).
 
 | Phase                       | Time      |
 |-----------------------------|-----------|
-| Synthesis                   | 14.0 ms   |
+| Synthesis                   | 14.5 ms   |
 | H polynomial (GPU)          | 152 ms    |
-| Bucket sorting (CPU, GLV)   | 90.0 ms   |
-| MSM batch (GPU)             | 16.2 s    |
-| **Total proof**             | **16.6 s** |
+| Bucket sorting (CPU, GLV)   | 92.1 ms   |
+| MSM batch (GPU)             | 781 ms    |
+| **Total proof**             | **1.04 s** |
 
 Proving key sizes: a=28,759, b_g1=21,384, l=30,896, h=32,767, b_g2=21,384.
 
@@ -307,16 +307,25 @@ Measured on Apple M3 Max. Criterion median times.
 
 | Benchmark | Time |
 |---|---|
-| proof/n=2 | 86.7 ms |
-| proof/n=1000 | 265 ms |
-| proof/n=10000 | 758 ms |
-| proof/n=100000 | 2.85 s |
-| msm_g1/n=100000 | 372 ms |
-| msm_batch/5x100 | 164 ms |
-| msm_batch/5x1000 | 297 ms |
-| msm_batch/5x10000 | 735 ms |
-| msm_batch/5x100000 | 2.34 s |
-| sapling_output/proof | 1.10 s |
+| proof/n=2 | 85.5 ms |
+| proof/n=1000 | 266 ms |
+| proof/n=10000 | 690 ms |
+| proof/n=100000 | 2.47 s |
+| msm_g1/n=100 | 28.0 ms |
+| msm_g1/n=1000 | 52.3 ms |
+| msm_g1/n=10000 | 125 ms |
+| msm_g1/n=100000 | 367 ms |
+| msm_batch/5x100 | 165 ms |
+| msm_batch/5x1000 | 259 ms |
+| msm_batch/5x10000 | 642 ms |
+| msm_batch/5x100000 | 2.10 s |
+| bucket_sorting/n=1000 | 2.38 ms |
+| bucket_sorting/n=10000 | 17.8 ms |
+| bucket_sorting/n=100000 | 139 ms |
+| ntt/h_poly_n=8 | 4.04 ms |
+| ntt/h_poly_n=1024 | 11.4 ms |
+| ntt/h_poly_n=16384 | 112 ms |
+| sapling_output/proof | 1.04 s |
 
 ## Discarded optimizations
 
