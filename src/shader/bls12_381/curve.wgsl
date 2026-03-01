@@ -235,6 +235,18 @@ fn mul_fp2(a: Fq2, b: Fq2) -> Fq2 {
     return Fq2(c0_out, c1_out);
 }
 
+// Squaring in Fq2: (a0 + a1*u)^2 = (a0^2 - a1^2) + (2*a0*a1)*u
+// Uses 2 Fq muls instead of 3 for general multiplication (33% savings).
+// c0 = (a0 + a1)(a0 - a1), c1 = 2 * a0 * a1
+fn sqr_fp2(a: Fq2) -> Fq2 {
+    let a0_plus_a1 = add_mod_q(a.c0, a.c1);
+    let a0_minus_a1 = sub_mod_q(a.c0, a.c1);
+    let c0_out = mul_montgomery_u384(a0_plus_a1, a0_minus_a1);
+    let a0a1 = mul_montgomery_u384(a.c0, a.c1);
+    let c1_out = add_mod_q(a0a1, a0a1);
+    return Fq2(c0_out, c1_out);
+}
+
 // ============================================================================
 // G2 CURVE ARITHMETIC (Extension Field F_q^2)
 // ============================================================================
@@ -249,15 +261,15 @@ struct PointG2 {
 // BLS12-381 G2 curve: y^2 = x^3 + 4(1+i). (a = 0)
 fn double_g2(p: PointG2) -> PointG2 {
     // XX = X^2
-    let xx = mul_fp2(p.x, p.x);
+    let xx = sqr_fp2(p.x);
     // YY = Y^2
-    let yy = mul_fp2(p.y, p.y);
+    let yy = sqr_fp2(p.y);
     // YYYY = YY^2
-    let yyyy = mul_fp2(yy, yy);
+    let yyyy = sqr_fp2(yy);
 
     // S = 2 * ((X + YY)^2 - XX - YYYY)
     let x_plus_yy = add_fp2(p.x, yy);
-    let x_plus_yy_sq = mul_fp2(x_plus_yy, x_plus_yy);
+    let x_plus_yy_sq = sqr_fp2(x_plus_yy);
     var s = sub_fp2(x_plus_yy_sq, xx);
     s = sub_fp2(s, yyyy);
     s = add_fp2(s, s); // * 2
@@ -266,7 +278,7 @@ fn double_g2(p: PointG2) -> PointG2 {
     let m = add_fp2(add_fp2(xx, xx), xx);
 
     // T = M^2 - 2*S
-    let m_sq = mul_fp2(m, m);
+    let m_sq = sqr_fp2(m);
     let t = sub_fp2(m_sq, add_fp2(s, s));
 
     // X_out = T
@@ -281,9 +293,9 @@ fn double_g2(p: PointG2) -> PointG2 {
     let y_out = sub_fp2(m_times_s_minus_t, eight_yyyy);
 
     // Z_out = (Y + Z)^2 - YY - ZZ
-    let zz = mul_fp2(p.z, p.z);
+    let zz = sqr_fp2(p.z);
     let y_plus_z = add_fp2(p.y, p.z);
-    let y_plus_z_sq = mul_fp2(y_plus_z, y_plus_z);
+    let y_plus_z_sq = sqr_fp2(y_plus_z);
     var z_out = sub_fp2(y_plus_z_sq, yy);
     z_out = sub_fp2(z_out, zz);
 
@@ -293,9 +305,9 @@ fn double_g2(p: PointG2) -> PointG2 {
 // Computes P1 + P2 in Jacobian coordinates for G2.
 fn add_g2(p1: PointG2, p2: PointG2) -> PointG2 {
     // Z1Z1 = Z1^2
-    let z1z1 = mul_fp2(p1.z, p1.z);
+    let z1z1 = sqr_fp2(p1.z);
     // Z2Z2 = Z2^2
-    let z2z2 = mul_fp2(p2.z, p2.z);
+    let z2z2 = sqr_fp2(p2.z);
 
     // U1 = X1 * Z2Z2
     let u1 = mul_fp2(p1.x, z2z2);
@@ -334,13 +346,13 @@ fn add_g2(p1: PointG2, p2: PointG2) -> PointG2 {
     // Jacobian add-2007-bl formula (EFD), lifted to Fp2.
     let h = sub_fp2(u2, u1);
     let two_h = add_fp2(h, h);
-    let i = mul_fp2(two_h, two_h);
+    let i = sqr_fp2(two_h);
     let j = mul_fp2(h, i);
     let s2_minus_s1 = sub_fp2(s2, s1);
     let r = add_fp2(s2_minus_s1, s2_minus_s1);
     let v = mul_fp2(u1, i);
 
-    let r_sq = mul_fp2(r, r);
+    let r_sq = sqr_fp2(r);
     var x3 = sub_fp2(r_sq, j);
     x3 = sub_fp2(x3, add_fp2(v, v));
 
@@ -351,7 +363,7 @@ fn add_g2(p1: PointG2, p2: PointG2) -> PointG2 {
     let y3 = sub_fp2(r_times_v_minus_x3, two_s1_j);
 
     let z1_plus_z2 = add_fp2(p1.z, p2.z);
-    let z1_plus_z2_sq = mul_fp2(z1_plus_z2, z1_plus_z2);
+    let z1_plus_z2_sq = sqr_fp2(z1_plus_z2);
     let z1z2_factor = sub_fp2(sub_fp2(z1_plus_z2_sq, z1z1), z2z2);
     let z3 = mul_fp2(z1z2_factor, h);
 
@@ -365,7 +377,7 @@ fn add_g2(p1: PointG2, p2: PointG2) -> PointG2 {
 // (11 mul_fp2 vs 16 mul_fp2).
 fn add_g2_mixed(p1: PointG2, p2: PointG2) -> PointG2 {
     // Z1Z1 = Z1^2
-    let z1z1 = mul_fp2(p1.z, p1.z);
+    let z1z1 = sqr_fp2(p1.z);
 
     // u1 = X1 (since Z2 = (R,0): X1 * z2z2 = X1)
     // u2 = X2 * Z1Z1
@@ -407,7 +419,7 @@ fn add_g2_mixed(p1: PointG2, p2: PointG2) -> PointG2 {
     // H = U2 - U1 = U2 - X1
     let h = sub_fp2(u2, p1.x);
     let two_h = add_fp2(h, h);
-    let i_val = mul_fp2(two_h, two_h);
+    let i_val = sqr_fp2(two_h);
     let j = mul_fp2(h, i_val);
     // r = 2*(S2 - S1) = 2*(S2 - Y1)
     let s2_minus_s1 = sub_fp2(s2, p1.y);
@@ -415,7 +427,7 @@ fn add_g2_mixed(p1: PointG2, p2: PointG2) -> PointG2 {
     // V = U1 * I = X1 * I
     let v = mul_fp2(p1.x, i_val);
 
-    let r_sq = mul_fp2(r, r);
+    let r_sq = sqr_fp2(r);
     var x3 = sub_fp2(r_sq, j);
     x3 = sub_fp2(x3, add_fp2(v, v));
 
