@@ -85,6 +85,7 @@ pub fn prepare_gpu_proving_key<G: GpuCurve>(
     gpu.convert_to_montgomery(&b_g2_bases_buf, true);
 
     // Wait for all conversions to complete
+    #[cfg(not(target_family = "wasm"))]
     let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
 
     GpuProvingKey {

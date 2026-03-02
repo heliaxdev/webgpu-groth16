@@ -34,7 +34,7 @@ impl<C: GpuCurve> GpuContext<C> {
             sender.send(res).unwrap();
         });
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(target_family = "wasm"))]
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 
         if let Ok(Ok(())) = receiver.await {
@@ -87,7 +87,7 @@ impl<C: GpuCurve> GpuContext<C> {
             receivers.push(receiver);
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(target_family = "wasm"))]
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 
         for r in receivers {

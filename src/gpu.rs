@@ -862,6 +862,7 @@ impl<C: GpuCurve> GpuContext<C> {
         // Ensure all GPU work and timestamp query readbacks are complete
         // before ending the frame. Without this, Metal may return stale or
         // uninitialized timestamp data (causing negative durations).
+        #[cfg(not(target_family = "wasm"))]
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         let mut profiler = self.profiler.lock().unwrap();
         profiler.end_frame().expect("end_frame failed");
