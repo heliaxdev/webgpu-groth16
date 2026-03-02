@@ -221,11 +221,13 @@ fn sample_sapling_output_circuit() -> SaplingOutputCircuit {
         .asset_type
         .value_commitment(note.value, jubjub::Fr::from(7u64));
 
+    let rcm = note.rcm();
+
     SaplingOutputCircuit {
         value_commitment: Some(value_commitment),
         asset_identifier: note.asset_type.identifier_bits(),
         payment_address: Some(pa),
-        commitment_randomness: Some(jubjub::Fr::from(13u64)),
+        commitment_randomness: Some(rcm),
         esk: Some(note.derive_esk().unwrap()),
     }
 }
@@ -249,8 +251,29 @@ fn bench_cpu_sapling_output() {
     let proof = bellman::groth16::create_random_proof(circuit, &params, &mut rng)
         .expect("cpu sapling output proof failed");
     let dt = t0.elapsed();
-    let _ = proof;
     eprintln!("CPU Sapling Output proof took {:?}", dt);
+
+    // verify proof
+    let inputs = {
+        let (_, note) = sample_sapling_output_note();
+        let esk = note.derive_esk().unwrap();
+        let epk: jubjub::AffinePoint = jubjub::ExtendedPoint::from(note.g_d * esk).into();
+        let cv: jubjub::AffinePoint = jubjub::ExtendedPoint::from(
+            note.asset_type
+                .value_commitment(note.value, jubjub::Fr::from(7u64))
+                .commitment(),
+        )
+        .into();
+        let cmu = note.cmu();
+        [cv.get_u(), cv.get_v(), epk.get_u(), epk.get_v(), cmu]
+    };
+    let valid = bellman::groth16::verify_proof(
+        &bellman::groth16::prepare_verifying_key(&params.vk),
+        &proof,
+        &inputs,
+    )
+    .expect("verification failed");
+    assert!(valid, "output proof should be valid");
 }
 
 #[tokio::test]
@@ -295,13 +318,35 @@ async fn bench_gpu_sapling_output() {
     eprintln!("[diag] gpu_pk upload+montgomery: {:?}", t.elapsed());
 
     let t0 = Instant::now();
-    let _proof = create_proof_with_gpu_key::<Bls12, Bls12, _, _>(
+    let proof = create_proof_with_gpu_key::<Bls12, Bls12, _, _>(
         circuit, &params, &ppk, &gpu_ctx, &gpu_pk, &mut rng,
     )
     .await
     .expect("gpu sapling output proof failed");
     let dt = t0.elapsed();
     eprintln!("[diag] total proof: {:?}", dt);
+
+    // verify proof
+    let inputs = {
+        let (_, note) = sample_sapling_output_note();
+        let esk = note.derive_esk().unwrap();
+        let epk: jubjub::AffinePoint = jubjub::ExtendedPoint::from(note.g_d * esk).into();
+        let cv: jubjub::AffinePoint = jubjub::ExtendedPoint::from(
+            note.asset_type
+                .value_commitment(note.value, jubjub::Fr::from(7u64))
+                .commitment(),
+        )
+        .into();
+        let cmu = note.cmu();
+        [cv.get_u(), cv.get_v(), epk.get_u(), epk.get_v(), cmu]
+    };
+    let valid = bellman::groth16::verify_proof(
+        &bellman::groth16::prepare_verifying_key(&params.vk),
+        &proof,
+        &inputs,
+    )
+    .expect("verification failed");
+    assert!(valid, "output proof should be valid");
 }
 
 /// eval_lc with an empty linear combination returns zero.
