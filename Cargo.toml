@@ -39,6 +39,3 @@ tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
 [[bench]]
 name = "groth16_bench"
 harness = false
-
-[profile.release]
-debug = true
