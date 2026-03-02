@@ -2,13 +2,15 @@
 
 ## Project Overview
 
-This is a GPU-accelerated Groth16 zero-knowledge proof system built on wgpu, targeting the BLS12-381 curve. The two most expensive operations — multi-scalar multiplication (MSM) and the Number Theoretic Transform (NTT) — are offloaded to GPU compute shaders written in WGSL. The rest of the proof construction (constraint synthesis, witness generation, random blinding) runs on the CPU. Make sure to only allow optimizations that are compatible with wasm.
+This is a GPU-accelerated Groth16 zero-knowledge proof system built on wgpu, with a generic `GpuCurve` abstraction and a production BLS12-381 implementation. The two most expensive operations — multi-scalar multiplication (MSM) and the Number Theoretic Transform (NTT) — are offloaded to GPU compute shaders written in WGSL. The rest of the proof construction (constraint synthesis, witness generation, random blinding) runs on the CPU. Make sure to only allow optimizations that are compatible with wasm.
 
-Key implementation details:
+Key implementation details (current BLS12-381 backend):
 - Field arithmetic uses 13-bit limbs for F_q (30x13-bit) and 32-bit limbs for F_r (8x32-bit)
 - MSM uses Pippenger bucket method with signed-digit scalar decomposition (c=13 for G1, c=8 for G2)
 - G1 MSM uses multi-workgroup tree reduction; G2 MSM uses single-threaded running-sum due to a Metal shader compiler bug with `double_g2`
-- WGSL shaders are concatenated via `concat!(include_str!(...))`: fr.wgsl + fp.wgsl + curve.wgsl + msm.wgsl
+- WGSL shaders are concatenated via `concat!(include_str!(...))` using split curve/MSM modules:
+  - G1 MSM: `fr.wgsl + fp.wgsl + curve_g1.wgsl + msm_g1_*.wgsl`
+  - G2 MSM: `fr.wgsl + fp.wgsl + curve_g2.wgsl + msm_g2_*.wgsl`
 
 ## Testing Requirements
 

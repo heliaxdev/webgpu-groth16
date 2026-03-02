@@ -1,7 +1,8 @@
 # wgpu prover
 
 GPU-accelerated [Groth16](https://eprint.iacr.org/2016/260) zero-knowledge proof system
-built on [wgpu](https://github.com/gfx-rs/wgpu), targeting the BLS12-381 curve.
+built on [wgpu](https://github.com/gfx-rs/wgpu), with curve-pluggable abstractions.
+The current production implementation targets BLS12-381.
 
 ## Overview
 
@@ -28,7 +29,8 @@ Circuit (bellman ConstraintSystem)
 
 **MSM pipeline** — scalars are decomposed into windows on the CPU (bucket sorting), then two
 GPU passes run: (1) parallel bucket aggregation using mixed affine+projective addition, and
-(2) workgroup tree reduction to sum each window.
+(2) workgroup tree reduction to sum each window. For curves that expose GLV support,
+G1 decomposition uses the curve-provided endomorphism path.
 
 **NTT pipeline** — tile-based Cooley-Tukey FFT with pre-computed twiddle factors in
 Montgomery form, bit-reversal permutation, and coset shift stages.
@@ -37,8 +39,8 @@ Montgomery form, bit-reversal permutation, and coset shift stages.
 
 - **Cross-platform GPU** — runs on Metal (macOS), Vulkan (Linux), DX12 (Windows), and
   WebGPU (WASM) via wgpu.
-- **BLS12-381 native** — 384-bit base field and 256-bit scalar field arithmetic implemented
-  entirely in WGSL compute shaders.
+- **Curve-pluggable design** — generic `GpuCurve` trait for curve-specific arithmetic,
+  serialization layout, and GPU dispatch parameters; BLS12-381 is fully supported today.
 - **`PreparedProvingKey`** — pre-serializes proving key base points to GPU format once,
   amortising the O(N) conversion cost across multiple proofs.
 - **Pluggable bellman backend** — compile with `bellman-provider-bellman` or the default
