@@ -3,8 +3,6 @@
 // ============================================================================
 // CONSTANTS & WORKGROUP SIZE
 // ============================================================================
-// We use a workgroup size of 256 threads.
-// Each thread processes 2 elements, so one workgroup handles up to 512 elements.
 const THREADS_PER_WORKGROUP: u32 = 256u;
 const ELEMENTS_PER_TILE: u32 = 512u;
 
@@ -13,10 +11,10 @@ const ELEMENTS_PER_TILE: u32 = 512u;
 // ============================================================================
 
 @group(0) @binding(0)
-var<storage, read_write> data: array<U256>; // The polynomial coefficients / evaluations
+var<storage, read_write> data: array<U256>;
 
 @group(0) @binding(1)
-var<storage, read> twiddles: array<U256>; // Precomputed powers of omega in Montgomery form
+var<storage, read> twiddles: array<U256>;
 
 struct NttParams {
     n: u32,
@@ -28,9 +26,9 @@ struct NttParams {
 @group(0) @binding(2)
 var<uniform> params: NttParams;
 
-
-// Fast workgroup-shared memory for the Cooley-Tukey butterflies
+// Fast workgroup-shared memory arrays
 var<workgroup> shared_data: array<U256, ELEMENTS_PER_TILE>;
+var<workgroup> shared_twiddles: array<U256, THREADS_PER_WORKGROUP>;
 
 fn add_fr(a: U256, b: U256) -> U256 {
     var sum = add_u256(a, b);
@@ -45,7 +43,6 @@ fn add_fr(a: U256, b: U256) -> U256 {
     }
     return sum;
 }
-
 
 fn sub_fr(a: U256, b: U256) -> U256 {
     var is_less = false;
@@ -68,13 +65,7 @@ fn sub_fr(a: U256, b: U256) -> U256 {
 
 // Reverses the `bit_len` lower bits of `n`.
 fn reverse_bits(n: u32, bit_len: u32) -> u32 {
-    var result: u32 = 0u;
-    var temp: u32 = n;
-    for (var i: u32 = 0u; i < bit_len; i = i + 1u) {
-        result = (result << 1u) | (temp & 1u);
-        temp = temp >> 1u;
-    }
-    return result;
+    return reverseBits(n) >> (32u - bit_len);
 }
 
 @compute @workgroup_size(256)
@@ -136,7 +127,7 @@ fn ntt_tile(
     let n = min(ELEMENTS_PER_TILE, n_total - tile_offset);
     if n == 0u { return; }
     if n > ELEMENTS_PER_TILE { return; }
-    
+
     var log2_elements = 0u;
     var m = n;
     while m > 1u {
@@ -161,8 +152,15 @@ fn ntt_tile(
         shared_data[load_idx_2] = data[tile_offset + local_idx_2];
     }
 
+    // The twiddles needed for all stages in this tile are subsets of the 
+    // twiddles needed for the final stage. We load them exactly once.
+    let twiddle_base_stride = n_total / n;
+    if local_id.x < n / 2u {
+        shared_twiddles[local_id.x] = twiddles[local_id.x * twiddle_base_stride];
+    }
+
     workgroupBarrier();
-    
+
     var half_len: u32 = 1u;
     for (var stage: u32 = 0u; stage < log2_elements; stage = stage + 1u) {
         let len = half_len * 2u;
@@ -172,8 +170,9 @@ fn ntt_tile(
             let k = local_id.x % half_len;
             let pos = (local_id.x / half_len) * len + k;
 
-            let twiddle_stride = n_total / len; 
-            let twiddle = twiddles[k * twiddle_stride];
+            // Fetch from shared memory using a localized stride!
+            let shared_twiddle_stride = n / len;
+            let twiddle = shared_twiddles[k * shared_twiddle_stride];
 
             let u = shared_data[pos];
             let v = shared_data[pos + half_len];
@@ -186,7 +185,7 @@ fn ntt_tile(
         half_len = len;
         workgroupBarrier();
     }
-    
+
     if local_idx_1 < n {
         data[tile_offset + local_idx_1] = shared_data[local_idx_1];
     }

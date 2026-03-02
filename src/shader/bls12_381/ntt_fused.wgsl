@@ -3,12 +3,6 @@
 // Fused NTT + coset shift kernel. Identical to ntt_tile but multiplies each
 // output element by a precomputed shift factor during write-back, eliminating
 // a separate coset_shift dispatch.
-//
-// Concatenated after ntt.wgsl — reuses add_fr, sub_fr, reverse_bits,
-// shared_data, THREADS_PER_WORKGROUP, ELEMENTS_PER_TILE, data, twiddles.
-//
-// Shift factors live in @group(1) to avoid conflicting with ntt.wgsl's
-// @group(0) @binding(2) params uniform (used by other NTT entry points).
 
 @group(1) @binding(0)
 var<storage, read> shift_factors: array<U256>;
@@ -49,6 +43,12 @@ fn ntt_tile_with_shift(
         shared_data[load_idx_2] = data[tile_offset + local_idx_2];
     }
 
+    // Cache twiddle factors into shared memory
+    let twiddle_base_stride = n_total / n;
+    if local_id.x < n / 2u {
+        shared_twiddles[local_id.x] = twiddles[local_id.x * twiddle_base_stride];
+    }
+
     workgroupBarrier();
 
     var half_len: u32 = 1u;
@@ -60,8 +60,9 @@ fn ntt_tile_with_shift(
             let k = local_id.x % half_len;
             let pos = (local_id.x / half_len) * len + k;
 
-            let twiddle_stride = n_total / len;
-            let twiddle = twiddles[k * twiddle_stride];
+            // Fetch from shared memory
+            let shared_twiddle_stride = n / len;
+            let twiddle = shared_twiddles[k * shared_twiddle_stride];
 
             let u = shared_data[pos];
             let v = shared_data[pos + half_len];
