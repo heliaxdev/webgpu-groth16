@@ -9,7 +9,7 @@ use anyhow::Result;
 use crate::bucket::{
     BucketData, compute_bucket_sorting_with_width, compute_glv_bucket_sorting, optimal_glv_c,
 };
-use crate::gpu::curve::{G1_GPU_BYTES, G2_GPU_BYTES, GpuCurve};
+use crate::gpu::curve::GpuCurve;
 use crate::gpu::{GpuContext, MsmBuffers};
 
 use super::prepared_key::{serialize_g1_bases, serialize_g1_phi_bases, serialize_g2_bases};
@@ -174,9 +174,13 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     #[cfg(feature = "timing")]
     let t_start = std::time::Instant::now();
 
-    let glv_c = optimal_glv_c(scalars.len());
+    let glv_c = optimal_glv_c::<G>(scalars.len());
     let bases_bytes = serialize_g1_bases::<G>(bases);
-    let phi_bytes = serialize_g1_phi_bases::<G>(bases);
+    let phi_bytes = if G::HAS_G1_GLV {
+        serialize_g1_phi_bases::<G>(bases)
+    } else {
+        Vec::new()
+    };
     let (glv_bytes, bd) = compute_glv_bucket_sorting::<G>(scalars, &bases_bytes, &phi_bytes, glv_c);
 
     #[cfg(feature = "timing")]
@@ -194,7 +198,7 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     let result_bytes = gpu
         .read_buffer(
             &job.sums_buf,
-            (job.num_windows as usize * G1_GPU_BYTES) as u64,
+            (job.num_windows as usize * G::G1_GPU_BYTES) as u64,
         )
         .await?;
 
@@ -238,7 +242,7 @@ pub(crate) async fn gpu_msm_g2<G: GpuCurve>(
     let result_bytes = gpu
         .read_buffer(
             &job.sums_buf,
-            (job.num_windows as usize * G2_GPU_BYTES) as u64,
+            (job.num_windows as usize * G::G2_GPU_BYTES) as u64,
         )
         .await?;
     fold_window_sums_g2::<G>(&result_bytes, job.num_windows, job.bucket_width)
@@ -277,7 +281,7 @@ pub(crate) fn fold_window_sums_g1<G: GpuCurve>(
         result_bytes,
         num_windows,
         bucket_width,
-        G1_GPU_BYTES,
+        G::G1_GPU_BYTES,
         G::g1_identity(),
         G::deserialize_g1,
         G::add_g1_proj,
@@ -293,7 +297,7 @@ fn fold_window_sums_g2<G: GpuCurve>(
         result_bytes,
         num_windows,
         bucket_width,
-        G2_GPU_BYTES,
+        G::G2_GPU_BYTES,
         G::g2_identity(),
         G::deserialize_g2,
         G::add_g2_proj,
@@ -315,18 +319,34 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
     b2_scalars: &[G::Scalar],
 ) -> Result<(G::G1, G::G1, G::G1, G::G1, G::G2)> {
     let a_bases_bytes = serialize_g1_bases::<G>(a_bases);
-    let a_phi_bytes = serialize_g1_phi_bases::<G>(a_bases);
+    let a_phi_bytes = if G::HAS_G1_GLV {
+        serialize_g1_phi_bases::<G>(a_bases)
+    } else {
+        Vec::new()
+    };
     let b1_bases_bytes = serialize_g1_bases::<G>(b1_bases);
-    let b1_phi_bytes = serialize_g1_phi_bases::<G>(b1_bases);
+    let b1_phi_bytes = if G::HAS_G1_GLV {
+        serialize_g1_phi_bases::<G>(b1_bases)
+    } else {
+        Vec::new()
+    };
     let l_bases_bytes = serialize_g1_bases::<G>(l_bases);
-    let l_phi_bytes = serialize_g1_phi_bases::<G>(l_bases);
+    let l_phi_bytes = if G::HAS_G1_GLV {
+        serialize_g1_phi_bases::<G>(l_bases)
+    } else {
+        Vec::new()
+    };
     let h_bases_bytes = serialize_g1_bases::<G>(h_bases);
-    let h_phi_bytes = serialize_g1_phi_bases::<G>(h_bases);
+    let h_phi_bytes = if G::HAS_G1_GLV {
+        serialize_g1_phi_bases::<G>(h_bases)
+    } else {
+        Vec::new()
+    };
 
-    let a_c = optimal_glv_c(a_scalars.len());
-    let b1_c = optimal_glv_c(b_scalars.len());
-    let l_c = optimal_glv_c(l_scalars.len());
-    let h_c = optimal_glv_c(h_scalars.len());
+    let a_c = optimal_glv_c::<G>(a_scalars.len());
+    let b1_c = optimal_glv_c::<G>(b_scalars.len());
+    let l_c = optimal_glv_c::<G>(l_scalars.len());
+    let h_c = optimal_glv_c::<G>(h_scalars.len());
     let (a_glv, a_bd) =
         compute_glv_bucket_sorting::<G>(a_scalars, &a_bases_bytes, &a_phi_bytes, a_c);
     let (b1_glv, b_bd) =
@@ -373,7 +393,11 @@ pub(crate) fn enqueue_msm<G: GpuCurve>(
     if bd.num_active_buckets == 0 {
         return Ok(None);
     }
-    let point_size = if is_g2 { G2_GPU_BYTES } else { G1_GPU_BYTES };
+    let point_size = if is_g2 {
+        G::G2_GPU_BYTES
+    } else {
+        G::G1_GPU_BYTES
+    };
     let (bases_bytes, bases_override, skip_montgomery) = match &bases {
         MsmBases::Bytes(b) => (Some(*b), None, false),
         MsmBases::Persistent(buf) => (None, Some(*buf), true),
@@ -410,11 +434,17 @@ pub(crate) async fn readback_msms<G: GpuCurve>(
     let mut read_targets: Vec<(&wgpu::Buffer, wgpu::BufferAddress)> = Vec::new();
     for job in &g1_jobs {
         if let Some(j) = job {
-            read_targets.push((&j.sums_buf, (j.num_windows as usize * G1_GPU_BYTES) as u64));
+            read_targets.push((
+                &j.sums_buf,
+                (j.num_windows as usize * G::G1_GPU_BYTES) as u64,
+            ));
         }
     }
     if let Some(j) = &b2_job {
-        read_targets.push((&j.sums_buf, (j.num_windows as usize * G2_GPU_BYTES) as u64));
+        read_targets.push((
+            &j.sums_buf,
+            (j.num_windows as usize * G::G2_GPU_BYTES) as u64,
+        ));
     }
 
     #[cfg(feature = "timing")]

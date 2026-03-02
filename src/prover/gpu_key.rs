@@ -5,7 +5,7 @@
 //! to eliminate per-proof base uploads and Montgomery conversion.
 
 use crate::gpu::GpuContext;
-use crate::gpu::curve::{G1_GPU_BYTES, GpuCurve};
+use crate::gpu::curve::GpuCurve;
 
 use super::prepared_key::{PreparedProvingKey, interleave_glv_bases};
 
@@ -26,11 +26,46 @@ pub fn prepare_gpu_proving_key<G: GpuCurve>(
     ppk: &PreparedProvingKey<G>,
     gpu: &GpuContext<G>,
 ) -> GpuProvingKey {
-    // Interleave G1 bases: [P₀, φ(P₀), P₁, φ(P₁), ...]
-    let a_combined = interleave_glv_bases(&ppk.a_bytes, &ppk.a_phi_bytes, G1_GPU_BYTES);
-    let b_g1_combined = interleave_glv_bases(&ppk.b_g1_bytes, &ppk.b_g1_phi_bytes, G1_GPU_BYTES);
-    let l_combined = interleave_glv_bases(&ppk.l_bytes, &ppk.l_phi_bytes, G1_GPU_BYTES);
-    let h_combined = interleave_glv_bases(&ppk.h_bytes, &ppk.h_phi_bytes, G1_GPU_BYTES);
+    let a_combined;
+    let b_g1_combined;
+    let l_combined;
+    let h_combined;
+    if G::HAS_G1_GLV {
+        // Interleave G1 bases: [P₀, φ(P₀), P₁, φ(P₁), ...]
+        a_combined = interleave_glv_bases(
+            &ppk.a_bytes,
+            ppk.a_phi_bytes
+                .as_deref()
+                .expect("HAS_G1_GLV requires a_phi_bytes"),
+            G::G1_GPU_BYTES,
+        );
+        b_g1_combined = interleave_glv_bases(
+            &ppk.b_g1_bytes,
+            ppk.b_g1_phi_bytes
+                .as_deref()
+                .expect("HAS_G1_GLV requires b_g1_phi_bytes"),
+            G::G1_GPU_BYTES,
+        );
+        l_combined = interleave_glv_bases(
+            &ppk.l_bytes,
+            ppk.l_phi_bytes
+                .as_deref()
+                .expect("HAS_G1_GLV requires l_phi_bytes"),
+            G::G1_GPU_BYTES,
+        );
+        h_combined = interleave_glv_bases(
+            &ppk.h_bytes,
+            ppk.h_phi_bytes
+                .as_deref()
+                .expect("HAS_G1_GLV requires h_phi_bytes"),
+            G::G1_GPU_BYTES,
+        );
+    } else {
+        a_combined = ppk.a_bytes.clone();
+        b_g1_combined = ppk.b_g1_bytes.clone();
+        l_combined = ppk.l_bytes.clone();
+        h_combined = ppk.h_bytes.clone();
+    }
 
     // Upload to GPU
     let a_bases_buf = gpu.create_storage_buffer("gpk_a_bases", &a_combined);

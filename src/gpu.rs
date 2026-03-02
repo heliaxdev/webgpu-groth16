@@ -9,7 +9,7 @@
 //! - [`ntt`] — NTT dispatchers (tile-local and multi-stage global), Montgomery
 //!   conversion, coset shift, pointwise polynomial evaluation
 //! - [`h_poly`] — H-polynomial pipeline (fused NTT+shift → pointwise → iNTT)
-//! - [`curve`] — CPU↔GPU serialization bridge for BLS12-381 curve elements
+//! - [`curve`] — curve-agnostic trait + curve-specific implementations
 
 mod buffers;
 pub mod curve;
@@ -28,26 +28,6 @@ use anyhow::Context;
 use wgpu::util::DeviceExt;
 
 use self::curve::GpuCurve;
-
-/// Workgroup size for scalar kernels (Montgomery, coset shift, pointwise, NTT global stage).
-/// Matches `@workgroup_size(256)` in the corresponding WGSL shaders.
-const SCALAR_WORKGROUP_SIZE: u32 = 256;
-
-/// Number of elements processed per NTT tile workgroup (256 threads x 2 elements).
-/// Also the threshold: NTT sizes > this use the multi-stage global algorithm.
-const NTT_TILE_SIZE: u32 = 512;
-
-/// Workgroup size for MSM kernels (aggregate, weight, to_montgomery_bases).
-/// Matches `@workgroup_size(64)` in MSM shaders.
-const MSM_WORKGROUP_SIZE: u32 = 64;
-
-/// G1 subsum uses single-pass parallel shared-memory tree reduction:
-/// one workgroup of 64 threads per window. chunks_per_window=1 since Phase 1
-/// produces the final window sum directly.
-const G1_SUBSUM_CHUNKS_PER_WINDOW: u32 = 1;
-
-/// Number of workgroup chunks per window in G2 two-phase subsum reduction.
-const G2_SUBSUM_CHUNKS_PER_WINDOW: u32 = 32;
 
 /// Creates a compute pass, optionally wrapped in a GPU profiling scope.
 ///

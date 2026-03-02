@@ -315,13 +315,14 @@ async fn test_g1_workgroup_tree_reduction() {
     let expected: G1Affine = cpu_sum.to_affine();
 
     // Serialize 64 points to GPU format
-    let mut in_bytes = Vec::with_capacity(64 * crate::gpu::curve::G1_GPU_BYTES);
+    let mut in_bytes = Vec::with_capacity(64 * <Bls12 as GpuCurve>::G1_GPU_BYTES);
     for p in &points {
         in_bytes.extend_from_slice(&<Bls12 as GpuCurve>::serialize_g1(p));
     }
 
     let in_buf = gpu.create_storage_buffer("wg_test_in_g1", &in_bytes);
-    let out_buf = gpu.create_empty_buffer("wg_test_out_g1", crate::gpu::curve::G1_GPU_BYTES as u64);
+    let out_buf =
+        gpu.create_empty_buffer("wg_test_out_g1", <Bls12 as GpuCurve>::G1_GPU_BYTES as u64);
 
     dispatch_shader_test(
         &gpu,
@@ -332,7 +333,7 @@ async fn test_g1_workgroup_tree_reduction() {
     );
 
     let out_bytes = gpu
-        .read_buffer(&out_buf, crate::gpu::curve::G1_GPU_BYTES as u64)
+        .read_buffer(&out_buf, <Bls12 as GpuCurve>::G1_GPU_BYTES as u64)
         .await
         .expect("failed to read workgroup reduction output");
 

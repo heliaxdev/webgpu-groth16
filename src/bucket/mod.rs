@@ -2,20 +2,15 @@
 //!
 //! Prepares [`BucketData`] for GPU MSM dispatch by decomposing scalars into
 //! signed-digit windows and grouping points by (window, bucket_value).
-//! Large buckets are split into sub-buckets of at most 64 points for GPU
-//! load balancing (see [`MAX_CHUNK_SIZE`]).
+//! Large buckets are split into sub-buckets for GPU load balancing (see
+//! [`GpuCurve::MSM_MAX_CHUNK_SIZE`]).
 //!
-//! Two modes:
+//! Two modes (selected by [`GpuCurve::HAS_G1_GLV`]):
 //! - **Standard** ([`compute_bucket_sorting`]): direct scalar decomposition
-//! - **GLV** ([`compute_glv_bucket_sorting`], [`compute_glv_bucket_data`]):
-//!   uses the BLS12-381 endomorphism to halve window count for G1 MSMs
+//! - **GLV-capable** ([`compute_glv_bucket_sorting`], [`compute_glv_bucket_data`]):
+//!   uses curve-provided endomorphism decomposition hooks when available
 
-use crate::glv;
-use crate::gpu::curve::{G1_GPU_BYTES, GpuCurve};
-
-/// Maximum number of points a single GPU thread will process in aggregate_buckets.
-/// Buckets larger than this are split into sub-buckets for load balancing.
-const MAX_CHUNK_SIZE: u32 = 64;
+use crate::gpu::curve::{G1MsmDecomposition, GpuCurve};
 
 /// Bucket sorting result for GPU MSM dispatch.
 ///
@@ -31,7 +26,7 @@ const MAX_CHUNK_SIZE: u32 = 64;
 ///
 /// Invariants:
 /// - `bucket_pointers[i]` is the starting index in `base_indices` for sub-bucket `i`
-/// - `bucket_sizes[i]` is the count of points in sub-bucket `i` (<= MAX_CHUNK_SIZE)
+/// - `bucket_sizes[i]` is the count of points in sub-bucket `i`
 /// - `bucket_values[i]` is the scalar weight for sub-bucket `i` (in `[1, 2^(c-1)]`)
 /// - `window_starts[w]` is the first sub-bucket index belonging to window `w`
 /// - `window_counts[w]` is the number of sub-buckets in window `w`
@@ -41,7 +36,7 @@ pub struct BucketData {
     pub base_indices: Vec<u32>,
     /// Sub-bucket pointers into base_indices (length = num_dispatched).
     pub bucket_pointers: Vec<u32>,
-    /// Sub-bucket sizes, each <= MAX_CHUNK_SIZE (length = num_dispatched).
+    /// Sub-bucket sizes (length = num_dispatched).
     pub bucket_sizes: Vec<u32>,
     /// Sub-bucket values, same as parent's value (length = num_dispatched).
     pub bucket_values: Vec<u32>,
@@ -129,10 +124,6 @@ impl BucketData {
     }
 }
 
-/// Sign bit used to encode point negation in base_indices entries.
-/// When this bit is set, the GPU negates the point's y-coordinate before adding.
-const SIGN_BIT: u32 = 1 << 31;
-
 /// Builds `BucketData` from pre-computed signed-digit window decompositions.
 ///
 /// `all_windows[i]` contains the (absolute_value, is_negative) pairs for point `i`.
@@ -146,11 +137,11 @@ const SIGN_BIT: u32 = 1 << 31;
 /// base_indices (point IDs, sign-encoded), pointers, sizes, and values per bucket.
 ///
 /// **Pass 2 — Split oversized buckets for GPU load balancing:**
-/// Buckets with more than `MAX_CHUNK_SIZE` (64) points are split into sub-buckets.
+/// Buckets with more than `G::MSM_MAX_CHUNK_SIZE` points are split into sub-buckets.
 /// Each sub-bucket becomes an independent GPU thread. A reduce_starts/reduce_counts
 /// table records which sub-buckets belong to the same logical bucket, so a later
 /// GPU reduce pass can sum the sub-bucket partials back together.
-fn build_bucket_data(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
+fn build_bucket_data<G: GpuCurve>(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
     let num_windows = all_windows.iter().map(|w| w.len()).max().unwrap_or(0);
     let num_buckets = (1usize << (c - 1)) + 1;
 
@@ -169,7 +160,11 @@ fn build_bucket_data(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
             if w < windows.len() {
                 let (abs, neg) = windows[w];
                 if abs != 0 {
-                    let entry = if neg { i as u32 | SIGN_BIT } else { i as u32 };
+                    let entry = if neg {
+                        i as u32 | G::MSM_INDEX_SIGN_BIT
+                    } else {
+                        i as u32
+                    };
                     buckets[abs as usize].push(entry);
                 }
             }
@@ -192,7 +187,7 @@ fn build_bucket_data(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
 
     let num_active_buckets = orig_sizes.len() as u32;
 
-    // Second pass: split large buckets into sub-buckets of at most MAX_CHUNK_SIZE.
+    // Second pass: split large buckets into sub-buckets.
     let mut bucket_pointers = Vec::new();
     let mut bucket_sizes = Vec::new();
     let mut bucket_values = Vec::new();
@@ -216,7 +211,7 @@ fn build_bucket_data(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
 
             let sub_start = bucket_pointers.len() as u32;
 
-            if size <= MAX_CHUNK_SIZE {
+            if size <= G::MSM_MAX_CHUNK_SIZE {
                 bucket_pointers.push(ptr);
                 bucket_sizes.push(size);
                 bucket_values.push(val);
@@ -225,10 +220,11 @@ fn build_bucket_data(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
                 dispatched_in_window += 1;
             } else {
                 has_chunks = true;
-                let num_chunks = size.div_ceil(MAX_CHUNK_SIZE);
+                let num_chunks = size.div_ceil(G::MSM_MAX_CHUNK_SIZE);
                 for chunk in 0..num_chunks {
-                    let chunk_start = ptr + chunk * MAX_CHUNK_SIZE;
-                    let chunk_size = (size - chunk * MAX_CHUNK_SIZE).min(MAX_CHUNK_SIZE);
+                    let chunk_start = ptr + chunk * G::MSM_MAX_CHUNK_SIZE;
+                    let chunk_size =
+                        (size - chunk * G::MSM_MAX_CHUNK_SIZE).min(G::MSM_MAX_CHUNK_SIZE);
                     bucket_pointers.push(chunk_start);
                     bucket_sizes.push(chunk_size);
                     bucket_values.push(val);
@@ -263,32 +259,8 @@ fn build_bucket_data(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
     }
 }
 
-/// Compute the optimal GLV bucket width for a G1 MSM with `n` original points.
-///
-/// With GLV, each scalar produces two ~128-bit sub-scalars, so the effective
-/// point count is 2n. Minimizes the Pippenger cost:
-///   f(c) = ceil(128/c) × (2n + 2^(c-1))
-///
-/// Searched over c ∈ [10, 13]. Values above 13 cause exponential subsum cost
-/// growth on GPU (2^(c-1)/64 sequential additions per thread in tree reduction)
-/// that the classical Pippenger model fails to capture.
-pub fn optimal_glv_c(n: usize) -> usize {
-    if n < 256 {
-        return 13;
-    }
-    let effective_n = 2 * n;
-    let mut best_c = 13;
-    let mut best_cost = u64::MAX;
-    for c in 10..=13 {
-        let windows = 128u64.div_ceil(c as u64);
-        let buckets = 1u64 << (c - 1);
-        let cost = windows * (effective_n as u64 + buckets);
-        if cost < best_cost {
-            best_cost = cost;
-            best_c = c;
-        }
-    }
-    best_c
+pub fn optimal_glv_c<G: GpuCurve>(n: usize) -> usize {
+    G::g1_msm_bucket_width(n)
 }
 
 pub fn compute_bucket_sorting<G: GpuCurve>(scalars: &[G::Scalar]) -> BucketData {
@@ -303,14 +275,14 @@ pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
         .iter()
         .map(|s| G::scalar_to_signed_windows(s, c))
         .collect();
-    build_bucket_data(&all_windows, c)
+    build_bucket_data::<G>(&all_windows, c)
 }
 
-/// GLV-aware bucket sorting for G1 MSM with signed-digit decomposition.
+/// Curve-capability-aware G1 bucket sorting with signed-digit decomposition.
 ///
-/// Decomposes each scalar via GLV into two ~128-bit components, applies signed-digit
-/// decomposition to halve bucket count, builds a 2N-entry bases buffer with conditional
-/// point negation, and produces BucketData.
+/// For GLV-capable curves, decomposes each scalar into two components and builds a
+/// 2N-entry bases buffer with conditional point negation. For non-GLV curves,
+/// falls back to standard signed-window sorting and returns the original base bytes.
 ///
 /// Returns `(combined_bases_bytes, bucket_data)` where `combined_bases_bytes` is
 /// a 2N×G1_GPU_BYTES buffer laid out as:
@@ -321,77 +293,92 @@ pub fn compute_glv_bucket_sorting<G: GpuCurve>(
     phi_bases_bytes: &[u8],
     c: usize,
 ) -> (Vec<u8>, BucketData) {
+    if !G::HAS_G1_GLV {
+        let bd = compute_bucket_sorting_with_width::<G>(scalars, c);
+        return (bases_bytes.to_vec(), bd);
+    }
+
     let n = scalars.len();
-    debug_assert_eq!(bases_bytes.len(), n * G1_GPU_BYTES);
-    debug_assert_eq!(phi_bases_bytes.len(), n * G1_GPU_BYTES);
+    debug_assert_eq!(bases_bytes.len(), n * G::G1_GPU_BYTES);
+    debug_assert_eq!(phi_bases_bytes.len(), n * G::G1_GPU_BYTES);
 
     // Decompose all scalars and build the combined bases buffer.
-    let mut combined_bases = Vec::with_capacity(n * 2 * G1_GPU_BYTES);
+    let mut combined_bases = Vec::with_capacity(n * 2 * G::G1_GPU_BYTES);
     let mut all_windows: Vec<Vec<(u32, bool)>> = Vec::with_capacity(n * 2);
 
     for (i, scalar) in scalars.iter().enumerate() {
-        let (k1, k1_neg, k2, k2_neg) = glv::glv_decompose(scalar);
+        if let Some((k1_windows, k1_neg, k2_windows, k2_neg)) =
+            G::decompose_g1_msm_scalar_glv_windows(scalar, c)
+        {
+            let src_start = i * G::G1_GPU_BYTES;
+            let mut p_bytes = bases_bytes[src_start..src_start + G::G1_GPU_BYTES].to_vec();
+            if k1_neg {
+                G::negate_g1_base_bytes(&mut p_bytes);
+            }
+            combined_bases.extend_from_slice(&p_bytes);
 
-        // Entry 2i: original base P_i (conditionally negated by k1 sign)
-        let src_start = i * G1_GPU_BYTES;
-        let mut p_bytes = bases_bytes[src_start..src_start + G1_GPU_BYTES].to_vec();
-        if k1_neg {
-            glv::negate_g1_bytes(&mut p_bytes);
+            let mut phi_bytes = phi_bases_bytes[src_start..src_start + G::G1_GPU_BYTES].to_vec();
+            if k2_neg {
+                G::negate_g1_base_bytes(&mut phi_bytes);
+            }
+            combined_bases.extend_from_slice(&phi_bytes);
+
+            all_windows.push(k1_windows);
+            all_windows.push(k2_windows);
+        } else if let G1MsmDecomposition::Standard { windows } =
+            G::decompose_g1_msm_scalar(scalar, c)
+        {
+            let src_start = i * G::G1_GPU_BYTES;
+            combined_bases.extend_from_slice(&bases_bytes[src_start..src_start + G::G1_GPU_BYTES]);
+            all_windows.push(windows);
         }
-        combined_bases.extend_from_slice(&p_bytes);
-
-        // Entry 2i+1: endomorphism base φ(P_i) (conditionally negated by k2 sign)
-        let mut phi_bytes = phi_bases_bytes[src_start..src_start + G1_GPU_BYTES].to_vec();
-        if k2_neg {
-            glv::negate_g1_bytes(&mut phi_bytes);
-        }
-        combined_bases.extend_from_slice(&phi_bytes);
-
-        // Signed-digit window decompositions for the two half-scalars
-        all_windows.push(glv::u128_to_signed_windows(k1, c));
-        all_windows.push(glv::u128_to_signed_windows(k2, c));
     }
 
-    (combined_bases, build_bucket_data(&all_windows, c))
+    (combined_bases, build_bucket_data::<G>(&all_windows, c))
 }
 
-/// GLV-aware bucket sorting that returns only BucketData (no bases buffer).
+/// Curve-capability-aware bucket sorting that returns only BucketData (no bases buffer).
 ///
-/// Used with persistent GPU bases: GLV negation is folded into the `base_indices`
-/// sign bits (XOR with signed-digit window sign) instead of mutating base bytes.
-/// The caller must provide bases in fixed interleaved layout:
-///   [P₀, φ(P₀), P₁, φ(P₁), ...]
+/// For GLV-capable curves with persistent bases, GLV negation is folded into
+/// `base_indices` sign bits (XOR with signed-digit window sign) instead of mutating
+/// base bytes. For non-GLV curves this is equivalent to standard sorting.
 pub fn compute_glv_bucket_data<G: GpuCurve>(scalars: &[G::Scalar], c: usize) -> BucketData {
+    if !G::HAS_G1_GLV {
+        return compute_bucket_sorting_with_width::<G>(scalars, c);
+    }
+
     let n = scalars.len();
     let mut all_windows: Vec<Vec<(u32, bool)>> = Vec::with_capacity(n * 2);
 
     for scalar in scalars.iter() {
-        let (k1, k1_neg, k2, k2_neg) = glv::glv_decompose(scalar);
-
-        // Entry 2i: k1 windows — fold GLV negation into sign bits
-        let mut k1_windows = glv::u128_to_signed_windows(k1, c);
-        if k1_neg {
-            for w in &mut k1_windows {
-                if w.0 != 0 {
-                    w.1 = !w.1;
+        if let Some((mut k1_windows, k1_neg, mut k2_windows, k2_neg)) =
+            G::decompose_g1_msm_scalar_glv_windows(scalar, c)
+        {
+            if k1_neg {
+                for w in &mut k1_windows {
+                    if w.0 != 0 {
+                        w.1 = !w.1;
+                    }
                 }
             }
-        }
-        all_windows.push(k1_windows);
+            all_windows.push(k1_windows);
 
-        // Entry 2i+1: k2 windows — fold GLV negation into sign bits
-        let mut k2_windows = glv::u128_to_signed_windows(k2, c);
-        if k2_neg {
-            for w in &mut k2_windows {
-                if w.0 != 0 {
-                    w.1 = !w.1;
+            if k2_neg {
+                for w in &mut k2_windows {
+                    if w.0 != 0 {
+                        w.1 = !w.1;
+                    }
                 }
             }
+            all_windows.push(k2_windows);
+        } else if let G1MsmDecomposition::Standard { windows } =
+            G::decompose_g1_msm_scalar(scalar, c)
+        {
+            all_windows.push(windows);
         }
-        all_windows.push(k2_windows);
     }
 
-    build_bucket_data(&all_windows, c)
+    build_bucket_data::<G>(&all_windows, c)
 }
 
 #[cfg(test)]

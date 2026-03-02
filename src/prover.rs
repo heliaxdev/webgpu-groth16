@@ -184,9 +184,9 @@ where
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     // Adaptive bucket width: choose per-MSM c based on point count.
-    let a_c = optimal_glv_c(a_assignment.len());
-    let b1_c = optimal_glv_c(b_assignment.len());
-    let l_c = optimal_glv_c(cs.aux.len());
+    let a_c = optimal_glv_c::<G>(a_assignment.len());
+    let b1_c = optimal_glv_c::<G>(b_assignment.len());
+    let l_c = optimal_glv_c::<G>(cs.aux.len());
 
     // Bucket sorting: with persistent GPU key, GLV negation is folded into sign bits
     // and no combined bases buffer is built. Without it, the original path is used.
@@ -208,16 +208,24 @@ where
         b1_glv_bytes = Vec::new();
         l_glv_bytes = Vec::new();
     } else {
-        let (a_bytes, a_bd_tmp) =
-            compute_glv_bucket_sorting::<G>(&a_assignment, &ppk.a_bytes, &ppk.a_phi_bytes, a_c);
+        let (a_bytes, a_bd_tmp) = compute_glv_bucket_sorting::<G>(
+            &a_assignment,
+            &ppk.a_bytes,
+            ppk.a_phi_bytes.as_deref().unwrap_or(&[]),
+            a_c,
+        );
         let (b1_bytes, b1_bd_tmp) = compute_glv_bucket_sorting::<G>(
             &b_assignment,
             &ppk.b_g1_bytes,
-            &ppk.b_g1_phi_bytes,
+            ppk.b_g1_phi_bytes.as_deref().unwrap_or(&[]),
             b1_c,
         );
-        let (l_bytes, l_bd_tmp) =
-            compute_glv_bucket_sorting::<G>(&cs.aux, &ppk.l_bytes, &ppk.l_phi_bytes, l_c);
+        let (l_bytes, l_bd_tmp) = compute_glv_bucket_sorting::<G>(
+            &cs.aux,
+            &ppk.l_bytes,
+            ppk.l_phi_bytes.as_deref().unwrap_or(&[]),
+            l_c,
+        );
         a_bd = a_bd_tmp;
         b1_bd = b1_bd_tmp;
         l_bd = l_bd_tmp;
@@ -297,7 +305,7 @@ where
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     let h_job;
-    let h_c = optimal_glv_c(pk.h.len());
+    let h_c = optimal_glv_c::<G>(pk.h.len());
     if let Some(gpk) = gpu_pk {
         let h_bd = compute_glv_bucket_data::<G>(&h_coeffs[..pk.h.len()], h_c);
         #[cfg(feature = "timing")]
@@ -324,7 +332,7 @@ where
         let (h_glv_bytes, h_bd) = compute_glv_bucket_sorting::<G>(
             &h_coeffs[..pk.h.len()],
             &ppk.h_bytes,
-            &ppk.h_phi_bytes,
+            ppk.h_phi_bytes.as_deref().unwrap_or(&[]),
             h_c,
         );
         #[cfg(feature = "timing")]

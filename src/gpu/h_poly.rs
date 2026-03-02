@@ -15,7 +15,7 @@
 use wgpu::util::DeviceExt;
 
 use super::curve::GpuCurve;
-use super::{GpuContext, HPolyBuffers, NTT_TILE_SIZE, SCALAR_WORKGROUP_SIZE, compute_pass};
+use super::{GpuContext, HPolyBuffers, compute_pass};
 
 impl<C: GpuCurve> GpuContext<C> {
     pub fn execute_h_pipeline(&self, bufs: &HPolyBuffers<'_>, n: u32) {
@@ -109,7 +109,7 @@ impl<C: GpuCurve> GpuContext<C> {
             let mut pass = compute_pass!(scope, encoder, "to_montgomery");
             pass.set_pipeline(&self.to_montgomery_pipeline);
             pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(n.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+            pass.dispatch_workgroups(n.div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
         }
 
         macro_rules! encode_ntt {
@@ -121,7 +121,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 $shifts_buf:expr,
                 $is_h_fused_pointwise:expr
             ) => {
-                if n <= NTT_TILE_SIZE {
+                if n <= C::NTT_TILE_SIZE {
                     let bg = ntt_bg($data_buf, $tw_buf);
                     if $is_h_fused_pointwise {
                         let shifts_group1 = fused_shift_bg($shifts_buf.unwrap());
@@ -130,19 +130,19 @@ impl<C: GpuCurve> GpuContext<C> {
                         pass.set_bind_group(0, &bg, &[]);
                         pass.set_bind_group(1, &shifts_group1, &[]);
                         pass.set_bind_group(2, &pointwise_fused_bg, &[]);
-                        pass.dispatch_workgroups(n.div_ceil(NTT_TILE_SIZE), 1, 1);
+                        pass.dispatch_workgroups(n.div_ceil(C::NTT_TILE_SIZE), 1, 1);
                     } else if $is_fused_shift {
                         let shifts_group1 = fused_shift_bg($shifts_buf.unwrap());
                         let mut pass = compute_pass!(scope, encoder, concat!($label, "_fused"));
                         pass.set_pipeline(&self.ntt_fused_pipeline);
                         pass.set_bind_group(0, &bg, &[]);
                         pass.set_bind_group(1, &shifts_group1, &[]);
-                        pass.dispatch_workgroups(n.div_ceil(NTT_TILE_SIZE), 1, 1);
+                        pass.dispatch_workgroups(n.div_ceil(C::NTT_TILE_SIZE), 1, 1);
                     } else {
                         let mut pass = compute_pass!(scope, encoder, $label);
                         pass.set_pipeline(&self.ntt_pipeline);
                         pass.set_bind_group(0, &bg, &[]);
-                        pass.dispatch_workgroups(n.div_ceil(NTT_TILE_SIZE), 1, 1);
+                        pass.dispatch_workgroups(n.div_ceil(C::NTT_TILE_SIZE), 1, 1);
                     }
                 } else {
                     let mut log_n = 0u32;
@@ -188,13 +188,13 @@ impl<C: GpuCurve> GpuContext<C> {
                         pass.set_bind_group(0, &bg, &[]);
                         pass.set_bind_group(1, &shifts_group1, &[]);
                         pass.set_bind_group(2, &pointwise_fused_bg, &[]);
-                        pass.dispatch_workgroups(n.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+                        pass.dispatch_workgroups(n.div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
                     } else {
                         let mut pass =
                             compute_pass!(scope, encoder, concat!($label, "_bitreverse"));
                         pass.set_pipeline(&self.ntt_bitreverse_pipeline);
                         pass.set_bind_group(0, &bg, &[]);
-                        pass.dispatch_workgroups(n.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+                        pass.dispatch_workgroups(n.div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
                     }
 
                     let mut half_len = 1u32;
@@ -213,7 +213,7 @@ impl<C: GpuCurve> GpuContext<C> {
                         let mut pass = compute_pass!(scope, encoder, concat!($label, "_stage"));
                         pass.set_pipeline(&self.ntt_global_stage_pipeline);
                         pass.set_bind_group(0, &bg, &[]);
-                        pass.dispatch_workgroups((n / 2).div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+                        pass.dispatch_workgroups((n / 2).div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
 
                         half_len = 2;
                     }
@@ -234,7 +234,7 @@ impl<C: GpuCurve> GpuContext<C> {
                             compute_pass!(scope, encoder, concat!($label, "_stage_radix4"));
                         pass.set_pipeline(&self.ntt_global_stage_radix4_pipeline);
                         pass.set_bind_group(0, &bg, &[]);
-                        pass.dispatch_workgroups((n / 4).div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+                        pass.dispatch_workgroups((n / 4).div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
 
                         half_len <<= 2;
                     }
@@ -257,7 +257,7 @@ impl<C: GpuCurve> GpuContext<C> {
                         let mut pass = compute_pass!(scope, encoder, concat!($label, "_shift"));
                         pass.set_pipeline(&self.coset_shift_pipeline);
                         pass.set_bind_group(0, &shift_bg, &[]);
-                        pass.dispatch_workgroups(n.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+                        pass.dispatch_workgroups(n.div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
                     }
 
                     param_updates.push(params_buf);
@@ -333,7 +333,7 @@ impl<C: GpuCurve> GpuContext<C> {
             let mut pass = compute_pass!(scope, encoder, "from_montgomery_h");
             pass.set_pipeline(&self.from_montgomery_pipeline);
             pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(n.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+            pass.dispatch_workgroups(n.div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
         }
 
         #[cfg(feature = "profiling")]

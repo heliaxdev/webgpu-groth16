@@ -8,8 +8,8 @@
 
 use wgpu::util::DeviceExt;
 
+use super::GpuContext;
 use super::curve::GpuCurve;
-use super::{GpuContext, NTT_TILE_SIZE, SCALAR_WORKGROUP_SIZE};
 
 impl<C: GpuCurve> GpuContext<C> {
     pub fn execute_to_montgomery(&self, buffer: &wgpu::Buffer, num_elements: u32) {
@@ -31,7 +31,7 @@ impl<C: GpuCurve> GpuContext<C> {
             });
             cpass.set_pipeline(&self.to_montgomery_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.dispatch_workgroups(num_elements.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+            cpass.dispatch_workgroups(num_elements.div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
         }
         self.queue.submit(Some(encoder.finish()));
     }
@@ -55,7 +55,7 @@ impl<C: GpuCurve> GpuContext<C> {
             });
             cpass.set_pipeline(&self.from_montgomery_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.dispatch_workgroups(num_elements.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+            cpass.dispatch_workgroups(num_elements.div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
         }
         self.queue.submit(Some(encoder.finish()));
     }
@@ -66,7 +66,7 @@ impl<C: GpuCurve> GpuContext<C> {
         twiddles_buffer: &wgpu::Buffer,
         num_elements: u32,
     ) {
-        if num_elements > NTT_TILE_SIZE {
+        if num_elements > C::NTT_TILE_SIZE {
             self.execute_ntt_global(data_buffer, twiddles_buffer, num_elements);
             return;
         }
@@ -97,7 +97,7 @@ impl<C: GpuCurve> GpuContext<C> {
             });
             cpass.set_pipeline(&self.ntt_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.dispatch_workgroups(num_elements.div_ceil(NTT_TILE_SIZE), 1, 1);
+            cpass.dispatch_workgroups(num_elements.div_ceil(C::NTT_TILE_SIZE), 1, 1);
         }
         self.queue.submit(Some(encoder.finish()));
     }
@@ -171,7 +171,7 @@ impl<C: GpuCurve> GpuContext<C> {
             });
             pass.set_pipeline(&self.ntt_bitreverse_pipeline);
             pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(num_elements.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+            pass.dispatch_workgroups(num_elements.div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
         }
 
         // Butterfly stages (radix-4 with optional first radix-2 when needed)
@@ -197,7 +197,7 @@ impl<C: GpuCurve> GpuContext<C> {
             });
             pass.set_pipeline(&self.ntt_global_stage_pipeline);
             pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups((num_elements / 2).div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+            pass.dispatch_workgroups((num_elements / 2).div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
 
             half_len = 2;
         }
@@ -221,7 +221,7 @@ impl<C: GpuCurve> GpuContext<C> {
             });
             pass.set_pipeline(&self.ntt_global_stage_radix4_pipeline);
             pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups((num_elements / 4).div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+            pass.dispatch_workgroups((num_elements / 4).div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
 
             half_len <<= 2;
         }
@@ -259,7 +259,7 @@ impl<C: GpuCurve> GpuContext<C> {
             });
             cpass.set_pipeline(&self.coset_shift_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.dispatch_workgroups(num_elements.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+            cpass.dispatch_workgroups(num_elements.div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
         }
         self.queue.submit(Some(encoder.finish()));
     }
@@ -309,7 +309,7 @@ impl<C: GpuCurve> GpuContext<C> {
             });
             cpass.set_pipeline(&self.pointwise_poly_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.dispatch_workgroups(num_elements.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+            cpass.dispatch_workgroups(num_elements.div_ceil(C::SCALAR_WORKGROUP_SIZE), 1, 1);
         }
         self.queue.submit(Some(encoder.finish()));
     }

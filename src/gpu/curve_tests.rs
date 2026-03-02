@@ -1,4 +1,4 @@
-use super::{FQ_GPU_BYTES, FQ_GPU_PADDED_BYTES, G1_GPU_BYTES, G2_GPU_BYTES, GpuCurve};
+use super::GpuCurve;
 use blstrs::{Bls12, G1Affine, G2Affine, Scalar};
 use ff::{PrimeField, PrimeFieldBits};
 use group::Group;
@@ -151,7 +151,7 @@ fn signed_window_decomposition_below_half() {
 fn g1_identity_serialize_deserialize() {
     let identity = G1Affine::identity();
     let bytes = <Bls12 as GpuCurve>::serialize_g1(&identity);
-    assert_eq!(bytes.len(), G1_GPU_BYTES);
+    assert_eq!(bytes.len(), <Bls12 as GpuCurve>::G1_GPU_BYTES);
 
     // All bytes should be zero for identity
     assert!(bytes.iter().all(|&b| b == 0));
@@ -168,7 +168,7 @@ fn g1_identity_serialize_deserialize() {
 fn g2_identity_serialize_deserialize() {
     let identity = G2Affine::identity();
     let bytes = <Bls12 as GpuCurve>::serialize_g2(&identity);
-    assert_eq!(bytes.len(), G2_GPU_BYTES);
+    assert_eq!(bytes.len(), <Bls12 as GpuCurve>::G2_GPU_BYTES);
 
     // All bytes should be zero for identity
     assert!(bytes.iter().all(|&b| b == 0));
@@ -249,21 +249,29 @@ fn g1_serialization_byte_layout() {
     let g = G1Affine::generator();
     let bytes = <Bls12 as GpuCurve>::serialize_g1(&g);
 
-    assert_eq!(bytes.len(), G1_GPU_BYTES);
+    assert_eq!(bytes.len(), <Bls12 as GpuCurve>::G1_GPU_BYTES);
 
     // x and y should not be all zeros for the generator
-    assert!(!bytes[0..FQ_GPU_BYTES].iter().all(|&b| b == 0));
-    let y_start = FQ_GPU_PADDED_BYTES;
     assert!(
-        !bytes[y_start..y_start + FQ_GPU_BYTES]
+        !bytes[0..<Bls12 as GpuCurve>::FQ_GPU_BYTES]
+            .iter()
+            .all(|&b| b == 0)
+    );
+    let y_start = <Bls12 as GpuCurve>::FQ_GPU_PADDED_BYTES;
+    assert!(
+        !bytes[y_start..y_start + <Bls12 as GpuCurve>::FQ_GPU_BYTES]
             .iter()
             .all(|&b| b == 0)
     );
 
     // z = 1 in 13-bit format: limb[0] = 1, rest zeros (including padding)
-    let z_start = 2 * FQ_GPU_PADDED_BYTES;
+    let z_start = 2 * <Bls12 as GpuCurve>::FQ_GPU_PADDED_BYTES;
     assert_eq!(bytes[z_start], 1);
-    assert!(bytes[z_start + 1..G1_GPU_BYTES].iter().all(|&b| b == 0));
+    assert!(
+        bytes[z_start + 1..<Bls12 as GpuCurve>::G1_GPU_BYTES]
+            .iter()
+            .all(|&b| b == 0)
+    );
 }
 
 /// G1 deserialization rejects wrong-length input.

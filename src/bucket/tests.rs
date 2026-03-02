@@ -36,13 +36,14 @@ fn assert_bucket_data_invariants(bd: &BucketData, n: usize, c: usize) {
     let total_entries: u32 = bd.bucket_sizes.iter().sum();
     assert_eq!(total_entries as usize, bd.base_indices.len());
 
-    // Every sub-bucket is non-empty, within MAX_CHUNK_SIZE, and has valid pointers
+    // Every sub-bucket is non-empty, within curve chunk size, and has valid pointers
     for i in 0..bd.num_dispatched as usize {
         assert!(bd.bucket_sizes[i] > 0, "empty sub-bucket at index {i}");
         assert!(
-            bd.bucket_sizes[i] <= MAX_CHUNK_SIZE,
-            "sub-bucket {i} has size {} > MAX_CHUNK_SIZE={MAX_CHUNK_SIZE}",
-            bd.bucket_sizes[i]
+            bd.bucket_sizes[i] <= <Bls12 as GpuCurve>::MSM_MAX_CHUNK_SIZE,
+            "sub-bucket {i} has size {} > MSM_MAX_CHUNK_SIZE={}",
+            bd.bucket_sizes[i],
+            <Bls12 as GpuCurve>::MSM_MAX_CHUNK_SIZE
         );
         let ptr = bd.bucket_pointers[i] as usize;
         let end = ptr + bd.bucket_sizes[i] as usize;
@@ -331,7 +332,7 @@ fn signed_vs_unsigned_decomposition_same_scalar() {
 /// GLV bucket sorting: structural invariants hold for random scalars.
 #[test]
 fn glv_bucket_sorting_structural_invariants() {
-    use crate::glv;
+    use crate::glv::bls12_381 as glv;
     use blstrs::G1Affine;
     use group::prime::PrimeCurveAffine;
 
@@ -355,7 +356,7 @@ fn glv_bucket_sorting_structural_invariants() {
             compute_glv_bucket_sorting::<Bls12>(&scalars, &bases_bytes, &phi_bases_bytes, c);
 
         // Combined bases should have 2*n points of G1_GPU_BYTES bytes each
-        assert_eq!(combined.len(), n * 2 * G1_GPU_BYTES);
+        assert_eq!(combined.len(), n * 2 * <Bls12 as GpuCurve>::G1_GPU_BYTES);
 
         // Window/sub-bucket parallel array lengths
         assert_eq!(bd.bucket_pointers.len(), bd.num_dispatched as usize);
@@ -378,7 +379,7 @@ fn glv_bucket_sorting_structural_invariants() {
 
         // All base indices (after masking sign bit) must be < 2*n
         for &idx in &bd.base_indices {
-            let raw_idx = (idx & !SIGN_BIT) as usize;
+            let raw_idx = (idx & !<Bls12 as GpuCurve>::MSM_INDEX_SIGN_BIT) as usize;
             assert!(
                 raw_idx < 2 * n,
                 "GLV index {raw_idx} out of range for 2*n={}",
@@ -391,7 +392,7 @@ fn glv_bucket_sorting_structural_invariants() {
 /// GLV bucket sorting with all-zero scalars produces no buckets.
 #[test]
 fn glv_bucket_sorting_all_zero_scalars() {
-    use crate::glv;
+    use crate::glv::bls12_381 as glv;
     use blstrs::G1Affine;
     use group::prime::PrimeCurveAffine;
 
@@ -413,7 +414,7 @@ fn glv_bucket_sorting_all_zero_scalars() {
     let (combined, bd) =
         compute_glv_bucket_sorting::<Bls12>(&scalars, &bases_bytes, &phi_bases_bytes, c);
 
-    assert_eq!(combined.len(), n * 2 * G1_GPU_BYTES);
+    assert_eq!(combined.len(), n * 2 * <Bls12 as GpuCurve>::G1_GPU_BYTES);
     assert_eq!(bd.num_active_buckets, 0);
     assert_eq!(bd.base_indices.len(), 0);
 }
@@ -421,7 +422,7 @@ fn glv_bucket_sorting_all_zero_scalars() {
 /// GLV bucket sorting: every scalar's windows land in the correct bucket.
 #[test]
 fn glv_bucket_sorting_window_correctness() {
-    use crate::glv;
+    use crate::glv::bls12_381 as glv;
     use blstrs::G1Affine;
     use group::prime::PrimeCurveAffine;
 
@@ -475,7 +476,7 @@ fn glv_bucket_sorting_window_correctness() {
                 let (abs_val, is_neg) = windows[w];
                 if abs_val != 0 {
                     let expected_key = if is_neg {
-                        i as u32 | SIGN_BIT
+                        i as u32 | <Bls12 as GpuCurve>::MSM_INDEX_SIGN_BIT
                     } else {
                         i as u32
                     };
@@ -642,19 +643,19 @@ fn signed_windows_boundary_invariant() {
 #[test]
 fn optimal_glv_c_values() {
     // Tiny inputs get default
-    assert_eq!(optimal_glv_c(10), 13);
-    assert_eq!(optimal_glv_c(100), 13);
+    assert_eq!(optimal_glv_c::<Bls12>(10), 13);
+    assert_eq!(optimal_glv_c::<Bls12>(100), 13);
 
     // All values in valid range [10, 13]
     for n in [
         256, 500, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 500_000,
     ] {
-        let c = optimal_glv_c(n);
+        let c = optimal_glv_c::<Bls12>(n);
         assert!(c >= 10 && c <= 13, "c={c} out of range for n={n}");
     }
 
     // Larger inputs should prefer equal or larger c
-    let c_small = optimal_glv_c(1_000);
-    let c_large = optimal_glv_c(1_000_000);
+    let c_small = optimal_glv_c::<Bls12>(1_000);
+    let c_large = optimal_glv_c::<Bls12>(1_000_000);
     assert!(c_large >= c_small);
 }

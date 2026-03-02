@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use super::msm::{fold_window_sums_g1, gpu_msm_g2};
 use super::*;
-use crate::gpu::curve::{G1_GPU_BYTES, G2_GPU_BYTES};
+use crate::gpu::curve::GpuCurve;
 
 /// A simple dummy circuit that proves knowledge of a secret `x`
 /// such that `x^3 = y` (where `y` is public).
@@ -650,11 +650,26 @@ fn prepared_proving_key_sizes() {
 
     let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
 
-    assert_eq!(ppk.a_bytes.len(), params.a.len() * G1_GPU_BYTES);
-    assert_eq!(ppk.b_g1_bytes.len(), params.b_g1.len() * G1_GPU_BYTES);
-    assert_eq!(ppk.l_bytes.len(), params.l.len() * G1_GPU_BYTES);
-    assert_eq!(ppk.h_bytes.len(), params.h.len() * G1_GPU_BYTES);
-    assert_eq!(ppk.b_g2_bytes.len(), params.b_g2.len() * G2_GPU_BYTES);
+    assert_eq!(
+        ppk.a_bytes.len(),
+        params.a.len() * <Bls12 as GpuCurve>::G1_GPU_BYTES
+    );
+    assert_eq!(
+        ppk.b_g1_bytes.len(),
+        params.b_g1.len() * <Bls12 as GpuCurve>::G1_GPU_BYTES
+    );
+    assert_eq!(
+        ppk.l_bytes.len(),
+        params.l.len() * <Bls12 as GpuCurve>::G1_GPU_BYTES
+    );
+    assert_eq!(
+        ppk.h_bytes.len(),
+        params.h.len() * <Bls12 as GpuCurve>::G1_GPU_BYTES
+    );
+    assert_eq!(
+        ppk.b_g2_bytes.len(),
+        params.b_g2.len() * <Bls12 as GpuCurve>::G2_GPU_BYTES
+    );
 }
 
 #[tokio::test]

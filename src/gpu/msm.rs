@@ -29,11 +29,8 @@
 
 use wgpu::util::DeviceExt;
 
-use super::curve::{G1_GPU_BYTES, G2_GPU_BYTES, GpuCurve};
-use super::{
-    G1_SUBSUM_CHUNKS_PER_WINDOW, G2_SUBSUM_CHUNKS_PER_WINDOW, GpuContext, MSM_WORKGROUP_SIZE,
-    MsmBuffers, compute_pass,
-};
+use super::curve::GpuCurve;
+use super::{GpuContext, MsmBuffers, compute_pass};
 
 impl<C: GpuCurve> GpuContext<C> {
     #[allow(clippy::too_many_arguments)]
@@ -58,9 +55,9 @@ impl<C: GpuCurve> GpuContext<C> {
         let window_sums_buf = bufs.window_sums;
 
         let point_gpu_bytes: u64 = if is_g2 {
-            G2_GPU_BYTES as u64
+            C::G2_GPU_BYTES as u64
         } else {
-            G1_GPU_BYTES as u64
+            C::G1_GPU_BYTES as u64
         };
 
         // When chunking is active, aggregate writes to a larger intermediate buffer
@@ -134,9 +131,9 @@ impl<C: GpuCurve> GpuContext<C> {
                 }],
             });
             let point_size: u64 = if is_g2 {
-                G2_GPU_BYTES as u64
+                C::G2_GPU_BYTES as u64
             } else {
-                G1_GPU_BYTES as u64
+                C::G1_GPU_BYTES as u64
             };
             let num_bases = (bases_buf.size() / point_size) as u32;
             let mut cpass = compute_pass!(scope, encoder, "to_montgomery_bases");
@@ -146,7 +143,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &self.msm_to_mont_g1_pipeline
             });
             cpass.set_bind_group(0, &mont_bind_group, &[]);
-            cpass.dispatch_workgroups(num_bases.div_ceil(MSM_WORKGROUP_SIZE), 1, 1);
+            cpass.dispatch_workgroups(num_bases.div_ceil(C::MSM_WORKGROUP_SIZE), 1, 1);
         }
 
         {
@@ -157,7 +154,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &self.msm_agg_g1_pipeline
             });
             cpass.set_bind_group(0, &agg_bind_group, &[]);
-            cpass.dispatch_workgroups(num_dispatched.div_ceil(MSM_WORKGROUP_SIZE).max(1), 1, 1);
+            cpass.dispatch_workgroups(num_dispatched.div_ceil(C::MSM_WORKGROUP_SIZE).max(1), 1, 1);
         }
 
         // When sub-bucket chunking is active, reduce sub-bucket partial sums
@@ -198,7 +195,11 @@ impl<C: GpuCurve> GpuContext<C> {
                 &self.msm_reduce_g1_pipeline
             });
             cpass.set_bind_group(0, &reduce_bind_group, &[]);
-            cpass.dispatch_workgroups(num_active_buckets.div_ceil(MSM_WORKGROUP_SIZE).max(1), 1, 1);
+            cpass.dispatch_workgroups(
+                num_active_buckets.div_ceil(C::MSM_WORKGROUP_SIZE).max(1),
+                1,
+                1,
+            );
         }
 
         // Weight each bucket sum by its bucket value in a separate kernel.
@@ -239,7 +240,11 @@ impl<C: GpuCurve> GpuContext<C> {
                 &self.msm_weight_g1_pipeline
             });
             cpass.set_bind_group(0, &weight_bind_group, &[]);
-            cpass.dispatch_workgroups(num_active_buckets.div_ceil(MSM_WORKGROUP_SIZE).max(1), 1, 1);
+            cpass.dispatch_workgroups(
+                num_active_buckets.div_ceil(C::MSM_WORKGROUP_SIZE).max(1),
+                1,
+                1,
+            );
         }
 
         // Both G1 and G2: two-pass multi-workgroup tree reduction.
@@ -251,9 +256,9 @@ impl<C: GpuCurve> GpuContext<C> {
         // (which maps to num_active_buckets layout in aggregated_buckets_buf).
         {
             let chunks_per_window = if is_g2 {
-                G2_SUBSUM_CHUNKS_PER_WINDOW
+                C::G2_SUBSUM_CHUNKS_PER_WINDOW
             } else {
-                G1_SUBSUM_CHUNKS_PER_WINDOW
+                C::G1_SUBSUM_CHUNKS_PER_WINDOW
             };
             let subsum_window_starts = if has_chunks {
                 bufs.orig_window_starts
@@ -374,9 +379,9 @@ impl<C: GpuCurve> GpuContext<C> {
             }],
         });
         let point_size: u64 = if is_g2 {
-            G2_GPU_BYTES as u64
+            C::G2_GPU_BYTES as u64
         } else {
-            G1_GPU_BYTES as u64
+            C::G1_GPU_BYTES as u64
         };
         let num_bases = (buf.size() / point_size) as u32;
         let mut encoder = self
@@ -395,7 +400,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &self.msm_to_mont_g1_pipeline
             });
             cpass.set_bind_group(0, &mont_bind_group, &[]);
-            cpass.dispatch_workgroups(num_bases.div_ceil(MSM_WORKGROUP_SIZE), 1, 1);
+            cpass.dispatch_workgroups(num_bases.div_ceil(C::MSM_WORKGROUP_SIZE), 1, 1);
         }
         self.queue.submit(Some(encoder.finish()));
     }
