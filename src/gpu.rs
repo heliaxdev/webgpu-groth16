@@ -1,15 +1,16 @@
 //! GPU context, compute pipeline management, and kernel dispatch.
 //!
 //! [`GpuContext`] owns the wgpu device/queue and all pre-compiled compute
-//! pipelines needed for MSM, NTT, and polynomial operations. Submodules provide
-//! dispatch methods as `impl GpuContext` blocks:
-//!
-//! - [`msm`] — MSM 5-kernel Pippenger pipeline (to_montgomery, aggregate,
-//!   reduce, weight, subsum)
-//! - [`ntt`] — NTT dispatchers (tile-local and multi-stage global), Montgomery
-//!   conversion, coset shift, pointwise polynomial evaluation
-//! - [`h_poly`] — H-polynomial pipeline (fused NTT+shift → pointwise → iNTT)
-//! - [`curve`] — curve-agnostic trait + curve-specific implementations
+//! pipelines needed for MSM, NTT, and polynomial operations.
+
+// Implementation details:
+//
+// - [`msm`] — MSM 5-kernel Pippenger pipeline (to_montgomery, aggregate,
+//   reduce, weight, subsum)
+// - [`ntt`] — NTT dispatchers (tile-local and multi-stage global), Montgomery
+//   conversion, coset shift, pointwise polynomial evaluation
+// - [`h_poly`] — H-polynomial pipeline (fused NTT+shift → pointwise → iNTT)
+// - [`curve`] — curve-agnostic trait + curve-specific implementations
 
 mod buffers;
 pub mod curve;
