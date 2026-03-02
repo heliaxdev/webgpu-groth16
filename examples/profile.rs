@@ -4,8 +4,8 @@
 //!   cargo run --release --example profile -- [NUM_SQUARINGS] [ITERATIONS]
 //!
 //! With wgpu-profiler (GPU timing + chrome trace output):
-//!   cargo run --release --example profile --features profiling -- [NUM_SQUARINGS] [ITERATIONS]
-//!   Then open the generated `profile.json` in chrome://tracing or https://ui.perfetto.dev
+//!   cargo run --release --example profile --features profiling --
+//! [NUM_SQUARINGS] [ITERATIONS]   Then open the generated `profile.json` in chrome://tracing or https://ui.perfetto.dev
 //!
 //! Defaults: NUM_SQUARINGS=10000, ITERATIONS=5
 
@@ -13,10 +13,8 @@ use std::time::Instant;
 
 use blstrs::{Bls12, Scalar};
 use rand_core::OsRng;
-
-use webgpu_groth16::bellman;
 use webgpu_groth16::gpu::GpuContext;
-use webgpu_groth16::prover;
+use webgpu_groth16::{bellman, prover};
 
 // ---------------------------------------------------------------------------
 // Repeated-squaring circuit (same as benches/groth16_bench.rs)
@@ -42,12 +40,18 @@ impl<S: ff::PrimeField> bellman::Circuit<S> for RepeatedSquaringCircuit<S> {
             let next_var = if i == self.num_squarings - 1 {
                 cs.alloc_input(
                     || format!("sq_{i}"),
-                    || next_val.ok_or(bellman::SynthesisError::AssignmentMissing),
+                    || {
+                        next_val
+                            .ok_or(bellman::SynthesisError::AssignmentMissing)
+                    },
                 )?
             } else {
                 cs.alloc(
                     || format!("sq_{i}"),
-                    || next_val.ok_or(bellman::SynthesisError::AssignmentMissing),
+                    || {
+                        next_val
+                            .ok_or(bellman::SynthesisError::AssignmentMissing)
+                    },
                 )?
             };
             cs.enforce(
@@ -66,14 +70,21 @@ impl<S: ff::PrimeField> bellman::Circuit<S> for RepeatedSquaringCircuit<S> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let num_squarings: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10_000);
-    let iterations: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
+    let num_squarings: usize =
+        args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10_000);
+    let iterations: usize =
+        args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
 
     eprintln!("=== Groth16 GPU Profiling ===");
     #[cfg(feature = "profiling")]
-    eprintln!("  GPU profiling enabled — trace will be written to profile.json");
+    eprintln!(
+        "  GPU profiling enabled — trace will be written to profile.json"
+    );
     #[cfg(not(feature = "profiling"))]
-    eprintln!("  Wall-clock timing only (enable 'profiling' feature for GPU breakdown)");
+    eprintln!(
+        "  Wall-clock timing only (enable 'profiling' feature for GPU \
+         breakdown)"
+    );
     eprintln!("  constraints: {num_squarings}");
     eprintln!("  iterations:  {iterations}");
 
@@ -84,9 +95,11 @@ fn main() {
         x: None,
         num_squarings,
     };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("param gen failed");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("param gen failed");
     let ppk = prover::prepare_proving_key::<Bls12, Bls12>(&params);
     eprintln!("  setup:       {:?}", t_setup.elapsed());
 
@@ -169,7 +182,8 @@ fn main() {
     #[cfg(feature = "profiling")]
     {
         let trace_path = std::path::Path::new("profile.json");
-        write_chrometrace(trace_path, &all_profiling_data).expect("failed to write chrome trace");
+        write_chrometrace(trace_path, &all_profiling_data)
+            .expect("failed to write chrome trace");
         eprintln!();
         eprintln!("  Trace written to {}", trace_path.display());
         eprintln!("  Open in chrome://tracing or https://ui.perfetto.dev");
@@ -185,7 +199,9 @@ fn main() {
 /// For leaf scopes (no children), use the direct timestamp if it has a
 /// positive duration; otherwise return None to skip broken events.
 #[cfg(feature = "profiling")]
-fn effective_time(r: &wgpu_profiler::GpuTimerQueryResult) -> Option<std::ops::Range<f64>> {
+fn effective_time(
+    r: &wgpu_profiler::GpuTimerQueryResult,
+) -> Option<std::ops::Range<f64>> {
     if !r.nested_queries.is_empty() {
         // Parent scope: always synthesize from children.
         let mut start = f64::MAX;
@@ -211,13 +227,20 @@ fn effective_time(r: &wgpu_profiler::GpuTimerQueryResult) -> Option<std::ops::Ra
 }
 
 #[cfg(feature = "profiling")]
-fn print_gpu_results(results: &[wgpu_profiler::GpuTimerQueryResult], indent: usize) {
+fn print_gpu_results(
+    results: &[wgpu_profiler::GpuTimerQueryResult],
+    indent: usize,
+) {
     let pad = " ".repeat(indent);
     for r in results {
         if let Some(time) = effective_time(r) {
             let duration_s = time.end - time.start;
             if duration_s < 0.001 {
-                eprintln!("{pad}{}: {:.1} us", r.label, duration_s * 1_000_000.0);
+                eprintln!(
+                    "{pad}{}: {:.1} us",
+                    r.label,
+                    duration_s * 1_000_000.0
+                );
             } else {
                 eprintln!("{pad}{}: {:.2} ms", r.label, duration_s * 1_000.0);
             }
@@ -295,7 +318,8 @@ fn write_trace_event(
             let comma = if *first { "" } else { ",\n" };
             write!(
                 w,
-                "{comma}{{ \"pid\":{pid}, \"tid\":{tid}, \"ts\":{b_us}, \"ph\":\"B\", \"name\":\"{}\" }}",
+                "{comma}{{ \"pid\":{pid}, \"tid\":{tid}, \"ts\":{b_us}, \
+                 \"ph\":\"B\", \"name\":\"{}\" }}",
                 r.label,
             )?;
             *first = false;
@@ -307,7 +331,8 @@ fn write_trace_event(
             let e_us = (time.end - t0) * 1_000_000.0 + 0.01;
             write!(
                 w,
-                ",\n{{ \"pid\":{pid}, \"tid\":{tid}, \"ts\":{e_us}, \"ph\":\"E\", \"name\":\"{}\" }}",
+                ",\n{{ \"pid\":{pid}, \"tid\":{tid}, \"ts\":{e_us}, \
+                 \"ph\":\"E\", \"name\":\"{}\" }}",
                 r.label,
             )?;
         } else {
@@ -316,7 +341,8 @@ fn write_trace_event(
             let comma = if *first { "" } else { ",\n" };
             write!(
                 w,
-                "{comma}{{ \"pid\":{pid}, \"tid\":{tid}, \"ts\":{ts_us}, \"dur\":{dur_us}, \"ph\":\"X\", \"name\":\"{}\" }}",
+                "{comma}{{ \"pid\":{pid}, \"tid\":{tid}, \"ts\":{ts_us}, \
+                 \"dur\":{dur_us}, \"ph\":\"X\", \"name\":\"{}\" }}",
                 r.label,
             )?;
             *first = false;

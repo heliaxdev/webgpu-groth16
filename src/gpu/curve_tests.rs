@@ -1,14 +1,16 @@
-use super::GpuCurve;
 use blstrs::{Bls12, G1Affine, G2Affine, Scalar};
 use ff::{PrimeField, PrimeFieldBits};
 use group::Group;
 use group::prime::PrimeCurveAffine;
 
+use super::GpuCurve;
+
 #[test]
 fn g1_serialize_deserialize_round_trip() {
     let point = G1Affine::generator();
     let bytes = <Bls12 as GpuCurve>::serialize_g1(&point);
-    let parsed = <Bls12 as GpuCurve>::deserialize_g1(&bytes).expect("g1 deserialize failed");
+    let parsed = <Bls12 as GpuCurve>::deserialize_g1(&bytes)
+        .expect("g1 deserialize failed");
     let parsed_affine: G1Affine = parsed.into();
     assert_eq!(parsed_affine, point);
 }
@@ -17,7 +19,8 @@ fn g1_serialize_deserialize_round_trip() {
 fn g2_serialize_deserialize_round_trip() {
     let point = G2Affine::generator();
     let bytes = <Bls12 as GpuCurve>::serialize_g2(&point);
-    let parsed = <Bls12 as GpuCurve>::deserialize_g2(&bytes).expect("g2 deserialize failed");
+    let parsed = <Bls12 as GpuCurve>::deserialize_g2(&bytes)
+        .expect("g2 deserialize failed");
     let parsed_affine: G2Affine = parsed.into();
     assert_eq!(parsed_affine, point);
 }
@@ -105,7 +108,12 @@ fn signed_window_decomposition_roundtrip() {
 
         // Verify all absolute values are in [0, 2^(c-1)]
         for &(abs, _neg) in &signed {
-            assert!(abs <= half, "abs value {} exceeds 2^(c-1) = {}", abs, half);
+            assert!(
+                abs <= half,
+                "abs value {} exceeds 2^(c-1) = {}",
+                abs,
+                half
+            );
         }
     }
 }
@@ -119,7 +127,8 @@ fn signed_window_decomposition_half_boundary() {
     let s = Scalar::from(half);
     let signed = <Bls12 as GpuCurve>::scalar_to_signed_windows(&s, c);
 
-    // Window 0: val=half is >= half, so abs = 2^c - half = half, neg=true, carry=1
+    // Window 0: val=half is >= half, so abs = 2^c - half = half, neg=true,
+    // carry=1
     assert_eq!(signed[0], (half as u32, true));
     // Window 1: carry=1, which is < half, so (1, false)
     assert_eq!(signed[1], (1, false));
@@ -156,7 +165,8 @@ fn g1_identity_serialize_deserialize() {
     // All bytes should be zero for identity
     assert!(bytes.iter().all(|&b| b == 0));
 
-    let parsed = <Bls12 as GpuCurve>::deserialize_g1(&bytes).expect("identity deserialize");
+    let parsed = <Bls12 as GpuCurve>::deserialize_g1(&bytes)
+        .expect("identity deserialize");
     assert!(
         bool::from(parsed.is_identity()),
         "deserialized identity should be identity"
@@ -173,7 +183,8 @@ fn g2_identity_serialize_deserialize() {
     // All bytes should be zero for identity
     assert!(bytes.iter().all(|&b| b == 0));
 
-    let parsed = <Bls12 as GpuCurve>::deserialize_g2(&bytes).expect("g2 identity deserialize");
+    let parsed = <Bls12 as GpuCurve>::deserialize_g2(&bytes)
+        .expect("g2 identity deserialize");
     assert!(
         bool::from(parsed.is_identity()),
         "deserialized G2 identity should be identity"
@@ -190,7 +201,8 @@ fn g1_random_points_roundtrip() {
         let point = g * Scalar::from(i);
         let affine: G1Affine = point.into();
         let bytes = <Bls12 as GpuCurve>::serialize_g1(&affine);
-        let parsed = <Bls12 as GpuCurve>::deserialize_g1(&bytes).expect("random g1 deserialize");
+        let parsed = <Bls12 as GpuCurve>::deserialize_g1(&bytes)
+            .expect("random g1 deserialize");
         let parsed_affine: G1Affine = parsed.into();
         assert_eq!(
             parsed_affine, affine,
@@ -209,7 +221,8 @@ fn g2_random_points_roundtrip() {
         let point = g * Scalar::from(i);
         let affine: G2Affine = point.into();
         let bytes = <Bls12 as GpuCurve>::serialize_g2(&affine);
-        let parsed = <Bls12 as GpuCurve>::deserialize_g2(&bytes).expect("random g2 deserialize");
+        let parsed = <Bls12 as GpuCurve>::deserialize_g2(&bytes)
+            .expect("random g2 deserialize");
         let parsed_affine: G2Affine = parsed.into();
         assert_eq!(
             parsed_affine, affine,
@@ -238,7 +251,8 @@ fn scalar_serialize_deserialize_roundtrip() {
     for (i, s) in test_scalars.iter().enumerate() {
         let bytes = <Bls12 as GpuCurve>::serialize_scalar(s);
         assert_eq!(bytes.len(), 32, "scalar bytes length should be 32");
-        let parsed = <Bls12 as GpuCurve>::deserialize_scalar(&bytes).expect("scalar deserialize");
+        let parsed = <Bls12 as GpuCurve>::deserialize_scalar(&bytes)
+            .expect("scalar deserialize");
         assert_eq!(parsed, *s, "scalar roundtrip failed for test case {i}");
     }
 }
@@ -305,7 +319,8 @@ fn scalar_window_values_bounded() {
     }
 }
 
-/// Window decomposition with different widths (c=8, c=13, c=16) always reconstructs.
+/// Window decomposition with different widths (c=8, c=13, c=16) always
+/// reconstructs.
 #[test]
 fn scalar_window_decomposition_various_widths() {
     use ff::Field;
@@ -324,7 +339,10 @@ fn scalar_window_decomposition_various_widths() {
                 reconstructed += Scalar::from(w as u64) * power;
                 power *= base;
             }
-            assert_eq!(reconstructed, s, "unsigned decomposition failed for c={c}");
+            assert_eq!(
+                reconstructed, s,
+                "unsigned decomposition failed for c={c}"
+            );
         }
     }
 }
@@ -355,7 +373,10 @@ fn signed_window_decomposition_various_widths() {
                 }
                 power *= base;
             }
-            assert_eq!(reconstructed, s, "signed decomposition failed for c={c}");
+            assert_eq!(
+                reconstructed, s,
+                "signed decomposition failed for c={c}"
+            );
         }
     }
 }

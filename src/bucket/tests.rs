@@ -1,7 +1,8 @@
-use super::*;
 use blstrs::Bls12;
 use ff::Field;
 use rand_core::OsRng;
+
+use super::*;
 
 type Scalar = <Bls12 as GpuCurve>::Scalar;
 
@@ -36,7 +37,8 @@ fn assert_bucket_data_invariants(bd: &BucketData, n: usize, c: usize) {
     let total_entries: u32 = bd.bucket_sizes.iter().sum();
     assert_eq!(total_entries as usize, bd.base_indices.len());
 
-    // Every sub-bucket is non-empty, within curve chunk size, and has valid pointers
+    // Every sub-bucket is non-empty, within curve chunk size, and has valid
+    // pointers
     for i in 0..bd.num_dispatched as usize {
         assert!(bd.bucket_sizes[i] > 0, "empty sub-bucket at index {i}");
         assert!(
@@ -106,8 +108,13 @@ fn assert_bucket_data_invariants(bd: &BucketData, n: usize, c: usize) {
     }
 }
 
-/// Verify that every non-zero signed window digit appears in exactly the right bucket.
-fn assert_bucket_data_covers_all_windows(bd: &BucketData, scalars: &[Scalar], c: usize) {
+/// Verify that every non-zero signed window digit appears in exactly the right
+/// bucket.
+fn assert_bucket_data_covers_all_windows(
+    bd: &BucketData,
+    scalars: &[Scalar],
+    c: usize,
+) {
     let n = scalars.len();
     let all_windows: Vec<Vec<(u32, bool)>> = scalars
         .iter()
@@ -119,7 +126,8 @@ fn assert_bucket_data_covers_all_windows(bd: &BucketData, scalars: &[Scalar], c:
         let w_start = bd.window_starts[w] as usize;
         let w_count = bd.window_counts[w] as usize;
 
-        // Build a map: (scalar_index, sign) -> bucket_value from the BucketData.
+        // Build a map: (scalar_index, sign) -> bucket_value from the
+        // BucketData.
         let mut found: std::collections::HashMap<(u32, bool), u32> =
             std::collections::HashMap::new();
         for b in 0..w_count {
@@ -132,11 +140,15 @@ fn assert_bucket_data_covers_all_windows(bd: &BucketData, scalars: &[Scalar], c:
                 let idx = raw & INDEX_MASK;
                 let neg = (raw & SIGN_BIT_MASK) != 0;
                 let prev = found.insert((idx, neg), val);
-                assert!(prev.is_none(), "scalar {idx} appears twice in window {w}");
+                assert!(
+                    prev.is_none(),
+                    "scalar {idx} appears twice in window {w}"
+                );
             }
         }
 
-        // Verify every non-zero signed window digit was placed in the correct bucket.
+        // Verify every non-zero signed window digit was placed in the correct
+        // bucket.
         for i in 0..n {
             if w < all_windows[i].len() {
                 let (abs, neg) = all_windows[i][w];
@@ -145,7 +157,8 @@ fn assert_bucket_data_covers_all_windows(bd: &BucketData, scalars: &[Scalar], c:
                     assert_eq!(
                         got,
                         Some(&abs),
-                        "scalar {i} window {w}: expected bucket val={abs} neg={neg}, got {:?}",
+                        "scalar {i} window {w}: expected bucket val={abs} \
+                         neg={neg}, got {:?}",
                         got
                     );
                 } else {
@@ -153,7 +166,8 @@ fn assert_bucket_data_covers_all_windows(bd: &BucketData, scalars: &[Scalar], c:
                     assert!(
                         !found.contains_key(&(i as u32, false))
                             && !found.contains_key(&(i as u32, true)),
-                        "scalar {i} has zero window {w} but appeared in bucket data"
+                        "scalar {i} has zero window {w} but appeared in \
+                         bucket data"
                     );
                 }
             }
@@ -165,7 +179,8 @@ fn assert_bucket_data_covers_all_windows(bd: &BucketData, scalars: &[Scalar], c:
 fn bucket_sorting_structural_invariants_random() {
     let c = <Bls12 as GpuCurve>::bucket_width();
     for &n in &[1, 2, 10, 100, 1000] {
-        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(OsRng)).collect();
+        let scalars: Vec<Scalar> =
+            (0..n).map(|_| Scalar::random(OsRng)).collect();
         let bd = compute_bucket_sorting::<Bls12>(&scalars);
         assert_bucket_data_invariants(&bd, n, c);
         assert_bucket_data_covers_all_windows(&bd, &scalars, c);
@@ -175,7 +190,8 @@ fn bucket_sorting_structural_invariants_random() {
 #[test]
 fn bucket_sorting_structural_invariants_g2_width() {
     let c = <Bls12 as GpuCurve>::g2_bucket_width();
-    let scalars: Vec<Scalar> = (0..200).map(|_| Scalar::random(OsRng)).collect();
+    let scalars: Vec<Scalar> =
+        (0..200).map(|_| Scalar::random(OsRng)).collect();
     let bd = compute_bucket_sorting_with_width::<Bls12>(&scalars, c);
     assert_bucket_data_invariants(&bd, 200, c);
     assert_bucket_data_covers_all_windows(&bd, &scalars, c);
@@ -209,11 +225,13 @@ fn bucket_sorting_single_scalar() {
 
 #[test]
 fn bucket_sorting_scalar_needing_negation() {
-    // A scalar whose first window is >= 2^(c-1) should produce a negative entry.
+    // A scalar whose first window is >= 2^(c-1) should produce a negative
+    // entry.
     let c = <Bls12 as GpuCurve>::bucket_width();
     let half = 1u64 << (c - 1);
-    // Scalar = 2^(c-1) should produce: window 0 = -(2^c - 2^(c-1)) = -2^(c-1), carry=1
-    // i.e., (abs=half, neg=true) for window 0, and (1, false) for window 1.
+    // Scalar = 2^(c-1) should produce: window 0 = -(2^c - 2^(c-1)) = -2^(c-1),
+    // carry=1 i.e., (abs=half, neg=true) for window 0, and (1, false) for
+    // window 1.
     let s = Scalar::from(half);
     let scalars = vec![s];
     let bd = compute_bucket_sorting::<Bls12>(&scalars);
@@ -259,20 +277,22 @@ fn bucket_sorting_max_scalar() {
 fn bucket_sorting_powers_of_two() {
     // Powers of 2 exercise carry propagation across window boundaries.
     let c = <Bls12 as GpuCurve>::bucket_width();
-    let scalars: Vec<Scalar> = (0..20).map(|i| Scalar::from(1u64 << i)).collect();
+    let scalars: Vec<Scalar> =
+        (0..20).map(|i| Scalar::from(1u64 << i)).collect();
     let bd = compute_bucket_sorting::<Bls12>(&scalars);
     assert_bucket_data_invariants(&bd, 20, c);
     assert_bucket_data_covers_all_windows(&bd, &scalars, c);
 }
 
-/// Verify that the number of *original* buckets per window is bounded by 2^(c-1).
-/// With sub-bucket chunking, num_dispatched sub-buckets per window can exceed this
-/// but the distinct bucket values per window must not.
+/// Verify that the number of *original* buckets per window is bounded by
+/// 2^(c-1). With sub-bucket chunking, num_dispatched sub-buckets per window can
+/// exceed this but the distinct bucket values per window must not.
 #[test]
 fn bucket_count_halved_vs_unsigned() {
     let c = <Bls12 as GpuCurve>::bucket_width();
     let half = (1u32 << (c - 1)) as usize;
-    let scalars: Vec<Scalar> = (0..5000).map(|_| Scalar::random(OsRng)).collect();
+    let scalars: Vec<Scalar> =
+        (0..5000).map(|_| Scalar::random(OsRng)).collect();
     let bd = compute_bucket_sorting::<Bls12>(&scalars);
 
     for w in 0..bd.num_windows as usize {
@@ -291,8 +311,9 @@ fn bucket_count_halved_vs_unsigned() {
     }
 }
 
-/// Verify signed-digit decomposition is consistent with unsigned for reconstruction.
-/// The signed and unsigned decompositions must yield the same scalar.
+/// Verify signed-digit decomposition is consistent with unsigned for
+/// reconstruction. The signed and unsigned decompositions must yield the same
+/// scalar.
 #[test]
 fn signed_vs_unsigned_decomposition_same_scalar() {
     let c = <Bls12 as GpuCurve>::bucket_width();
@@ -332,15 +353,17 @@ fn signed_vs_unsigned_decomposition_same_scalar() {
 /// GLV bucket sorting: structural invariants hold for random scalars.
 #[test]
 fn glv_bucket_sorting_structural_invariants() {
-    use crate::glv::bls12_381 as glv;
     use blstrs::G1Affine;
     use group::prime::PrimeCurveAffine;
+
+    use crate::glv::bls12_381 as glv;
 
     let c = 15usize;
     let g = G1Affine::generator();
 
     for &n in &[1, 2, 10, 50] {
-        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(OsRng)).collect();
+        let scalars: Vec<Scalar> =
+            (0..n).map(|_| Scalar::random(OsRng)).collect();
 
         let bases_bytes: Vec<u8> = (0..n)
             .flat_map(|_| <Bls12 as GpuCurve>::serialize_g1(&g))
@@ -352,8 +375,12 @@ fn glv_bucket_sorting_structural_invariants() {
             })
             .collect();
 
-        let (combined, bd) =
-            compute_glv_bucket_sorting::<Bls12>(&scalars, &bases_bytes, &phi_bases_bytes, c);
+        let (combined, bd) = compute_glv_bucket_sorting::<Bls12>(
+            &scalars,
+            &bases_bytes,
+            &phi_bases_bytes,
+            c,
+        );
 
         // Combined bases should have 2*n points of G1_GPU_BYTES bytes each
         assert_eq!(combined.len(), n * 2 * <Bls12 as GpuCurve>::G1_GPU_BYTES);
@@ -379,7 +406,8 @@ fn glv_bucket_sorting_structural_invariants() {
 
         // All base indices (after masking sign bit) must be < 2*n
         for &idx in &bd.base_indices {
-            let raw_idx = (idx & !<Bls12 as GpuCurve>::MSM_INDEX_SIGN_BIT) as usize;
+            let raw_idx =
+                (idx & !<Bls12 as GpuCurve>::MSM_INDEX_SIGN_BIT) as usize;
             assert!(
                 raw_idx < 2 * n,
                 "GLV index {raw_idx} out of range for 2*n={}",
@@ -392,9 +420,10 @@ fn glv_bucket_sorting_structural_invariants() {
 /// GLV bucket sorting with all-zero scalars produces no buckets.
 #[test]
 fn glv_bucket_sorting_all_zero_scalars() {
-    use crate::glv::bls12_381 as glv;
     use blstrs::G1Affine;
     use group::prime::PrimeCurveAffine;
+
+    use crate::glv::bls12_381 as glv;
 
     let c = 15usize;
     let g = G1Affine::generator();
@@ -411,8 +440,12 @@ fn glv_bucket_sorting_all_zero_scalars() {
         })
         .collect();
 
-    let (combined, bd) =
-        compute_glv_bucket_sorting::<Bls12>(&scalars, &bases_bytes, &phi_bases_bytes, c);
+    let (combined, bd) = compute_glv_bucket_sorting::<Bls12>(
+        &scalars,
+        &bases_bytes,
+        &phi_bases_bytes,
+        c,
+    );
 
     assert_eq!(combined.len(), n * 2 * <Bls12 as GpuCurve>::G1_GPU_BYTES);
     assert_eq!(bd.num_active_buckets, 0);
@@ -422,9 +455,10 @@ fn glv_bucket_sorting_all_zero_scalars() {
 /// GLV bucket sorting: every scalar's windows land in the correct bucket.
 #[test]
 fn glv_bucket_sorting_window_correctness() {
-    use crate::glv::bls12_381 as glv;
     use blstrs::G1Affine;
     use group::prime::PrimeCurveAffine;
+
+    use crate::glv::bls12_381 as glv;
 
     let c = 15usize;
     let g = G1Affine::generator();
@@ -441,8 +475,12 @@ fn glv_bucket_sorting_window_correctness() {
         })
         .collect();
 
-    let (_combined, bd) =
-        compute_glv_bucket_sorting::<Bls12>(&scalars, &bases_bytes, &phi_bases_bytes, c);
+    let (_combined, bd) = compute_glv_bucket_sorting::<Bls12>(
+        &scalars,
+        &bases_bytes,
+        &phi_bases_bytes,
+        c,
+    );
 
     // Recompute the expected signed-digit windows
     let mut expected_windows: Vec<Vec<(u32, bool)>> = Vec::new();
@@ -458,7 +496,8 @@ fn glv_bucket_sorting_window_correctness() {
         let w_count = bd.window_counts[w] as usize;
 
         // Map from raw base_indices entry (with SIGN_BIT) to bucket value
-        let mut found: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut found: std::collections::HashMap<u32, u32> =
+            std::collections::HashMap::new();
         for b in 0..w_count {
             let bucket_idx = w_start + b;
             let val = bd.bucket_values[bucket_idx];
@@ -483,7 +522,8 @@ fn glv_bucket_sorting_window_correctness() {
                     assert_eq!(
                         found.get(&expected_key),
                         Some(&abs_val),
-                        "point {i} window {w}: expected bucket {abs_val} (neg={is_neg}), got {:?}",
+                        "point {i} window {w}: expected bucket {abs_val} \
+                         (neg={is_neg}), got {:?}",
                         found.get(&expected_key)
                     );
                 }
@@ -495,7 +535,8 @@ fn glv_bucket_sorting_window_correctness() {
 /// Bucket pointers form contiguous, non-overlapping spans in base_indices.
 #[test]
 fn bucket_pointers_are_contiguous() {
-    let scalars: Vec<Scalar> = (0..500).map(|_| Scalar::random(OsRng)).collect();
+    let scalars: Vec<Scalar> =
+        (0..500).map(|_| Scalar::random(OsRng)).collect();
     let bd = compute_bucket_sorting::<Bls12>(&scalars);
 
     if bd.num_dispatched == 0 {
@@ -518,7 +559,8 @@ fn bucket_pointers_are_contiguous() {
 /// Each scalar appears at most once per window in the bucket data.
 #[test]
 fn no_duplicate_scalars_in_window() {
-    let scalars: Vec<Scalar> = (0..200).map(|_| Scalar::random(OsRng)).collect();
+    let scalars: Vec<Scalar> =
+        (0..200).map(|_| Scalar::random(OsRng)).collect();
     let bd = compute_bucket_sorting::<Bls12>(&scalars);
 
     for w in 0..bd.num_windows as usize {
@@ -547,7 +589,8 @@ fn no_duplicate_scalars_in_window() {
 #[test]
 fn bucket_values_unique_per_window_no_chunking() {
     // 300 random scalars at c=13 => ~1-2 points per bucket, no chunking
-    let scalars: Vec<Scalar> = (0..300).map(|_| Scalar::random(OsRng)).collect();
+    let scalars: Vec<Scalar> =
+        (0..300).map(|_| Scalar::random(OsRng)).collect();
     let bd = compute_bucket_sorting::<Bls12>(&scalars);
     assert!(
         !bd.has_chunks,
@@ -631,9 +674,9 @@ fn signed_windows_boundary_invariant() {
             if abs == half {
                 assert!(
                     neg,
-                    "window {w}: abs==2^(c-1)={half} but not negated — this means \
-                     the bucket value would be out of the valid [1, 2^(c-1)] range \
-                     for a positive digit"
+                    "window {w}: abs==2^(c-1)={half} but not negated — this \
+                     means the bucket value would be out of the valid [1, \
+                     2^(c-1)] range for a positive digit"
                 );
             }
         }

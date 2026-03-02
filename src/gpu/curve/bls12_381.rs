@@ -89,42 +89,19 @@ fn is_all_zero(bytes: &[u8]) -> bool {
 
 impl GpuCurve for blstrs::Bls12 {
     type Engine = Self;
-    type Scalar = <Self::Engine as pairing::Engine>::Fr;
     type G1 = <Self::Engine as pairing::Engine>::G1;
-    type G2 = <Self::Engine as pairing::Engine>::G2;
     type G1Affine = <Self::Engine as pairing::Engine>::G1Affine;
+    type G2 = <Self::Engine as pairing::Engine>::G2;
     type G2Affine = <Self::Engine as pairing::Engine>::G2Affine;
+    type Scalar = <Self::Engine as pairing::Engine>::Fr;
 
     const FQ_GPU_BYTES: usize = BLS12_FQ_GPU_BYTES;
     const FQ_GPU_PADDED_BYTES: usize = BLS12_FQ_GPU_PADDED_BYTES;
     const G1_GPU_BYTES: usize = BLS12_G1_GPU_BYTES;
-    const G2_GPU_BYTES: usize = BLS12_G2_GPU_BYTES;
-    const SCALAR_WORKGROUP_SIZE: u32 = 256;
-    const NTT_TILE_SIZE: u32 = 512;
-    const MSM_WORKGROUP_SIZE: u32 = 64;
     const G1_SUBSUM_CHUNKS_PER_WINDOW: u32 = 1;
+    const G2_GPU_BYTES: usize = BLS12_G2_GPU_BYTES;
     const G2_SUBSUM_CHUNKS_PER_WINDOW: u32 = 32;
-    const MSM_MAX_CHUNK_SIZE: u32 = 64;
-    const MSM_INDEX_SIGN_BIT: u32 = 1 << 31;
-
-    const NTT_SOURCE: &'static str = concat!(
-        include_str!("../../shader/bls12_381/fr.wgsl"),
-        "\n",
-        include_str!("../../shader/bls12_381/fp.wgsl"),
-        "\n",
-        include_str!("../../shader/bls12_381/ntt.wgsl"),
-    );
-
-    const NTT_FUSED_SOURCE: &'static str = concat!(
-        include_str!("../../shader/bls12_381/fr.wgsl"),
-        "\n",
-        include_str!("../../shader/bls12_381/fp.wgsl"),
-        "\n",
-        include_str!("../../shader/bls12_381/ntt.wgsl"),
-        "\n",
-        include_str!("../../shader/bls12_381/ntt_fused.wgsl"),
-    );
-
+    const HAS_G1_GLV: bool = true;
     const MSM_G1_AGG_SOURCE: &'static str = concat!(
         include_str!("../../shader/bls12_381/fr.wgsl"),
         "\n",
@@ -134,7 +111,6 @@ impl GpuCurve for blstrs::Bls12 {
         "\n",
         include_str!("../../shader/bls12_381/msm_g1_agg.wgsl"),
     );
-
     const MSM_G1_SUBSUM_SOURCE: &'static str = concat!(
         include_str!("../../shader/bls12_381/fr.wgsl"),
         "\n",
@@ -144,7 +120,6 @@ impl GpuCurve for blstrs::Bls12 {
         "\n",
         include_str!("../../shader/bls12_381/msm_g1_subsum.wgsl"),
     );
-
     const MSM_G2_AGG_SOURCE: &'static str = concat!(
         include_str!("../../shader/bls12_381/fr.wgsl"),
         "\n",
@@ -154,7 +129,6 @@ impl GpuCurve for blstrs::Bls12 {
         "\n",
         include_str!("../../shader/bls12_381/msm_g2_agg.wgsl"),
     );
-
     const MSM_G2_SUBSUM_SOURCE: &'static str = concat!(
         include_str!("../../shader/bls12_381/fr.wgsl"),
         "\n",
@@ -164,7 +138,34 @@ impl GpuCurve for blstrs::Bls12 {
         "\n",
         include_str!("../../shader/bls12_381/msm_g2_subsum.wgsl"),
     );
-
+    const MSM_INDEX_SIGN_BIT: u32 = 1 << 31;
+    const MSM_MAX_CHUNK_SIZE: u32 = 64;
+    const MSM_WORKGROUP_SIZE: u32 = 64;
+    const NTT_FUSED_SOURCE: &'static str = concat!(
+        include_str!("../../shader/bls12_381/fr.wgsl"),
+        "\n",
+        include_str!("../../shader/bls12_381/fp.wgsl"),
+        "\n",
+        include_str!("../../shader/bls12_381/ntt.wgsl"),
+        "\n",
+        include_str!("../../shader/bls12_381/ntt_fused.wgsl"),
+    );
+    const NTT_SOURCE: &'static str = concat!(
+        include_str!("../../shader/bls12_381/fr.wgsl"),
+        "\n",
+        include_str!("../../shader/bls12_381/fp.wgsl"),
+        "\n",
+        include_str!("../../shader/bls12_381/ntt.wgsl"),
+    );
+    const NTT_TILE_SIZE: u32 = 512;
+    const POLY_OPS_SOURCE: &'static str = concat!(
+        include_str!("../../shader/bls12_381/fr.wgsl"),
+        "\n",
+        include_str!("../../shader/bls12_381/fp.wgsl"),
+        "\n",
+        include_str!("../../shader/bls12_381/poly_ops.wgsl"),
+    );
+    const SCALAR_WORKGROUP_SIZE: u32 = 256;
     #[cfg(test)]
     const TEST_SHADER_G1_SOURCE: &'static str = concat!(
         include_str!("../../shader/bls12_381/fr.wgsl"),
@@ -177,7 +178,6 @@ impl GpuCurve for blstrs::Bls12 {
         "\n",
         include_str!("../../shader/bls12_381/msm_test_debug_g1.wgsl"),
     );
-
     #[cfg(test)]
     const TEST_SHADER_G2_SOURCE: &'static str = concat!(
         include_str!("../../shader/bls12_381/fr.wgsl"),
@@ -190,16 +190,6 @@ impl GpuCurve for blstrs::Bls12 {
         "\n",
         include_str!("../../shader/bls12_381/msm_test_debug_g2.wgsl"),
     );
-
-    const POLY_OPS_SOURCE: &'static str = concat!(
-        include_str!("../../shader/bls12_381/fr.wgsl"),
-        "\n",
-        include_str!("../../shader/bls12_381/fp.wgsl"),
-        "\n",
-        include_str!("../../shader/bls12_381/poly_ops.wgsl"),
-    );
-
-    const HAS_G1_GLV: bool = true;
 
     fn serialize_g1(point: &Self::G1Affine) -> Vec<u8> {
         let is_inf: bool = point.is_identity().into();
@@ -214,7 +204,9 @@ impl GpuCurve for blstrs::Bls12 {
         z_le[0] = 1;
 
         let mut wgsl_bytes = Vec::with_capacity(Self::G1_GPU_BYTES);
-        wgsl_bytes.extend_from_slice(&be_coord_to_gpu_limbs(&uncompressed[..FQ_COORD_SIZE]));
+        wgsl_bytes.extend_from_slice(&be_coord_to_gpu_limbs(
+            &uncompressed[..FQ_COORD_SIZE],
+        ));
         wgsl_bytes.extend_from_slice(&[0u8; 8]);
         wgsl_bytes.extend_from_slice(&be_coord_to_gpu_limbs(
             &uncompressed[FQ_COORD_SIZE..2 * FQ_COORD_SIZE],
@@ -259,15 +251,16 @@ impl GpuCurve for blstrs::Bls12 {
             anyhow::bail!("Invalid G1 byte length from GPU: {}", bytes.len());
         }
         if is_all_zero(
-            &bytes
-                [2 * Self::FQ_GPU_PADDED_BYTES..2 * Self::FQ_GPU_PADDED_BYTES + Self::FQ_GPU_BYTES],
+            &bytes[2 * Self::FQ_GPU_PADDED_BYTES
+                ..2 * Self::FQ_GPU_PADDED_BYTES + Self::FQ_GPU_BYTES],
         ) {
             return Ok(Self::G1::identity());
         }
 
         let x_be = gpu_limbs_to_be_coord(&bytes[0..Self::FQ_GPU_BYTES]);
         let y_be = gpu_limbs_to_be_coord(
-            &bytes[Self::FQ_GPU_PADDED_BYTES..Self::FQ_GPU_PADDED_BYTES + Self::FQ_GPU_BYTES],
+            &bytes[Self::FQ_GPU_PADDED_BYTES
+                ..Self::FQ_GPU_PADDED_BYTES + Self::FQ_GPU_BYTES],
         );
 
         let mut uncompressed = [0u8; 96];
@@ -281,7 +274,8 @@ impl GpuCurve for blstrs::Bls12 {
         if let Some(affine) = affine {
             Ok(affine.into())
         } else {
-            let limb0 = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            let limb0 =
+                u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             anyhow::bail!(
                 "Failed to deserialize G1 point from GPU (x_limb0={:#x})",
                 limb0
@@ -298,9 +292,15 @@ impl GpuCurve for blstrs::Bls12 {
         }
 
         let x_c0_be = gpu_limbs_to_be_coord(&bytes[0..Self::FQ_GPU_BYTES]);
-        let x_c1_be = gpu_limbs_to_be_coord(&bytes[Self::FQ_GPU_BYTES..2 * Self::FQ_GPU_BYTES]);
-        let y_c0_be = gpu_limbs_to_be_coord(&bytes[2 * Self::FQ_GPU_BYTES..3 * Self::FQ_GPU_BYTES]);
-        let y_c1_be = gpu_limbs_to_be_coord(&bytes[3 * Self::FQ_GPU_BYTES..4 * Self::FQ_GPU_BYTES]);
+        let x_c1_be = gpu_limbs_to_be_coord(
+            &bytes[Self::FQ_GPU_BYTES..2 * Self::FQ_GPU_BYTES],
+        );
+        let y_c0_be = gpu_limbs_to_be_coord(
+            &bytes[2 * Self::FQ_GPU_BYTES..3 * Self::FQ_GPU_BYTES],
+        );
+        let y_c1_be = gpu_limbs_to_be_coord(
+            &bytes[3 * Self::FQ_GPU_BYTES..4 * Self::FQ_GPU_BYTES],
+        );
 
         let s = FQ_COORD_SIZE;
         let mut uncompressed = [0u8; 192];
@@ -327,7 +327,8 @@ impl GpuCurve for blstrs::Bls12 {
     fn deserialize_scalar(bytes: &[u8]) -> anyhow::Result<Self::Scalar> {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(bytes);
-        let scalar: Option<blstrs::Scalar> = blstrs::Scalar::from_bytes_le(&arr).into();
+        let scalar: Option<blstrs::Scalar> =
+            blstrs::Scalar::from_bytes_le(&arr).into();
         scalar.ok_or_else(|| anyhow::anyhow!("Invalid scalar bytes from GPU"))
     }
 
@@ -379,7 +380,10 @@ impl GpuCurve for blstrs::Bls12 {
         best_c
     }
 
-    fn decompose_g1_msm_scalar(s: &Self::Scalar, c: usize) -> G1MsmDecomposition {
+    fn decompose_g1_msm_scalar(
+        s: &Self::Scalar,
+        c: usize,
+    ) -> G1MsmDecomposition {
         let (k1, k1_neg, k2, k2_neg) = crate::glv::bls12_381::glv_decompose(s);
         G1MsmDecomposition::Glv {
             k1_windows: crate::glv::bls12_381::u128_to_signed_windows(k1, c),
@@ -422,12 +426,15 @@ impl GpuCurve for blstrs::Bls12 {
     fn affine_to_proj_g1(p: &Self::G1Affine) -> Self::G1 {
         p.into()
     }
+
     fn affine_to_proj_g2(p: &Self::G2Affine) -> Self::G2 {
         p.into()
     }
+
     fn proj_to_affine_g1(p: &Self::G1) -> Self::G1Affine {
         p.into()
     }
+
     fn proj_to_affine_g2(p: &Self::G2) -> Self::G2Affine {
         p.into()
     }
@@ -435,9 +442,11 @@ impl GpuCurve for blstrs::Bls12 {
     fn add_g1_proj(a: &Self::G1, b: &Self::G1) -> Self::G1 {
         a.add(b)
     }
+
     fn sub_g1_proj(a: &Self::G1, b: &Self::G1) -> Self::G1 {
         a.sub(b)
     }
+
     fn add_g2_proj(a: &Self::G2, b: &Self::G2) -> Self::G2 {
         a.add(b)
     }
@@ -445,9 +454,11 @@ impl GpuCurve for blstrs::Bls12 {
     fn mul_g1_scalar(a: &Self::G1Affine, b: &Self::Scalar) -> Self::G1 {
         a.mul(b)
     }
+
     fn mul_g2_scalar(a: &Self::G2Affine, b: &Self::Scalar) -> Self::G2 {
         a.mul(b)
     }
+
     fn mul_g1_proj_scalar(a: &Self::G1, b: &Self::Scalar) -> Self::G1 {
         a.mul(b)
     }

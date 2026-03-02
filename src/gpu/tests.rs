@@ -1,9 +1,11 @@
-use super::*;
-use crate::gpu::curve::GpuCurve;
+use std::borrow::Cow;
+
 use blstrs::{Bls12, G1Affine, Scalar};
 use ff::Field;
 use group::prime::PrimeCurveAffine;
-use std::borrow::Cow;
+
+use super::*;
+use crate::gpu::curve::GpuCurve;
 
 /// Dispatches a single-workgroup compute shader test.
 ///
@@ -17,16 +19,22 @@ fn dispatch_shader_test(
     buf_kinds: &[BufKind],
     buffers: &[&wgpu::Buffer],
 ) {
-    let shader = gpu
-        .device
-        .create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("test shader"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(source)),
-        });
+    let shader =
+        gpu.device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("test shader"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(source)),
+            });
 
     let bgl = create_bind_group_layout(&gpu.device, "test bgl", buf_kinds);
     let layout = pipeline_layout(&gpu.device, &[&bgl]);
-    let pipeline = create_pipeline(&gpu.device, "test pipeline", &layout, &shader, entry_point);
+    let pipeline = create_pipeline(
+        &gpu.device,
+        "test pipeline",
+        &layout,
+        &shader,
+        entry_point,
+    );
 
     let entries: Vec<wgpu::BindGroupEntry> = buffers
         .iter()
@@ -43,16 +51,17 @@ fn dispatch_shader_test(
         entries: &entries,
     });
 
-    let mut encoder = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("test encoder"),
-        });
+    let mut encoder =
+        gpu.device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("test encoder"),
+            });
     {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("test pass"),
-            timestamp_writes: None,
-        });
+        let mut pass =
+            encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("test pass"),
+                timestamp_writes: None,
+            });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bg, &[]);
         pass.dispatch_workgroups(1, 1, 1);
@@ -123,7 +132,8 @@ async fn test_g1_shader_coord_only_montgomery_roundtrip() {
     let in_bytes = <Bls12 as GpuCurve>::serialize_g1(&point);
 
     let in_buf = gpu.create_storage_buffer("rt_in_coords_g1", &in_bytes);
-    let out_buf = gpu.create_empty_buffer("rt_out_coords_g1", in_bytes.len() as u64);
+    let out_buf =
+        gpu.create_empty_buffer("rt_out_coords_g1", in_bytes.len() as u64);
 
     dispatch_shader_test(
         &gpu,
@@ -173,8 +183,8 @@ async fn test_scalar_to_from_montgomery_roundtrip() {
         .expect("failed to read scalar roundtrip");
 
     for (i, chunk) in out.chunks_exact(32).enumerate() {
-        let got =
-            <Bls12 as GpuCurve>::deserialize_scalar(chunk).expect("deserialize scalar failed");
+        let got = <Bls12 as GpuCurve>::deserialize_scalar(chunk)
+            .expect("deserialize scalar failed");
         assert_eq!(got, scalars[i], "scalar mismatch at index {i}");
     }
 }
@@ -234,7 +244,8 @@ async fn test_g2_add_complete_roundtrip() {
 
     let a_buf = gpu.create_storage_buffer("rt_add_g2_a", &a_bytes);
     let b_buf = gpu.create_storage_buffer("rt_add_g2_b", &b_bytes);
-    let out_buf = gpu.create_empty_buffer("rt_add_g2_out", a_bytes.len() as u64);
+    let out_buf =
+        gpu.create_empty_buffer("rt_add_g2_out", a_bytes.len() as u64);
 
     dispatch_shader_test(
         &gpu,
@@ -257,7 +268,8 @@ async fn test_g2_add_complete_roundtrip() {
 
     // Test 2: G + G = 2G (doubling via complete formula)
     let b_buf_2 = gpu.create_storage_buffer("rt_add_g2_b2", &a_bytes);
-    let out_buf_2 = gpu.create_empty_buffer("rt_add_g2_out2", a_bytes.len() as u64);
+    let out_buf_2 =
+        gpu.create_empty_buffer("rt_add_g2_out2", a_bytes.len() as u64);
 
     dispatch_shader_test(
         &gpu,
@@ -284,9 +296,9 @@ async fn test_g2_add_complete_roundtrip() {
 
 /// Test: parallel tree reduction of 64 G1 points in var<workgroup> memory.
 ///
-/// Exercises `var<workgroup> shared: array<PointG1, 64>` with `@workgroup_size(64)`
-/// to diagnose whether Metal threadgroup memory works correctly with 360-byte
-/// PointG1 structs.
+/// Exercises `var<workgroup> shared: array<PointG1, 64>` with
+/// `@workgroup_size(64)` to diagnose whether Metal threadgroup memory works
+/// correctly with 360-byte PointG1 structs.
 #[tokio::test]
 async fn test_g1_workgroup_tree_reduction() {
     use group::{Curve, Group};
@@ -315,14 +327,17 @@ async fn test_g1_workgroup_tree_reduction() {
     let expected: G1Affine = cpu_sum.to_affine();
 
     // Serialize 64 points to GPU format
-    let mut in_bytes = Vec::with_capacity(64 * <Bls12 as GpuCurve>::G1_GPU_BYTES);
+    let mut in_bytes =
+        Vec::with_capacity(64 * <Bls12 as GpuCurve>::G1_GPU_BYTES);
     for p in &points {
         in_bytes.extend_from_slice(&<Bls12 as GpuCurve>::serialize_g1(p));
     }
 
     let in_buf = gpu.create_storage_buffer("wg_test_in_g1", &in_bytes);
-    let out_buf =
-        gpu.create_empty_buffer("wg_test_out_g1", <Bls12 as GpuCurve>::G1_GPU_BYTES as u64);
+    let out_buf = gpu.create_empty_buffer(
+        "wg_test_out_g1",
+        <Bls12 as GpuCurve>::G1_GPU_BYTES as u64,
+    );
 
     dispatch_shader_test(
         &gpu,
@@ -342,6 +357,7 @@ async fn test_g1_workgroup_tree_reduction() {
     let gpu_affine: G1Affine = parsed.into();
     assert_eq!(
         gpu_affine, expected,
-        "GPU workgroup tree reduction mismatch: sum of i*G for i=1..64 should be 2080*G"
+        "GPU workgroup tree reduction mismatch: sum of i*G for i=1..64 should \
+         be 2080*G"
     );
 }

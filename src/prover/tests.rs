@@ -1,19 +1,19 @@
-use crate::bellman::Circuit;
+use std::time::Instant;
+
 use blstrs::{Bls12, Scalar};
 use ff::Field;
 use group::{Curve, Group};
 use masp_primitives::asset_type::AssetType;
 use masp_primitives::jubjub;
-use masp_primitives::sapling::Note;
-use masp_primitives::sapling::PaymentAddress;
-use masp_primitives::sapling::Rseed;
-use masp_primitives::sapling::{Diversifier, ProofGenerationKey};
+use masp_primitives::sapling::{
+    Diversifier, Note, PaymentAddress, ProofGenerationKey, Rseed,
+};
 use masp_proofs::circuit::sapling::Output as SaplingOutputCircuit;
 use rand_core::OsRng;
-use std::time::Instant;
 
 use super::msm::{fold_window_sums_g1, gpu_msm_g2};
 use super::*;
+use crate::bellman::Circuit;
 use crate::gpu::curve::GpuCurve;
 
 /// A simple dummy circuit that proves knowledge of a secret `x`
@@ -62,9 +62,11 @@ async fn test_gpu_groth16_prover() {
     let mut rng = OsRng;
 
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("Failed to generate trusted setup parameters");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("Failed to generate trusted setup parameters");
 
     let gpu_ctx = GpuContext::<Bls12>::new()
         .await
@@ -79,9 +81,11 @@ async fn test_gpu_groth16_prover() {
     };
 
     let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
-    let proof = create_proof::<Bls12, Bls12, _, _>(circuit, &params, &ppk, &gpu_ctx, &mut rng)
-        .await
-        .expect("Failed to generate Groth16 proof on GPU");
+    let proof = create_proof::<Bls12, Bls12, _, _>(
+        circuit, &params, &ppk, &gpu_ctx, &mut rng,
+    )
+    .await
+    .expect("Failed to generate Groth16 proof on GPU");
 
     let pvk = bellman::groth16::prepare_verifying_key(&params.vk);
     let public_inputs = vec![y_value];
@@ -91,8 +95,9 @@ async fn test_gpu_groth16_prover() {
 
     // Sanity check: wrong public input should fail
     let wrong_public_inputs = vec![Scalar::from(28u64)];
-    let is_valid_wrong = bellman::groth16::verify_proof(&pvk, &proof, &wrong_public_inputs)
-        .expect("Failed during proof verification step");
+    let is_valid_wrong =
+        bellman::groth16::verify_proof(&pvk, &proof, &wrong_public_inputs)
+            .expect("Failed during proof verification step");
     assert!(
         !is_valid_wrong,
         "The verifier should reject a proof with tampered public inputs"
@@ -104,9 +109,11 @@ async fn test_gpu_groth16_prover_persistent_key() {
     let mut rng = OsRng;
 
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("Failed to generate trusted setup parameters");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("Failed to generate trusted setup parameters");
 
     let gpu_ctx = GpuContext::<Bls12>::new()
         .await
@@ -140,9 +147,11 @@ async fn test_gpu_groth16_prover_persistent_key() {
 fn test_cpu_groth16_prover_baseline() {
     let mut rng = OsRng;
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("failed to generate trusted setup parameters");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("failed to generate trusted setup parameters");
 
     let x_value = Scalar::from(3u64);
     let y_value = Scalar::from(27u64);
@@ -151,13 +160,14 @@ fn test_cpu_groth16_prover_baseline() {
         y: Some(y_value),
     };
 
-    let proof = bellman::groth16::create_random_proof(circuit, &params, &mut rng)
-        .expect("failed to create cpu proof");
+    let proof =
+        bellman::groth16::create_random_proof(circuit, &params, &mut rng)
+            .expect("failed to create cpu proof");
 
     let pvk = bellman::groth16::prepare_verifying_key(&params.vk);
     let public_inputs = vec![y_value];
-    let is_valid =
-        bellman::groth16::verify_proof(&pvk, &proof, &public_inputs).expect("verification failed");
+    let is_valid = bellman::groth16::verify_proof(&pvk, &proof, &public_inputs)
+        .expect("verification failed");
     assert!(is_valid, "cpu proof should verify");
 }
 
@@ -166,9 +176,11 @@ fn test_cpu_groth16_prover_baseline() {
 fn bench_cpu_msm_100k_like() {
     let mut rng = OsRng;
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("failed to generate parameters");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("failed to generate parameters");
 
     let n = 100_000usize.min(params.a.len());
     let mut scalars = Vec::with_capacity(n);
@@ -187,7 +199,8 @@ fn bench_cpu_msm_100k_like() {
 }
 
 fn sample_sapling_output_note() -> (PaymentAddress, Note) {
-    let asset_type = AssetType::new(b"benchmark-asset").expect("asset type creation failed");
+    let asset_type =
+        AssetType::new(b"benchmark-asset").expect("asset type creation failed");
 
     let pgk = ProofGenerationKey {
         ak: jubjub::SubgroupPoint::generator(),
@@ -196,12 +209,15 @@ fn sample_sapling_output_note() -> (PaymentAddress, Note) {
     let vk = pgk.to_viewing_key();
     let mut payment_address = None;
     for d0 in 0u8..=255 {
-        if let Some(addr) = vk.to_payment_address(Diversifier([d0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])) {
+        if let Some(addr) = vk
+            .to_payment_address(Diversifier([d0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
+        {
             payment_address = Some(addr);
             break;
         }
     }
-    let payment_address = payment_address.expect("failed to find a valid diversifier");
+    let payment_address =
+        payment_address.expect("failed to find a valid diversifier");
 
     (
         payment_address,
@@ -243,13 +259,16 @@ fn bench_cpu_sapling_output() {
         commitment_randomness: None,
         esk: None,
     };
-    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup, &mut rng)
-        .expect("failed to generate sapling output parameters");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup, &mut rng,
+    )
+    .expect("failed to generate sapling output parameters");
 
     let circuit = sample_sapling_output_circuit();
     let t0 = Instant::now();
-    let proof = bellman::groth16::create_random_proof(circuit, &params, &mut rng)
-        .expect("cpu sapling output proof failed");
+    let proof =
+        bellman::groth16::create_random_proof(circuit, &params, &mut rng)
+            .expect("cpu sapling output proof failed");
     let dt = t0.elapsed();
     eprintln!("CPU Sapling Output proof took {:?}", dt);
 
@@ -257,7 +276,8 @@ fn bench_cpu_sapling_output() {
     let inputs = {
         let (_, note) = sample_sapling_output_note();
         let esk = note.derive_esk().unwrap();
-        let epk: jubjub::AffinePoint = jubjub::ExtendedPoint::from(note.g_d * esk).into();
+        let epk: jubjub::AffinePoint =
+            jubjub::ExtendedPoint::from(note.g_d * esk).into();
         let cv: jubjub::AffinePoint = jubjub::ExtendedPoint::from(
             note.asset_type
                 .value_commitment(note.value, jubjub::Fr::from(7u64))
@@ -289,8 +309,10 @@ async fn bench_gpu_sapling_output() {
     };
 
     let t = Instant::now();
-    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup, &mut rng)
-        .expect("failed to generate sapling output parameters");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup, &mut rng,
+    )
+    .expect("failed to generate sapling output parameters");
     eprintln!("[diag] param gen: {:?}", t.elapsed());
     eprintln!(
         "[diag] params sizes: a={}, b_g1={}, l={}, h={}, b_g2={}",
@@ -330,7 +352,8 @@ async fn bench_gpu_sapling_output() {
     let inputs = {
         let (_, note) = sample_sapling_output_note();
         let esk = note.derive_esk().unwrap();
-        let epk: jubjub::AffinePoint = jubjub::ExtendedPoint::from(note.g_d * esk).into();
+        let epk: jubjub::AffinePoint =
+            jubjub::ExtendedPoint::from(note.g_d * esk).into();
         let cv: jubjub::AffinePoint = jubjub::ExtendedPoint::from(
             note.asset_type
                 .value_commitment(note.value, jubjub::Fr::from(7u64))
@@ -386,7 +409,8 @@ fn dense_assignment_all_false() {
     let aux = vec![Scalar::from(3u64), Scalar::from(4u64)];
     let input_mask = vec![false, false];
     let aux_mask = vec![false, false];
-    let result = dense_assignment_from_masks(&inputs, &aux, &input_mask, &aux_mask);
+    let result =
+        dense_assignment_from_masks(&inputs, &aux, &input_mask, &aux_mask);
     assert!(result.is_empty());
 }
 
@@ -397,7 +421,8 @@ fn dense_assignment_all_true() {
     let aux = vec![Scalar::from(3u64), Scalar::from(4u64)];
     let input_mask = vec![true, true];
     let aux_mask = vec![true, true];
-    let result = dense_assignment_from_masks(&inputs, &aux, &input_mask, &aux_mask);
+    let result =
+        dense_assignment_from_masks(&inputs, &aux, &input_mask, &aux_mask);
     assert_eq!(
         result,
         vec![
@@ -420,7 +445,8 @@ fn dense_assignment_selective() {
     let aux = vec![Scalar::from(40u64), Scalar::from(50u64)];
     let input_mask = vec![false, true, false];
     let aux_mask = vec![true, false];
-    let result = dense_assignment_from_masks(&inputs, &aux, &input_mask, &aux_mask);
+    let result =
+        dense_assignment_from_masks(&inputs, &aux, &input_mask, &aux_mask);
     assert_eq!(result, vec![Scalar::from(20u64), Scalar::from(40u64)]);
 }
 
@@ -556,8 +582,9 @@ fn fold_window_sums_single_point() {
 /// result = window[1] * 2^c + window[0]
 #[test]
 fn fold_window_sums_two_windows() {
-    use crate::gpu::curve::GpuCurve;
     use group::prime::PrimeCurveAffine;
+
+    use crate::gpu::curve::GpuCurve;
 
     let g = blstrs::G1Affine::generator();
     let g_proj = blstrs::G1Projective::from(g);
@@ -588,9 +615,11 @@ fn fold_window_sums_two_windows() {
 fn cpu_proof_multiple_witnesses() {
     let mut rng = OsRng;
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("param gen failed");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("param gen failed");
     let pvk = bellman::groth16::prepare_verifying_key(&params.vk);
 
     for x_val in [1u64, 2, 3, 5, 100, 999] {
@@ -601,10 +630,11 @@ fn cpu_proof_multiple_witnesses() {
             y: Some(y),
         };
 
-        let proof = bellman::groth16::create_random_proof(circuit, &params, &mut rng)
-            .expect("cpu proof failed");
-        let valid =
-            bellman::groth16::verify_proof(&pvk, &proof, &[y]).expect("verification failed");
+        let proof =
+            bellman::groth16::create_random_proof(circuit, &params, &mut rng)
+                .expect("cpu proof failed");
+        let valid = bellman::groth16::verify_proof(&pvk, &proof, &[y])
+            .expect("verification failed");
         assert!(valid, "proof for x={x_val} should verify");
     }
 }
@@ -614,9 +644,11 @@ fn cpu_proof_multiple_witnesses() {
 fn cpu_proof_wrong_public_input_rejects() {
     let mut rng = OsRng;
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("param gen failed");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("param gen failed");
     let pvk = bellman::groth16::prepare_verifying_key(&params.vk);
 
     let x = Scalar::from(5u64);
@@ -626,16 +658,19 @@ fn cpu_proof_wrong_public_input_rejects() {
         y: Some(y),
     };
 
-    let proof = bellman::groth16::create_random_proof(circuit, &params, &mut rng)
-        .expect("cpu proof failed");
+    let proof =
+        bellman::groth16::create_random_proof(circuit, &params, &mut rng)
+            .expect("cpu proof failed");
 
     // Should verify with correct y
-    let valid = bellman::groth16::verify_proof(&pvk, &proof, &[y]).expect("verify failed");
+    let valid = bellman::groth16::verify_proof(&pvk, &proof, &[y])
+        .expect("verify failed");
     assert!(valid);
 
     // Should reject with wrong y
     let wrong_y = Scalar::from(126u64);
-    let invalid = bellman::groth16::verify_proof(&pvk, &proof, &[wrong_y]).expect("verify failed");
+    let invalid = bellman::groth16::verify_proof(&pvk, &proof, &[wrong_y])
+        .expect("verify failed");
     assert!(!invalid, "should reject proof with wrong public input");
 }
 
@@ -644,9 +679,11 @@ fn cpu_proof_wrong_public_input_rejects() {
 fn prepared_proving_key_sizes() {
     let mut rng = OsRng;
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("param gen failed");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("param gen failed");
 
     let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
 
@@ -676,9 +713,11 @@ fn prepared_proving_key_sizes() {
 async fn test_gpu_msm_single_point_matches_cpu_g1() {
     let mut rng = OsRng;
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("failed to generate parameters");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("failed to generate parameters");
     let gpu_ctx = GpuContext::<Bls12>::new()
         .await
         .expect("failed to initialize gpu");
@@ -697,9 +736,11 @@ async fn test_gpu_msm_single_point_matches_cpu_g1() {
 async fn test_gpu_msm_scalar2_matches_cpu() {
     let mut rng = OsRng;
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("failed to generate parameters");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("failed to generate parameters");
     let gpu_ctx = GpuContext::<Bls12>::new()
         .await
         .expect("failed to initialize gpu");
@@ -739,7 +780,8 @@ async fn test_gpu_msm_scalar2_matches_cpu() {
     .await
     .expect("gpu msm 2-point failed");
     let cpu_sum: blstrs::G1Projective =
-        Into::<blstrs::G1Projective>::into(base) + Into::<blstrs::G1Projective>::into(base2);
+        Into::<blstrs::G1Projective>::into(base)
+            + Into::<blstrs::G1Projective>::into(base2);
     assert_eq!(
         Bls12::proj_to_affine_g1(&gpu),
         Bls12::proj_to_affine_g1(&cpu_sum),
@@ -751,9 +793,11 @@ async fn test_gpu_msm_scalar2_matches_cpu() {
 async fn test_gpu_msm_single_point_matches_cpu_g2() {
     let mut rng = OsRng;
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("failed to generate parameters");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("failed to generate parameters");
     let gpu_ctx = GpuContext::<Bls12>::new()
         .await
         .expect("failed to initialize gpu");
@@ -772,9 +816,11 @@ async fn test_gpu_msm_single_point_matches_cpu_g2() {
 async fn test_proof_abc_match_cpu_reference() {
     let mut rng = OsRng;
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("failed to generate parameters");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("failed to generate parameters");
     let gpu_ctx = GpuContext::<Bls12>::new()
         .await
         .expect("failed to initialize gpu");
@@ -832,9 +878,11 @@ async fn test_proof_abc_match_cpu_reference() {
 async fn test_h_msm_matches_cpu_for_dummy_circuit() {
     let mut rng = OsRng;
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("failed to generate parameters");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("failed to generate parameters");
     let gpu_ctx = GpuContext::<Bls12>::new()
         .await
         .expect("failed to initialize gpu");
@@ -874,9 +922,10 @@ async fn test_h_msm_matches_cpu_for_dummy_circuit() {
         .await
         .expect("compute_h_poly failed");
 
-    let gpu_h = gpu_msm_g1::<Bls12>(&gpu_ctx, &params.h, &h_coeffs[..params.h.len()])
-        .await
-        .expect("gpu h msm failed");
+    let gpu_h =
+        gpu_msm_g1::<Bls12>(&gpu_ctx, &params.h, &h_coeffs[..params.h.len()])
+            .await
+            .expect("gpu h msm failed");
 
     let mut cpu_h = <Bls12 as pairing::Engine>::G1::identity();
     for (b, s) in params.h.iter().zip(h_coeffs.iter()) {
@@ -893,9 +942,11 @@ async fn test_h_msm_matches_cpu_for_dummy_circuit() {
 async fn test_ab_msm_match_cpu_for_dummy_circuit() {
     let mut rng = OsRng;
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("failed to generate parameters");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("failed to generate parameters");
     let gpu_ctx = GpuContext::<Bls12>::new()
         .await
         .expect("failed to initialize gpu");
@@ -917,8 +968,12 @@ async fn test_ab_msm_match_cpu_for_dummy_circuit() {
             a_assignment.push(*s);
         }
     }
-    let b_assignment =
-        dense_assignment_from_masks(&cs.inputs, &cs.aux, &cs.b_input_density, &cs.b_aux_density);
+    let b_assignment = dense_assignment_from_masks(
+        &cs.inputs,
+        &cs.aux,
+        &cs.b_input_density,
+        &cs.b_aux_density,
+    );
 
     let gpu_a = gpu_msm_g1::<Bls12>(&gpu_ctx, &params.a, &a_assignment)
         .await
@@ -943,9 +998,12 @@ async fn test_ab_msm_match_cpu_for_dummy_circuit() {
         cpu_b_g2 += b * *s;
     }
 
-    let a_ok = Bls12::proj_to_affine_g1(&gpu_a) == Bls12::proj_to_affine_g1(&cpu_a);
-    let b1_ok = Bls12::proj_to_affine_g1(&gpu_b_g1) == Bls12::proj_to_affine_g1(&cpu_b_g1);
-    let b2_ok = Bls12::proj_to_affine_g2(&gpu_b_g2) == Bls12::proj_to_affine_g2(&cpu_b_g2);
+    let a_ok =
+        Bls12::proj_to_affine_g1(&gpu_a) == Bls12::proj_to_affine_g1(&cpu_a);
+    let b1_ok = Bls12::proj_to_affine_g1(&gpu_b_g1)
+        == Bls12::proj_to_affine_g1(&cpu_b_g1);
+    let b2_ok = Bls12::proj_to_affine_g2(&gpu_b_g2)
+        == Bls12::proj_to_affine_g2(&cpu_b_g2);
     assert!(
         a_ok && b1_ok && b2_ok,
         "ab msm mismatch: a={a_ok} b_g1={b1_ok} b_g2={b2_ok}"
@@ -956,9 +1014,11 @@ async fn test_ab_msm_match_cpu_for_dummy_circuit() {
 async fn test_h_component_matches_cpu_when_r_s_zero() {
     let mut rng = OsRng;
     let setup_circuit = DummyCircuit::<Scalar> { x: None, y: None };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("failed to generate parameters");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("failed to generate parameters");
     let gpu_ctx = GpuContext::<Bls12>::new()
         .await
         .expect("failed to initialize gpu");
@@ -997,9 +1057,10 @@ async fn test_h_component_matches_cpu_when_r_s_zero() {
     let h_coeffs = compute_h_poly(&gpu_ctx, &a_values, &b_values, &c_values)
         .await
         .expect("compute_h_poly failed");
-    let gpu_h = gpu_msm_g1::<Bls12>(&gpu_ctx, &params.h, &h_coeffs[..params.h.len()])
-        .await
-        .expect("gpu h msm failed");
+    let gpu_h =
+        gpu_msm_g1::<Bls12>(&gpu_ctx, &params.h, &h_coeffs[..params.h.len()])
+            .await
+            .expect("gpu h msm failed");
     let gpu_l = gpu_msm_g1::<Bls12>(&gpu_ctx, &params.l, &cs.aux)
         .await
         .expect("gpu l msm failed");
@@ -1071,7 +1132,9 @@ struct LargeDummyCircuit<Scalar: PrimeField> {
     pub num_constraints: usize,
 }
 
-impl<Scalar: PrimeField> bellman::Circuit<Scalar> for LargeDummyCircuit<Scalar> {
+impl<Scalar: PrimeField> bellman::Circuit<Scalar>
+    for LargeDummyCircuit<Scalar>
+{
     fn synthesize<CS: bellman::ConstraintSystem<Scalar>>(
         self,
         cs: &mut CS,
@@ -1112,7 +1175,12 @@ impl<Scalar: PrimeField> bellman::Circuit<Scalar> for LargeDummyCircuit<Scalar> 
         }
 
         // Finally tie it to the public input y: curr * 1 = y
-        cs.enforce(|| "tie_y", |lc| lc + curr, |lc| lc + CS::one(), |lc| lc + y);
+        cs.enforce(
+            || "tie_y",
+            |lc| lc + curr,
+            |lc| lc + CS::one(),
+            |lc| lc + y,
+        );
         Ok(())
     }
 }
@@ -1127,15 +1195,18 @@ async fn test_gpu_large_circuit_abc_match() {
         y: None,
         num_constraints,
     };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("param gen failed");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("param gen failed");
 
     let gpu_ctx = GpuContext::<Bls12>::new().await.unwrap();
     let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
     let gpu_pk = prepare_gpu_proving_key::<Bls12>(&ppk, &gpu_ctx);
 
-    // If x = 1, multiplying by 2 `num_constraints` times means y = 1 * 2^(num_constraints)
+    // If x = 1, multiplying by 2 `num_constraints` times means y = 1 *
+    // 2^(num_constraints)
     let x_value = Scalar::ONE;
     let mut y_value = x_value;
     for _ in 0..num_constraints {
@@ -1166,8 +1237,8 @@ async fn test_gpu_large_circuit_abc_match() {
     .expect("gpu proof failed");
     eprintln!("GPU Large Proof took: {:?}", t0.elapsed());
 
-    let cpu_proof =
-        bellman::groth16::create_proof(circuit, &params, r, s).expect("cpu proof failed");
+    let cpu_proof = bellman::groth16::create_proof(circuit, &params, r, s)
+        .expect("cpu proof failed");
 
     let gpu_a: blstrs::G1Projective = gpu_proof.a.into();
     let cpu_a: blstrs::G1Projective = cpu_proof.a.into();

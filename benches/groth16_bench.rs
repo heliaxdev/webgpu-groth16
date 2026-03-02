@@ -1,8 +1,7 @@
 use std::time::Duration;
 
-use criterion::{Criterion, criterion_group, criterion_main};
-
 use blstrs::{Bls12, Scalar};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ff::Field;
 use group::{Curve, Group};
 use masp_primitives::asset_type::AssetType;
@@ -10,13 +9,11 @@ use masp_primitives::jubjub;
 use masp_primitives::sapling::{Diversifier, ProofGenerationKey};
 use masp_proofs::circuit::sapling::Output as SaplingOutputCircuit;
 use rand_core::OsRng;
-
-use webgpu_groth16::bellman;
 use webgpu_groth16::bucket::compute_bucket_sorting;
 use webgpu_groth16::gpu::GpuContext;
 use webgpu_groth16::gpu::curve::GpuCurve;
-use webgpu_groth16::prover;
 use webgpu_groth16::prover::PreparedProvingKey;
+use webgpu_groth16::{bellman, prover};
 
 // ---------------------------------------------------------------------------
 // Repeated-squaring circuit: x -> x^2 -> x^4 -> ... -> x^(2^num_squarings)
@@ -44,12 +41,18 @@ impl<S: ff::PrimeField> bellman::Circuit<S> for RepeatedSquaringCircuit<S> {
                 // Last squaring: allocate as public input
                 cs.alloc_input(
                     || format!("sq_{i}"),
-                    || next_val.ok_or(bellman::SynthesisError::AssignmentMissing),
+                    || {
+                        next_val
+                            .ok_or(bellman::SynthesisError::AssignmentMissing)
+                    },
                 )?
             } else {
                 cs.alloc(
                     || format!("sq_{i}"),
-                    || next_val.ok_or(bellman::SynthesisError::AssignmentMissing),
+                    || {
+                        next_val
+                            .ok_or(bellman::SynthesisError::AssignmentMissing)
+                    },
                 )?
             };
             cs.enforce(
@@ -84,9 +87,11 @@ fn setup(num_squarings: usize) -> BenchSetup {
         x: None,
         num_squarings,
     };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("param gen failed");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("param gen failed");
 
     let ppk = prover::prepare_proving_key::<Bls12, Bls12>(&params);
     let gpu = rt
@@ -145,12 +150,15 @@ fn bench_h_poly(c: &mut Criterion) {
         let mut rng = OsRng;
         let a: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
         let b: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
-        let cv: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+        let cv: Vec<Scalar> =
+            (0..n).map(|_| Scalar::random(&mut rng)).collect();
 
         group.bench_function(format!("h_poly_n={n}"), |bench| {
             bench.iter(|| {
-                rt.block_on(prover::compute_h_poly::<Bls12>(&bs.gpu, &a, &b, &cv))
-                    .expect("h_poly failed");
+                rt.block_on(prover::compute_h_poly::<Bls12>(
+                    &bs.gpu, &a, &b, &cv,
+                ))
+                .expect("h_poly failed");
             });
         });
     }
@@ -172,12 +180,15 @@ fn bench_msm_g1(c: &mut Criterion) {
         let bases: Vec<<Bls12 as GpuCurve>::G1Affine> = (0..size)
             .map(|_| <Bls12 as GpuCurve>::G1::random(&mut rng).to_affine())
             .collect();
-        let scalars: Vec<Scalar> = (0..size).map(|_| Scalar::random(&mut rng)).collect();
+        let scalars: Vec<Scalar> =
+            (0..size).map(|_| Scalar::random(&mut rng)).collect();
 
         group.bench_function(format!("n={size}"), |b| {
             b.iter(|| {
-                rt.block_on(prover::gpu_msm_g1::<Bls12>(&bs.gpu, &bases, &scalars))
-                    .expect("msm failed");
+                rt.block_on(prover::gpu_msm_g1::<Bls12>(
+                    &bs.gpu, &bases, &scalars,
+                ))
+                .expect("msm failed");
             });
         });
     }
@@ -191,12 +202,18 @@ fn bench_msm_batch(c: &mut Criterion) {
     let bs = setup(2);
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    fn make_g1_bases(rng: &mut OsRng, count: usize) -> Vec<<Bls12 as GpuCurve>::G1Affine> {
+    fn make_g1_bases(
+        rng: &mut OsRng,
+        count: usize,
+    ) -> Vec<<Bls12 as GpuCurve>::G1Affine> {
         (0..count)
             .map(|_| <Bls12 as GpuCurve>::G1::random(&mut *rng).to_affine())
             .collect()
     }
-    fn make_g2_bases(rng: &mut OsRng, count: usize) -> Vec<<Bls12 as GpuCurve>::G2Affine> {
+    fn make_g2_bases(
+        rng: &mut OsRng,
+        count: usize,
+    ) -> Vec<<Bls12 as GpuCurve>::G2Affine> {
         (0..count)
             .map(|_| <Bls12 as GpuCurve>::G2::random(&mut *rng).to_affine())
             .collect()
@@ -251,7 +268,8 @@ fn bench_bucket_sorting(c: &mut Criterion) {
 
     for &size in &[1_000, 10_000, 100_000] {
         let mut rng = OsRng;
-        let scalars: Vec<Scalar> = (0..size).map(|_| Scalar::random(&mut rng)).collect();
+        let scalars: Vec<Scalar> =
+            (0..size).map(|_| Scalar::random(&mut rng)).collect();
 
         group.bench_function(format!("n={size}"), |b| {
             b.iter(|| {
@@ -266,8 +284,10 @@ fn bench_bucket_sorting(c: &mut Criterion) {
 // MASP Sapling Output circuit helpers
 // ---------------------------------------------------------------------------
 fn sample_sapling_output_circuit() -> SaplingOutputCircuit {
-    let asset_type = AssetType::new(b"benchmark-asset").expect("asset type creation failed");
-    let value_commitment = asset_type.value_commitment(42, jubjub::Fr::from(7u64));
+    let asset_type =
+        AssetType::new(b"benchmark-asset").expect("asset type creation failed");
+    let value_commitment =
+        asset_type.value_commitment(42, jubjub::Fr::from(7u64));
 
     let pgk = ProofGenerationKey {
         ak: jubjub::SubgroupPoint::generator(),
@@ -276,12 +296,15 @@ fn sample_sapling_output_circuit() -> SaplingOutputCircuit {
     let vk = pgk.to_viewing_key();
     let mut payment_address = None;
     for d0 in 0u8..=255 {
-        if let Some(addr) = vk.to_payment_address(Diversifier([d0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])) {
+        if let Some(addr) = vk
+            .to_payment_address(Diversifier([d0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
+        {
             payment_address = Some(addr);
             break;
         }
     }
-    let payment_address = payment_address.expect("failed to find a valid diversifier");
+    let payment_address =
+        payment_address.expect("failed to find a valid diversifier");
 
     SaplingOutputCircuit {
         value_commitment: Some(value_commitment),
@@ -306,9 +329,11 @@ fn bench_sapling_output(c: &mut Criterion) {
         commitment_randomness: None,
         esk: None,
     };
-    let params =
-        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
-            .expect("param gen failed");
+    let params = bellman::groth16::generate_random_parameters::<Bls12, _, _>(
+        setup_circuit,
+        &mut rng,
+    )
+    .expect("param gen failed");
     let ppk = prover::prepare_proving_key::<Bls12, Bls12>(&params);
     let gpu = rt
         .block_on(GpuContext::<Bls12>::new())

@@ -7,8 +7,9 @@
 //!
 //! Two modes (selected by [`GpuCurve::HAS_G1_GLV`]):
 //! - **Standard** ([`compute_bucket_sorting`]): direct scalar decomposition
-//! - **GLV-capable** ([`compute_glv_bucket_sorting`], [`compute_glv_bucket_data`]):
-//!   uses curve-provided endomorphism decomposition hooks when available
+//! - **GLV-capable** ([`compute_glv_bucket_sorting`],
+//!   [`compute_glv_bucket_data`]): uses curve-provided endomorphism
+//!   decomposition hooks when available
 
 use crate::gpu::curve::{G1MsmDecomposition, GpuCurve};
 
@@ -18,16 +19,18 @@ use crate::gpu::curve::{G1MsmDecomposition, GpuCurve};
 /// `storage<read_only>` GPU buffer. This avoids struct padding issues in WGSL
 /// and allows independent buffer bindings per kernel.
 ///
-/// When sub-bucket chunking is active (`has_chunks == true`), the parallel arrays
-/// (`bucket_pointers`, `bucket_sizes`, `bucket_values`, `window_starts`,
-/// `window_counts`) describe *sub-buckets* (dispatched units), not logical buckets.
-/// The `reduce_starts`/`reduce_counts` arrays map original bucket indices to their
-/// sub-bucket ranges for a post-aggregation reduction pass.
+/// When sub-bucket chunking is active (`has_chunks == true`), the parallel
+/// arrays (`bucket_pointers`, `bucket_sizes`, `bucket_values`, `window_starts`,
+/// `window_counts`) describe *sub-buckets* (dispatched units), not logical
+/// buckets. The `reduce_starts`/`reduce_counts` arrays map original bucket
+/// indices to their sub-bucket ranges for a post-aggregation reduction pass.
 ///
 /// Invariants:
-/// - `bucket_pointers[i]` is the starting index in `base_indices` for sub-bucket `i`
+/// - `bucket_pointers[i]` is the starting index in `base_indices` for
+///   sub-bucket `i`
 /// - `bucket_sizes[i]` is the count of points in sub-bucket `i`
-/// - `bucket_values[i]` is the scalar weight for sub-bucket `i` (in `[1, 2^(c-1)]`)
+/// - `bucket_values[i]` is the scalar weight for sub-bucket `i` (in `[1,
+///   2^(c-1)]`)
 /// - `window_starts[w]` is the first sub-bucket index belonging to window `w`
 /// - `window_counts[w]` is the number of sub-buckets in window `w`
 /// - `reduce_starts[j]` is the first sub-bucket index for original bucket `j`
@@ -47,9 +50,11 @@ pub struct BucketData {
     pub num_windows: u32,
     /// Number of original (logical) buckets.
     pub num_active_buckets: u32,
-    /// Number of dispatched sub-buckets (>= num_active_buckets when chunking occurs).
+    /// Number of dispatched sub-buckets (>= num_active_buckets when chunking
+    /// occurs).
     pub num_dispatched: u32,
-    /// Original bucket values for weight/subsum passes (length = num_active_buckets).
+    /// Original bucket values for weight/subsum passes (length =
+    /// num_active_buckets).
     pub orig_bucket_values: Vec<u32>,
     /// Original window starts for weight/subsum passes (length = num_windows).
     pub orig_window_starts: Vec<u32>,
@@ -65,8 +70,8 @@ pub struct BucketData {
 }
 
 impl BucketData {
-    /// Print bucket size distribution statistics for diagnosing workload imbalance.
-    /// Only active when the `timing` feature is enabled.
+    /// Print bucket size distribution statistics for diagnosing workload
+    /// imbalance. Only active when the `timing` feature is enabled.
     #[cfg(feature = "timing")]
     pub fn print_distribution_stats(&self, label: &str) {
         if self.num_active_buckets == 0 {
@@ -90,12 +95,19 @@ impl BucketData {
         let over_1024 = sizes.iter().filter(|&&s| s > 1024).count();
 
         eprintln!(
-            "[bucket-diag] {label}: {n} active buckets, {total} total points, c={}",
+            "[bucket-diag] {label}: {n} active buckets, {total} total points, \
+             c={}",
             self.bucket_width
         );
-        eprintln!("[bucket-diag]   min={min} max={max} mean={mean:.1} median={median}");
+        eprintln!(
+            "[bucket-diag]   min={min} max={max} mean={mean:.1} \
+             median={median}"
+        );
         eprintln!("[bucket-diag]   p90={p90} p95={p95} p99={p99}");
-        eprintln!("[bucket-diag]   >64: {over_64}  >256: {over_256}  >1024: {over_1024}");
+        eprintln!(
+            "[bucket-diag]   >64: {over_64}  >256: {over_256}  >1024: \
+             {over_1024}"
+        );
 
         // Per-window summary for windows with large buckets
         for w in 0..self.num_windows as usize {
@@ -114,7 +126,8 @@ impl BucketData {
             let max_val = self.bucket_values[start + max_idx];
             if w_max > 32 {
                 eprintln!(
-                    "[bucket-diag]   window {w}: {count} buckets, max_size={w_max} (val={max_val}), total={w_total}"
+                    "[bucket-diag]   window {w}: {count} buckets, \
+                     max_size={w_max} (val={max_val}), total={w_total}"
                 );
             }
         }
@@ -123,22 +136,27 @@ impl BucketData {
 
 /// Builds `BucketData` from pre-computed signed-digit window decompositions.
 ///
-/// `all_windows[i]` contains the (absolute_value, is_negative) pairs for point `i`.
-/// `c` is the bucket width (window size in bits).
+/// `all_windows[i]` contains the (absolute_value, is_negative) pairs for point
+/// `i`. `c` is the bucket width (window size in bits).
 ///
 /// ## Algorithm (two-pass Pippenger bucket sorting with sub-bucket chunking)
 ///
 /// **Pass 1 — Group points by (window, bucket_value):**
 /// For each window w, iterate over all points and place each into the bucket
 /// corresponding to its signed-digit value. Produces flat arrays of:
-/// base_indices (point IDs, sign-encoded), pointers, sizes, and values per bucket.
+/// base_indices (point IDs, sign-encoded), pointers, sizes, and values per
+/// bucket.
 ///
 /// **Pass 2 — Split oversized buckets for GPU load balancing:**
-/// Buckets with more than `G::MSM_MAX_CHUNK_SIZE` points are split into sub-buckets.
-/// Each sub-bucket becomes an independent GPU thread. A reduce_starts/reduce_counts
-/// table records which sub-buckets belong to the same logical bucket, so a later
-/// GPU reduce pass can sum the sub-bucket partials back together.
-fn build_bucket_data<G: GpuCurve>(all_windows: &[Vec<(u32, bool)>], c: usize) -> BucketData {
+/// Buckets with more than `G::MSM_MAX_CHUNK_SIZE` points are split into
+/// sub-buckets. Each sub-bucket becomes an independent GPU thread. A
+/// reduce_starts/reduce_counts table records which sub-buckets belong to the
+/// same logical bucket, so a later GPU reduce pass can sum the sub-bucket
+/// partials back together.
+fn build_bucket_data<G: GpuCurve>(
+    all_windows: &[Vec<(u32, bool)>],
+    c: usize,
+) -> BucketData {
     let num_windows = all_windows.iter().map(|w| w.len()).max().unwrap_or(0);
     let num_buckets = (1usize << (c - 1)) + 1;
 
@@ -220,8 +238,8 @@ fn build_bucket_data<G: GpuCurve>(all_windows: &[Vec<(u32, bool)>], c: usize) ->
                 let num_chunks = size.div_ceil(G::MSM_MAX_CHUNK_SIZE);
                 for chunk in 0..num_chunks {
                     let chunk_start = ptr + chunk * G::MSM_MAX_CHUNK_SIZE;
-                    let chunk_size =
-                        (size - chunk * G::MSM_MAX_CHUNK_SIZE).min(G::MSM_MAX_CHUNK_SIZE);
+                    let chunk_size = (size - chunk * G::MSM_MAX_CHUNK_SIZE)
+                        .min(G::MSM_MAX_CHUNK_SIZE);
                     bucket_pointers.push(chunk_start);
                     bucket_sizes.push(chunk_size);
                     bucket_values.push(val);
@@ -260,7 +278,9 @@ pub fn optimal_glv_c<G: GpuCurve>(n: usize) -> usize {
     G::g1_msm_bucket_width(n)
 }
 
-pub fn compute_bucket_sorting<G: GpuCurve>(scalars: &[G::Scalar]) -> BucketData {
+pub fn compute_bucket_sorting<G: GpuCurve>(
+    scalars: &[G::Scalar],
+) -> BucketData {
     compute_bucket_sorting_with_width::<G>(scalars, G::bucket_width())
 }
 
@@ -277,12 +297,13 @@ pub fn compute_bucket_sorting_with_width<G: GpuCurve>(
 
 /// Curve-capability-aware G1 bucket sorting with signed-digit decomposition.
 ///
-/// For GLV-capable curves, decomposes each scalar into two components and builds a
-/// 2N-entry bases buffer with conditional point negation. For non-GLV curves,
-/// falls back to standard signed-window sorting and returns the original base bytes.
+/// For GLV-capable curves, decomposes each scalar into two components and
+/// builds a 2N-entry bases buffer with conditional point negation. For non-GLV
+/// curves, falls back to standard signed-window sorting and returns the
+/// original base bytes.
 ///
-/// Returns `(combined_bases_bytes, bucket_data)` where `combined_bases_bytes` is
-/// a 2N×G1_GPU_BYTES buffer laid out as:
+/// Returns `(combined_bases_bytes, bucket_data)` where `combined_bases_bytes`
+/// is a 2N×G1_GPU_BYTES buffer laid out as:
 ///   [maybe_neg(P₀), maybe_neg(φ(P₀)), maybe_neg(P₁), maybe_neg(φ(P₁)), ...]
 pub fn compute_glv_bucket_sorting<G: GpuCurve>(
     scalars: &[G::Scalar],
@@ -308,13 +329,16 @@ pub fn compute_glv_bucket_sorting<G: GpuCurve>(
             G::decompose_g1_msm_scalar_glv_windows(scalar, c)
         {
             let src_start = i * G::G1_GPU_BYTES;
-            let mut p_bytes = bases_bytes[src_start..src_start + G::G1_GPU_BYTES].to_vec();
+            let mut p_bytes =
+                bases_bytes[src_start..src_start + G::G1_GPU_BYTES].to_vec();
             if k1_neg {
                 G::negate_g1_base_bytes(&mut p_bytes);
             }
             combined_bases.extend_from_slice(&p_bytes);
 
-            let mut phi_bytes = phi_bases_bytes[src_start..src_start + G::G1_GPU_BYTES].to_vec();
+            let mut phi_bytes = phi_bases_bytes
+                [src_start..src_start + G::G1_GPU_BYTES]
+                .to_vec();
             if k2_neg {
                 G::negate_g1_base_bytes(&mut phi_bytes);
             }
@@ -326,7 +350,9 @@ pub fn compute_glv_bucket_sorting<G: GpuCurve>(
             G::decompose_g1_msm_scalar(scalar, c)
         {
             let src_start = i * G::G1_GPU_BYTES;
-            combined_bases.extend_from_slice(&bases_bytes[src_start..src_start + G::G1_GPU_BYTES]);
+            combined_bases.extend_from_slice(
+                &bases_bytes[src_start..src_start + G::G1_GPU_BYTES],
+            );
             all_windows.push(windows);
         }
     }
@@ -334,12 +360,17 @@ pub fn compute_glv_bucket_sorting<G: GpuCurve>(
     (combined_bases, build_bucket_data::<G>(&all_windows, c))
 }
 
-/// Curve-capability-aware bucket sorting that returns only BucketData (no bases buffer).
+/// Curve-capability-aware bucket sorting that returns only BucketData (no bases
+/// buffer).
 ///
 /// For GLV-capable curves with persistent bases, GLV negation is folded into
-/// `base_indices` sign bits (XOR with signed-digit window sign) instead of mutating
-/// base bytes. For non-GLV curves this is equivalent to standard sorting.
-pub fn compute_glv_bucket_data<G: GpuCurve>(scalars: &[G::Scalar], c: usize) -> BucketData {
+/// `base_indices` sign bits (XOR with signed-digit window sign) instead of
+/// mutating base bytes. For non-GLV curves this is equivalent to standard
+/// sorting.
+pub fn compute_glv_bucket_data<G: GpuCurve>(
+    scalars: &[G::Scalar],
+    c: usize,
+) -> BucketData {
     if !G::HAS_G1_GLV {
         return compute_bucket_sorting_with_width::<G>(scalars, c);
     }

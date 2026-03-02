@@ -28,7 +28,8 @@ use crate::gpu::curve::GpuCurve;
 use crate::gpu::curve::bls12_381::{fq_13bit_to_bytes, fq_bytes_to_13bit};
 
 const FQ_GPU_BYTES: usize = <blstrs::Bls12 as GpuCurve>::FQ_GPU_BYTES;
-const FQ_GPU_PADDED_BYTES: usize = <blstrs::Bls12 as GpuCurve>::FQ_GPU_PADDED_BYTES;
+const FQ_GPU_PADDED_BYTES: usize =
+    <blstrs::Bls12 as GpuCurve>::FQ_GPU_PADDED_BYTES;
 const G1_GPU_BYTES: usize = <blstrs::Bls12 as GpuCurve>::G1_GPU_BYTES;
 
 // ============================================================================
@@ -39,30 +40,36 @@ const G1_GPU_BYTES: usize = <blstrs::Bls12 as GpuCurve>::G1_GPU_BYTES;
 /// β^3 = 1 (mod q), β ≠ 1. Equivalently: β = g^((q-1)/3) where g generates Fq*.
 /// Reference: https://eprint.iacr.org/2013/158 Section 4
 const BETA_LE_BYTES: [u8; 48] = [
-    0xfe, 0xff, 0xfe, 0xff, 0xff, 0xff, 0x01, 0x2e, 0x02, 0x00, 0x0a, 0x62, 0x13, 0xd8, 0x17, 0xde,
-    0x88, 0x96, 0xf8, 0xe6, 0x3b, 0xa9, 0xb3, 0xdd, 0xea, 0x77, 0x0f, 0x6a, 0x07, 0xc6, 0x69, 0xba,
-    0x51, 0xce, 0x76, 0xdf, 0x2f, 0x67, 0x19, 0x5f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xfe, 0xff, 0xfe, 0xff, 0xff, 0xff, 0x01, 0x2e, 0x02, 0x00, 0x0a, 0x62,
+    0x13, 0xd8, 0x17, 0xde, 0x88, 0x96, 0xf8, 0xe6, 0x3b, 0xa9, 0xb3, 0xdd,
+    0xea, 0x77, 0x0f, 0x6a, 0x07, 0xc6, 0x69, 0xba, 0x51, 0xce, 0x76, 0xdf,
+    0x2f, 0x67, 0x19, 0x5f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// Lattice vector component N11 = x² where x = -0xd201000000010000 (BLS parameter).
-/// N11 = 228988810152649578064853576960394133504 = 0xac45a4010001a4020000000100000000
+/// Lattice vector component N11 = x² where x = -0xd201000000010000 (BLS
+/// parameter). N11 = 228988810152649578064853576960394133504 =
+/// 0xac45a4010001a4020000000100000000
 const N11_LO: u64 = 0x0000000100000000;
 const N11_HI: u64 = 0xac45a4010001a402;
 
 /// Lattice vector component N22 = x² - 1.
-/// N22 = 228988810152649578064853576960394133503 = 0xac45a4010001a40200000000ffffffff
+/// N22 = 228988810152649578064853576960394133503 =
+/// 0xac45a4010001a40200000000ffffffff
 const N22_LO: u64 = 0x00000000ffffffff;
 const N22_HI: u64 = 0xac45a4010001a402;
 
-/// Precomputed constant g = round(N22 · 2^256 / r) for efficient Babai rounding.
-/// Used to approximate c2 = round(k · N22 / r) as c2 ≈ (k · g) >> 256.
-const G_LIMBS: [u64; 3] = [0x63f6e522f6cfee2e, 0x7c6becf1e01faadd, 0x0000000000000001];
+/// Precomputed constant g = round(N22 · 2^256 / r) for efficient Babai
+/// rounding. Used to approximate c2 = round(k · N22 / r) as c2 ≈ (k · g) >>
+/// 256.
+const G_LIMBS: [u64; 3] =
+    [0x63f6e522f6cfee2e, 0x7c6becf1e01faadd, 0x0000000000000001];
 
 /// Fq modulus in 48-byte little-endian format (for point negation: y → q - y).
 const Q_MODULUS_LE: [u8; 48] = [
-    0xab, 0xaa, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xb9, 0xff, 0xff, 0x53, 0xb1, 0xfe, 0xff, 0xab, 0x1e,
-    0x24, 0xf6, 0xb0, 0xf6, 0xa0, 0xd2, 0x30, 0x67, 0xbf, 0x12, 0x85, 0xf3, 0x84, 0x4b, 0x77, 0x64,
-    0xd7, 0xac, 0x4b, 0x43, 0xb6, 0xa7, 0x1b, 0x4b, 0x9a, 0xe6, 0x7f, 0x39, 0xea, 0x11, 0x01, 0x1a,
+    0xab, 0xaa, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xb9, 0xff, 0xff, 0x53, 0xb1,
+    0xfe, 0xff, 0xab, 0x1e, 0x24, 0xf6, 0xb0, 0xf6, 0xa0, 0xd2, 0x30, 0x67,
+    0xbf, 0x12, 0x85, 0xf3, 0x84, 0x4b, 0x77, 0x64, 0xd7, 0xac, 0x4b, 0x43,
+    0xb6, 0xa7, 0x1b, 0x4b, 0x9a, 0xe6, 0x7f, 0x39, 0xea, 0x11, 0x01, 0x1a,
 ];
 
 /// Half of the scalar field modulus r, used to determine c1 = round(k/r).
@@ -164,7 +171,8 @@ pub fn endomorphism_g1(p: &G1Affine) -> G1Affine {
         return G1Affine::identity();
     }
 
-    let beta: Fp = Fp::from_bytes_le(&BETA_LE_BYTES).expect("BETA constant is a valid Fp element");
+    let beta: Fp = Fp::from_bytes_le(&BETA_LE_BYTES)
+        .expect("BETA constant is a valid Fp element");
 
     // φ(x, y) = (β * x, y)
     let beta_x = beta * p.x();
@@ -192,7 +200,8 @@ pub fn endomorphism_g1(p: &G1Affine) -> G1Affine {
 /// Applies the GLV endomorphism φ(P) = (β·x, y) to a serialized G1 point.
 ///
 /// This is the byte-level equivalent of [`endomorphism_g1`], operating directly
-/// on the 30×13-bit limb GPU representation to avoid full deserialize/serialize.
+/// on the 30×13-bit limb GPU representation to avoid full
+/// deserialize/serialize.
 ///
 /// Format: x[120+8pad] || y[120+8pad] || z[120+8pad] = 384 bytes (each coord is
 /// 30 LE u32s + 8 bytes padding from `@size(128)` in WGSL).
@@ -244,8 +253,9 @@ pub fn negate_g1_bytes(point_bytes: &mut [u8]) {
         return;
     }
 
-    // y is at bytes [FQ_GPU_PADDED_BYTES..FQ_GPU_PADDED_BYTES+FQ_GPU_BYTES] in 13-bit limb format.
-    // Convert y from 13-bit (120 bytes) to 48-byte LE, negate, convert back.
+    // y is at bytes [FQ_GPU_PADDED_BYTES..FQ_GPU_PADDED_BYTES+FQ_GPU_BYTES] in
+    // 13-bit limb format. Convert y from 13-bit (120 bytes) to 48-byte LE,
+    // negate, convert back.
     let y_start = FQ_GPU_PADDED_BYTES;
     let y_le = fq_13bit_to_bytes(&point_bytes[y_start..y_start + FQ_GPU_BYTES]);
 
@@ -299,8 +309,9 @@ pub fn u128_to_windows(k: u128, c: usize) -> Vec<u32> {
 }
 
 /// Decomposes a 128-bit unsigned integer into signed c-bit windows.
-/// Returns `ceil(128/c) + 1` entries (extra for carry), each as (|value|, is_negative).
-/// Window values are in [0, 2^(c-1)], halving the bucket count vs unsigned.
+/// Returns `ceil(128/c) + 1` entries (extra for carry), each as (|value|,
+/// is_negative). Window values are in [0, 2^(c-1)], halving the bucket count vs
+/// unsigned.
 pub fn u128_to_signed_windows(k: u128, c: usize) -> Vec<(u32, bool)> {
     let mut unsigned = u128_to_windows(k, c);
     // Add extra window for potential carry from the last window
@@ -341,7 +352,9 @@ fn bytes_to_u64x4(bytes: &[u8]) -> [u64; 4] {
     for (i, limb) in limbs.iter_mut().enumerate() {
         let offset = i * 8;
         if offset + 8 <= bytes.len() {
-            *limb = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+            *limb = u64::from_le_bytes(
+                bytes[offset..offset + 8].try_into().unwrap(),
+            );
         } else {
             // Handle partial last limb
             let mut buf = [0u8; 8];
@@ -366,8 +379,8 @@ fn gt_u256(a: &[u64; 4], b: &[u64; 4]) -> bool {
     false // equal
 }
 
-/// Computes the high 128 bits of (k * g) >> 256, where k is [u64; 4] and g is [u64; 3].
-/// This gives the approximate Babai rounding coefficient c2.
+/// Computes the high 128 bits of (k * g) >> 256, where k is [u64; 4] and g is
+/// [u64; 3]. This gives the approximate Babai rounding coefficient c2.
 fn mul_u256_u192_high(k: &[u64; 4], g: &[u64; 3]) -> u128 {
     // Schoolbook multiplication: result[i+j] += k[i] * g[j]
     // We need result[4] and result[5] (the bits >> 256).
@@ -409,7 +422,8 @@ fn mul_u128_u128(a: u128, b: u128) -> [u64; 4] {
     let (r1b, c1b) = mul_u64(a_hi, b_lo);
     let (r2, c2) = mul_u64(a_hi, b_hi);
 
-    // Combine: result = r0 + (r1a + r1b) << 64 + (c0 + c1a + c1b + r2) << 128 + c2 << 192
+    // Combine: result = r0 + (r1a + r1b) << 64 + (c0 + c1a + c1b + r2) << 128 +
+    // c2 << 192
     let (mid_sum, mid_carry) = r1a.overflowing_add(r1b);
     let (r1, carry1) = mid_sum.overflowing_add(c0);
 
@@ -453,10 +467,11 @@ fn negate_u256(a: &[u64; 4]) -> [u64; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use blstrs::Scalar;
     use ff::Field;
     use group::Curve;
+
+    use super::*;
 
     /// Verify that β is a valid cube root of unity in Fq.
     #[test]
@@ -473,9 +488,9 @@ mod tests {
     fn glv_decompose_roundtrip() {
         // λ = -x² mod r (the endomorphism eigenvalue in Fr)
         let lambda = Scalar::from_repr_vartime([
-            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00,
-            0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29,
-            0x53, 0xa7, 0xed, 0x73,
+            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc,
+            0xff, 0x01, 0x00, 0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8,
+            0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
         ])
         .expect("LAMBDA is a valid scalar");
 
@@ -528,15 +543,16 @@ mod tests {
     #[test]
     fn endomorphism_matches_scalar_mul() {
         let lambda = Scalar::from_repr_vartime([
-            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00,
-            0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29,
-            0x53, 0xa7, 0xed, 0x73,
+            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc,
+            0xff, 0x01, 0x00, 0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8,
+            0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
         ])
         .unwrap();
 
         let g = G1Affine::generator();
         let phi_g = endomorphism_g1(&g);
-        let lambda_g: G1Affine = (blstrs::G1Projective::from(g) * lambda).to_affine();
+        let lambda_g: G1Affine =
+            (blstrs::G1Projective::from(g) * lambda).to_affine();
 
         assert_eq!(phi_g, lambda_g, "φ(G) should equal [λ]·G");
     }
@@ -548,7 +564,8 @@ mod tests {
         assert_eq!(endomorphism_g1(&inf), inf);
     }
 
-    /// Verify that endomorphism_g1_bytes produces the same result as endomorphism_g1.
+    /// Verify that endomorphism_g1_bytes produces the same result as
+    /// endomorphism_g1.
     #[test]
     fn endomorphism_g1_bytes_matches_affine() {
         use crate::gpu::curve::GpuCurve;
@@ -561,8 +578,9 @@ mod tests {
         let phi_bytes = endomorphism_g1_bytes(&g_bytes);
 
         // Deserialize and compare
-        let phi_from_bytes = <blstrs::Bls12 as GpuCurve>::deserialize_g1(&phi_bytes)
-            .expect("endomorphism bytes should deserialize");
+        let phi_from_bytes =
+            <blstrs::Bls12 as GpuCurve>::deserialize_g1(&phi_bytes)
+                .expect("endomorphism bytes should deserialize");
         let phi_affine = blstrs::G1Projective::from(phi_g);
 
         assert_eq!(
@@ -596,7 +614,8 @@ mod tests {
 
         let deserialized = <blstrs::Bls12 as GpuCurve>::deserialize_g1(&bytes)
             .expect("negated point should deserialize");
-        let neg_p: blstrs::G1Projective = (-blstrs::G1Projective::from(p)).into();
+        let neg_p: blstrs::G1Projective =
+            (-blstrs::G1Projective::from(p)).into();
 
         assert_eq!(deserialized, neg_p, "negated bytes should match -P");
     }
@@ -673,9 +692,9 @@ mod tests {
     #[test]
     fn glv_decompose_one() {
         let lambda = Scalar::from_repr_vartime([
-            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00,
-            0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29,
-            0x53, 0xa7, 0xed, 0x73,
+            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc,
+            0xff, 0x01, 0x00, 0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8,
+            0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
         ])
         .unwrap();
 
@@ -690,9 +709,9 @@ mod tests {
     #[test]
     fn glv_decompose_r_minus_one() {
         let lambda = Scalar::from_repr_vartime([
-            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00,
-            0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29,
-            0x53, 0xa7, 0xed, 0x73,
+            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc,
+            0xff, 0x01, 0x00, 0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8,
+            0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
         ])
         .unwrap();
 
@@ -714,9 +733,9 @@ mod tests {
     #[test]
     fn glv_decompose_lambda() {
         let lambda = Scalar::from_repr_vartime([
-            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc, 0xff, 0x01, 0x00,
-            0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29,
-            0x53, 0xa7, 0xed, 0x73,
+            0x01, 0x00, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff, 0xfc, 0xb7, 0xfc,
+            0xff, 0x01, 0x00, 0x78, 0xa7, 0x04, 0xd8, 0xa1, 0x09, 0x08, 0xd8,
+            0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
         ])
         .unwrap();
 
@@ -838,7 +857,10 @@ mod tests {
             for val in vals {
                 let windows = u128_to_windows(val, c);
                 let expected = reference_u128_windows(val, c);
-                assert_eq!(windows, expected, "mismatch for val={val:#x} c={c}");
+                assert_eq!(
+                    windows, expected,
+                    "mismatch for val={val:#x} c={c}"
+                );
             }
         }
     }
@@ -907,7 +929,8 @@ mod tests {
         let mut bytes = [0u8; 32];
         bytes[0..8].copy_from_slice(&lo.to_le_bytes());
         bytes[8..16].copy_from_slice(&hi.to_le_bytes());
-        let s = Scalar::from_repr_vartime(bytes).expect("128-bit value is a valid scalar");
+        let s = Scalar::from_repr_vartime(bytes)
+            .expect("128-bit value is a valid scalar");
         if negative { -s } else { s }
     }
 }

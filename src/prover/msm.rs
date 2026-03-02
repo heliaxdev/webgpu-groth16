@@ -6,13 +6,15 @@
 
 use anyhow::Result;
 
+use super::prepared_key::{
+    serialize_g1_bases, serialize_g1_phi_bases, serialize_g2_bases,
+};
 use crate::bucket::{
-    BucketData, compute_bucket_sorting_with_width, compute_glv_bucket_sorting, optimal_glv_c,
+    BucketData, compute_bucket_sorting_with_width, compute_glv_bucket_sorting,
+    optimal_glv_c,
 };
 use crate::gpu::curve::GpuCurve;
 use crate::gpu::{GpuContext, MsmBuffers};
-
-use super::prepared_key::{serialize_g1_bases, serialize_g1_phi_bases, serialize_g2_bases};
 
 /// Source of point bases for an MSM dispatch.
 pub(crate) enum MsmBases<'a> {
@@ -42,7 +44,10 @@ struct UploadedMsm {
 }
 
 impl UploadedMsm {
-    fn as_msm_buffers<'a>(&'a self, bases_override: Option<&'a wgpu::Buffer>) -> MsmBuffers<'a> {
+    fn as_msm_buffers<'a>(
+        &'a self,
+        bases_override: Option<&'a wgpu::Buffer>,
+    ) -> MsmBuffers<'a> {
         let bases = bases_override
             .or(self.bases_buf.as_ref())
             .expect("bases must be provided either as owned or persistent");
@@ -65,7 +70,8 @@ impl UploadedMsm {
     }
 }
 
-/// Uploads BucketData arrays (and optionally bases) to GPU buffers for MSM dispatch.
+/// Uploads BucketData arrays (and optionally bases) to GPU buffers for MSM
+/// dispatch.
 fn upload_msm_data<G: GpuCurve>(
     gpu: &GpuContext<G>,
     name: &str,
@@ -73,7 +79,8 @@ fn upload_msm_data<G: GpuCurve>(
     bd: &BucketData,
     point_gpu_bytes: usize,
 ) -> UploadedMsm {
-    let bases_buf = bases_bytes.map(|b| gpu.create_storage_buffer(&format!("{name}_bases"), b));
+    let bases_buf = bases_bytes
+        .map(|b| gpu.create_storage_buffer(&format!("{name}_bases"), b));
     let indices_buf = gpu.create_storage_buffer(
         &format!("{name}_indices"),
         bytemuck::cast_slice(&bd.base_indices),
@@ -181,12 +188,18 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     } else {
         Vec::new()
     };
-    let (glv_bytes, bd) = compute_glv_bucket_sorting::<G>(scalars, &bases_bytes, &phi_bytes, glv_c);
+    let (glv_bytes, bd) = compute_glv_bucket_sorting::<G>(
+        scalars,
+        &bases_bytes,
+        &phi_bytes,
+        glv_c,
+    );
 
     #[cfg(feature = "timing")]
     let t_bucket = std::time::Instant::now();
 
-    let pending = enqueue_msm::<G>(gpu, "g1", MsmBases::Bytes(&glv_bytes), bd, false)?;
+    let pending =
+        enqueue_msm::<G>(gpu, "g1", MsmBases::Bytes(&glv_bytes), bd, false)?;
     let job = match pending {
         None => return Ok(G::g1_identity()),
         Some(j) => j,
@@ -205,13 +218,18 @@ pub async fn gpu_msm_g1<G: GpuCurve>(
     #[cfg(feature = "timing")]
     let t_read = std::time::Instant::now();
 
-    let result = fold_window_sums_g1::<G>(&result_bytes, job.num_windows, job.bucket_width)?;
+    let result = fold_window_sums_g1::<G>(
+        &result_bytes,
+        job.num_windows,
+        job.bucket_width,
+    )?;
 
     #[cfg(feature = "timing")]
     {
         let t_fold = std::time::Instant::now();
         eprintln!(
-            "[timing] msm_g1 n={}: bucket_sort={:?} enqueue={:?} readback={:?} fold={:?} total={:?}",
+            "[timing] msm_g1 n={}: bucket_sort={:?} enqueue={:?} \
+             readback={:?} fold={:?} total={:?}",
             scalars.len(),
             t_bucket.duration_since(t_start),
             t_enqueue.duration_since(t_bucket),
@@ -230,10 +248,12 @@ pub(crate) async fn gpu_msm_g2<G: GpuCurve>(
     bases: &[G::G2Affine],
     scalars: &[G::Scalar],
 ) -> Result<G::G2> {
-    let bd = compute_bucket_sorting_with_width::<G>(scalars, G::g2_bucket_width());
+    let bd =
+        compute_bucket_sorting_with_width::<G>(scalars, G::g2_bucket_width());
     let bases_bytes = serialize_g2_bases::<G>(bases);
 
-    let pending = enqueue_msm::<G>(gpu, "g2", MsmBases::Bytes(&bases_bytes), bd, true)?;
+    let pending =
+        enqueue_msm::<G>(gpu, "g2", MsmBases::Bytes(&bases_bytes), bd, true)?;
     let job = match pending {
         None => return Ok(G::g2_identity()),
         Some(j) => j,
@@ -248,8 +268,9 @@ pub(crate) async fn gpu_msm_g2<G: GpuCurve>(
     fold_window_sums_g2::<G>(&result_bytes, job.num_windows, job.bucket_width)
 }
 
-/// Horner-style evaluation of window sums: processes windows from most-significant
-/// to least-significant, doubling `bucket_width` times between each window.
+/// Horner-style evaluation of window sums: processes windows from
+/// most-significant to least-significant, doubling `bucket_width` times between
+/// each window.
 fn fold_window_sums<P: Clone>(
     result_bytes: &[u8],
     num_windows: u32,
@@ -347,20 +368,43 @@ pub async fn gpu_msm_batch<G: GpuCurve>(
     let b1_c = optimal_glv_c::<G>(b_scalars.len());
     let l_c = optimal_glv_c::<G>(l_scalars.len());
     let h_c = optimal_glv_c::<G>(h_scalars.len());
-    let (a_glv, a_bd) =
-        compute_glv_bucket_sorting::<G>(a_scalars, &a_bases_bytes, &a_phi_bytes, a_c);
-    let (b1_glv, b_bd) =
-        compute_glv_bucket_sorting::<G>(b_scalars, &b1_bases_bytes, &b1_phi_bytes, b1_c);
-    let (l_glv, l_bd) =
-        compute_glv_bucket_sorting::<G>(l_scalars, &l_bases_bytes, &l_phi_bytes, l_c);
-    let (h_glv, h_bd) =
-        compute_glv_bucket_sorting::<G>(h_scalars, &h_bases_bytes, &h_phi_bytes, h_c);
-    let b2_bd = compute_bucket_sorting_with_width::<G>(b2_scalars, G::g2_bucket_width());
+    let (a_glv, a_bd) = compute_glv_bucket_sorting::<G>(
+        a_scalars,
+        &a_bases_bytes,
+        &a_phi_bytes,
+        a_c,
+    );
+    let (b1_glv, b_bd) = compute_glv_bucket_sorting::<G>(
+        b_scalars,
+        &b1_bases_bytes,
+        &b1_phi_bytes,
+        b1_c,
+    );
+    let (l_glv, l_bd) = compute_glv_bucket_sorting::<G>(
+        l_scalars,
+        &l_bases_bytes,
+        &l_phi_bytes,
+        l_c,
+    );
+    let (h_glv, h_bd) = compute_glv_bucket_sorting::<G>(
+        h_scalars,
+        &h_bases_bytes,
+        &h_phi_bytes,
+        h_c,
+    );
+    let b2_bd = compute_bucket_sorting_with_width::<G>(
+        b2_scalars,
+        G::g2_bucket_width(),
+    );
 
-    let a_job = enqueue_msm::<G>(gpu, "a", MsmBases::Bytes(&a_glv), a_bd, false)?;
-    let b1_job = enqueue_msm::<G>(gpu, "b1", MsmBases::Bytes(&b1_glv), b_bd, false)?;
-    let l_job = enqueue_msm::<G>(gpu, "l", MsmBases::Bytes(&l_glv), l_bd, false)?;
-    let h_job = enqueue_msm::<G>(gpu, "h", MsmBases::Bytes(&h_glv), h_bd, false)?;
+    let a_job =
+        enqueue_msm::<G>(gpu, "a", MsmBases::Bytes(&a_glv), a_bd, false)?;
+    let b1_job =
+        enqueue_msm::<G>(gpu, "b1", MsmBases::Bytes(&b1_glv), b_bd, false)?;
+    let l_job =
+        enqueue_msm::<G>(gpu, "l", MsmBases::Bytes(&l_glv), l_bd, false)?;
+    let h_job =
+        enqueue_msm::<G>(gpu, "h", MsmBases::Bytes(&h_glv), h_bd, false)?;
     let b2_job = enqueue_msm::<G>(
         gpu,
         "b2",
@@ -381,8 +425,9 @@ pub(crate) struct MsmPending {
 
 /// Enqueue a single MSM onto the GPU command queue (non-blocking).
 ///
-/// Handles both uploaded (fresh) and persistent (pre-uploaded) bases via `MsmBases`.
-/// Returns `None` when the bucket data has no active buckets (all-zero scalars).
+/// Handles both uploaded (fresh) and persistent (pre-uploaded) bases via
+/// `MsmBases`. Returns `None` when the bucket data has no active buckets
+/// (all-zero scalars).
 pub(crate) fn enqueue_msm<G: GpuCurve>(
     gpu: &GpuContext<G>,
     name: &str,
@@ -402,7 +447,8 @@ pub(crate) fn enqueue_msm<G: GpuCurve>(
         MsmBases::Bytes(b) => (Some(*b), None, false),
         MsmBases::Persistent(buf) => (None, Some(*buf), true),
     };
-    let uploaded = upload_msm_data::<G>(gpu, name, bases_bytes, &bd, point_size);
+    let uploaded =
+        upload_msm_data::<G>(gpu, name, bases_bytes, &bd, point_size);
     gpu.execute_msm(
         is_g2,
         &uploaded.as_msm_buffers(bases_override),
@@ -431,7 +477,8 @@ pub(crate) async fn readback_msms<G: GpuCurve>(
 ) -> Result<(G::G1, G::G1, G::G1, G::G1, G::G2)> {
     let g1_jobs = [&a_job, &b1_job, &l_job, &h_job];
 
-    let mut read_targets: Vec<(&wgpu::Buffer, wgpu::BufferAddress)> = Vec::new();
+    let mut read_targets: Vec<(&wgpu::Buffer, wgpu::BufferAddress)> =
+        Vec::new();
     for job in &g1_jobs {
         if let Some(j) = job {
             read_targets.push((
@@ -449,7 +496,8 @@ pub(crate) async fn readback_msms<G: GpuCurve>(
 
     #[cfg(feature = "timing")]
     let t_readback = std::time::Instant::now();
-    let mut read_results = gpu.read_buffers_batch(&read_targets).await?.into_iter();
+    let mut read_results =
+        gpu.read_buffers_batch(&read_targets).await?.into_iter();
     #[cfg(feature = "timing")]
     eprintln!("[msm] readback: {:?}", t_readback.elapsed());
 
@@ -469,7 +517,11 @@ pub(crate) async fn readback_msms<G: GpuCurve>(
     let h = fold_g1(&h_job)?;
 
     let b2 = if let Some(j) = &b2_job {
-        fold_window_sums_g2::<G>(&read_results.next().unwrap(), j.num_windows, j.bucket_width)?
+        fold_window_sums_g2::<G>(
+            &read_results.next().unwrap(),
+            j.num_windows,
+            j.bucket_width,
+        )?
     } else {
         G::g2_identity()
     };

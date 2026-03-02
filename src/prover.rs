@@ -7,7 +7,8 @@
 //! 1. Circuit synthesis → constraint system (A, B, C linear combinations)
 //! 2. Witness evaluation → dense A/B/C coefficient vectors
 //! 3. H-polynomial: `H(x) = (A(x)·B(x) − C(x)) / Z(x)` via GPU NTT pipeline
-//! 4. Five MSMs dispatched to GPU: `a` (G1), `b1` (G1), `l` (G1), `h` (G1), `b2` (G2)
+//! 4. Five MSMs dispatched to GPU: `a` (G1), `b1` (G1), `l` (G1), `h` (G1),
+//!    `b2` (G2)
 //! 5. CPU-side proof assembly with random blinding factors r, s
 
 mod constraint_system;
@@ -16,26 +17,24 @@ mod h_poly;
 mod msm;
 mod prepared_key;
 
+use anyhow::Result;
+use constraint_system::GpuConstraintSystem;
+use ff::{Field, PrimeField};
 pub use gpu_key::{GpuProvingKey, prepare_gpu_proving_key};
 pub use h_poly::compute_h_poly;
+use h_poly::{read_h_poly_result, submit_h_poly};
+use msm::{MsmBases, enqueue_msm, readback_msms};
 pub use msm::{gpu_msm_batch, gpu_msm_g1};
 pub use prepared_key::{PreparedProvingKey, prepare_proving_key};
-
-use anyhow::Result;
-use ff::{Field, PrimeField};
 use rand_core::RngCore;
 
 use crate::bellman;
 use crate::bucket::{
-    compute_bucket_sorting_with_width, compute_glv_bucket_data, compute_glv_bucket_sorting,
-    optimal_glv_c,
+    compute_bucket_sorting_with_width, compute_glv_bucket_data,
+    compute_glv_bucket_sorting, optimal_glv_c,
 };
 use crate::gpu::GpuContext;
 use crate::gpu::curve::GpuCurve;
-
-use constraint_system::GpuConstraintSystem;
-use h_poly::{read_h_poly_result, submit_h_poly};
-use msm::{MsmBases, enqueue_msm, readback_msms};
 
 fn marshal_scalars<G: GpuCurve>(scalars: &[G::Scalar]) -> Vec<u8> {
     let mut buffer = Vec::with_capacity(scalars.len() * 32);
@@ -65,7 +64,11 @@ fn dense_assignment_from_masks<S: PrimeField>(
     out
 }
 
-fn eval_lc<S: PrimeField>(lc: &[(bellman::Variable, S)], inputs: &[S], aux: &[S]) -> S {
+fn eval_lc<S: PrimeField>(
+    lc: &[(bellman::Variable, S)],
+    inputs: &[S],
+    aux: &[S],
+) -> S {
     let mut res = S::ZERO;
     for &(var, coeff) in lc {
         let val = match var.get_unchecked() {
@@ -130,7 +133,8 @@ where
     let n = num_constraints.next_power_of_two();
     #[cfg(feature = "timing")]
     eprintln!(
-        "[proof] synthesis: {:?} (constraints={num_constraints}, n={n}, inputs={}, aux={})",
+        "[proof] synthesis: {:?} (constraints={num_constraints}, n={n}, \
+         inputs={}, aux={})",
         t_phase.elapsed(),
         cs.inputs.len(),
         cs.aux.len()
@@ -161,8 +165,12 @@ where
             a_assignment.push(*v);
         }
     }
-    let b_assignment =
-        dense_assignment_from_masks(&cs.inputs, &cs.aux, &cs.b_input_density, &cs.b_aux_density);
+    let b_assignment = dense_assignment_from_masks(
+        &cs.inputs,
+        &cs.aux,
+        &cs.b_input_density,
+        &cs.b_aux_density,
+    );
     #[cfg(feature = "timing")]
     eprintln!(
         "[proof] assignments: {:?} (a_assign={}, b_assign={})",
@@ -179,8 +187,8 @@ where
     eprintln!("[proof] h_poly submit: {:?}", t_phase.elapsed());
 
     // Pre-compute GLV bucket data for non-H G1 MSMs while GPU computes H.
-    // GLV decomposes each scalar k into k1·P + k2·φ(P) with ~128-bit sub-scalars,
-    // halving the number of Pippenger windows.
+    // GLV decomposes each scalar k into k1·P + k2·φ(P) with ~128-bit
+    // sub-scalars, halving the number of Pippenger windows.
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     // Adaptive bucket width: choose per-MSM c based on point count.
@@ -188,8 +196,9 @@ where
     let b1_c = optimal_glv_c::<G>(b_assignment.len());
     let l_c = optimal_glv_c::<G>(cs.aux.len());
 
-    // Bucket sorting: with persistent GPU key, GLV negation is folded into sign bits
-    // and no combined bases buffer is built. Without it, the original path is used.
+    // Bucket sorting: with persistent GPU key, GLV negation is folded into sign
+    // bits and no combined bases buffer is built. Without it, the original
+    // path is used.
     let a_bd;
     let b1_bd;
     let l_bd;
@@ -203,7 +212,10 @@ where
         a_bd = compute_glv_bucket_data::<G>(&a_assignment, a_c);
         b1_bd = compute_glv_bucket_data::<G>(&b_assignment, b1_c);
         l_bd = compute_glv_bucket_data::<G>(&cs.aux, l_c);
-        b2_bd = compute_bucket_sorting_with_width::<G>(&b_assignment, G::g2_bucket_width());
+        b2_bd = compute_bucket_sorting_with_width::<G>(
+            &b_assignment,
+            G::g2_bucket_width(),
+        );
         a_glv_bytes = Vec::new();
         b1_glv_bytes = Vec::new();
         l_glv_bytes = Vec::new();
@@ -229,7 +241,10 @@ where
         a_bd = a_bd_tmp;
         b1_bd = b1_bd_tmp;
         l_bd = l_bd_tmp;
-        b2_bd = compute_bucket_sorting_with_width::<G>(&b_assignment, G::g2_bucket_width());
+        b2_bd = compute_bucket_sorting_with_width::<G>(
+            &b_assignment,
+            G::g2_bucket_width(),
+        );
         a_glv_bytes = a_bytes;
         b1_glv_bytes = b1_bytes;
         l_glv_bytes = l_bytes;
@@ -257,8 +272,9 @@ where
     #[cfg(feature = "timing")]
     eprintln!("[proof] h_poly read: {:?}", t_phase.elapsed());
 
-    // Enqueue a/b1/l/b2 MSMs right after h_poly completes — GPU starts processing
-    // them immediately while CPU computes h bucket sorting below.
+    // Enqueue a/b1/l/b2 MSMs right after h_poly completes — GPU starts
+    // processing them immediately while CPU computes h bucket sorting
+    // below.
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     let (a_job, b1_job, l_job, b2_job);
@@ -292,10 +308,34 @@ where
             true,
         )?;
     } else {
-        a_job = enqueue_msm::<G>(gpu, "a", MsmBases::Bytes(&a_glv_bytes), a_bd, false)?;
-        b1_job = enqueue_msm::<G>(gpu, "b1", MsmBases::Bytes(&b1_glv_bytes), b1_bd, false)?;
-        l_job = enqueue_msm::<G>(gpu, "l", MsmBases::Bytes(&l_glv_bytes), l_bd, false)?;
-        b2_job = enqueue_msm::<G>(gpu, "b2", MsmBases::Bytes(&ppk.b_g2_bytes), b2_bd, true)?;
+        a_job = enqueue_msm::<G>(
+            gpu,
+            "a",
+            MsmBases::Bytes(&a_glv_bytes),
+            a_bd,
+            false,
+        )?;
+        b1_job = enqueue_msm::<G>(
+            gpu,
+            "b1",
+            MsmBases::Bytes(&b1_glv_bytes),
+            b1_bd,
+            false,
+        )?;
+        l_job = enqueue_msm::<G>(
+            gpu,
+            "l",
+            MsmBases::Bytes(&l_glv_bytes),
+            l_bd,
+            false,
+        )?;
+        b2_job = enqueue_msm::<G>(
+            gpu,
+            "b2",
+            MsmBases::Bytes(&ppk.b_g2_bytes),
+            b2_bd,
+            true,
+        )?;
     }
     #[cfg(feature = "timing")]
     eprintln!("[proof] msm enqueue a/b1/l/b2: {:?}", t_phase.elapsed());
@@ -346,7 +386,13 @@ where
         }
         #[cfg(feature = "timing")]
         let t_phase = std::time::Instant::now();
-        h_job = enqueue_msm::<G>(gpu, "h", MsmBases::Bytes(&h_glv_bytes), h_bd, false)?;
+        h_job = enqueue_msm::<G>(
+            gpu,
+            "h",
+            MsmBases::Bytes(&h_glv_bytes),
+            h_bd,
+            false,
+        )?;
         #[cfg(feature = "timing")]
         eprintln!("[proof] msm enqueue h: {:?}", t_phase.elapsed());
     }
@@ -358,7 +404,8 @@ where
     #[cfg(feature = "timing")]
     eprintln!("[proof] msm readback: {:?}", t_phase.elapsed());
 
-    // Assemble the final Groth16 proof from MSM results and random blinding factors.
+    // Assemble the final Groth16 proof from MSM results and random blinding
+    // factors.
     //
     // Groth16 proof elements:
     //   A = α + Σᵢ aᵢ·Aᵢ + r·δ
@@ -368,16 +415,19 @@ where
     let t_phase = std::time::Instant::now();
 
     // A = α + a_msm + r·δ
-    let mut proof_a = G::add_g1_proj(&G::affine_to_proj_g1(&pk.vk.alpha_g1), &a_msm);
+    let mut proof_a =
+        G::add_g1_proj(&G::affine_to_proj_g1(&pk.vk.alpha_g1), &a_msm);
     proof_a = G::add_g1_proj(&proof_a, &G::mul_g1_scalar(&pk.vk.delta_g1, &r));
 
     // B = β + b_g2_msm + s·δ   (in G2)
-    let mut proof_b = G::add_g2_proj(&G::affine_to_proj_g2(&pk.vk.beta_g2), &b_g2_msm);
+    let mut proof_b =
+        G::add_g2_proj(&G::affine_to_proj_g2(&pk.vk.beta_g2), &b_g2_msm);
     proof_b = G::add_g2_proj(&proof_b, &G::mul_g2_scalar(&pk.vk.delta_g2, &s));
 
     // C = l_msm + h_msm + s·A + r·(β + b_g1_msm + s·δ_G1) − r·s·δ
     let mut proof_c = G::add_g1_proj(&l_msm, &h_msm);
-    let mut b_g1 = G::add_g1_proj(&G::affine_to_proj_g1(&pk.vk.beta_g1), &b_g1_msm);
+    let mut b_g1 =
+        G::add_g1_proj(&G::affine_to_proj_g1(&pk.vk.beta_g1), &b_g1_msm);
     b_g1 = G::add_g1_proj(&b_g1, &G::mul_g1_scalar(&pk.vk.delta_g1, &s));
 
     let c_shift_a = G::mul_g1_proj_scalar(&proof_a, &s);
@@ -423,13 +473,17 @@ where
 {
     let r = G::Scalar::random(&mut *rng);
     let s = G::Scalar::random(&mut *rng);
-    create_proof_with_fixed_randomness::<E, G, C>(circuit, pk, ppk, gpu, None, r, s).await
+    create_proof_with_fixed_randomness::<E, G, C>(
+        circuit, pk, ppk, gpu, None, r, s,
+    )
+    .await
 }
 
 /// Create a Groth16 proof using persistent GPU base buffers.
 ///
-/// Like [`create_proof`] but uses a [`GpuProvingKey`] to skip per-proof base uploads
-/// and Montgomery conversion, reusing pre-uploaded GPU buffers across proofs.
+/// Like [`create_proof`] but uses a [`GpuProvingKey`] to skip per-proof base
+/// uploads and Montgomery conversion, reusing pre-uploaded GPU buffers across
+/// proofs.
 pub async fn create_proof_with_gpu_key<E, G, C, R>(
     circuit: C,
     pk: &bellman::groth16::Parameters<E>,
@@ -453,7 +507,16 @@ where
 {
     let r = G::Scalar::random(&mut *rng);
     let s = G::Scalar::random(&mut *rng);
-    create_proof_with_fixed_randomness::<E, G, C>(circuit, pk, ppk, gpu, Some(gpu_pk), r, s).await
+    create_proof_with_fixed_randomness::<E, G, C>(
+        circuit,
+        pk,
+        ppk,
+        gpu,
+        Some(gpu_pk),
+        r,
+        s,
+    )
+    .await
 }
 
 #[cfg(test)]

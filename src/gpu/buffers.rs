@@ -13,16 +13,18 @@ impl<C: GpuCurve> GpuContext<C> {
         buffer: &wgpu::Buffer,
         size: wgpu::BufferAddress,
     ) -> anyhow::Result<Vec<u8>> {
-        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Staging Read Buffer"),
-            size,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let staging_buffer =
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Staging Read Buffer"),
+                size,
+                usage: wgpu::BufferUsages::MAP_READ
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder = self.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: None },
+        );
         encoder.copy_buffer_to_buffer(buffer, 0, &staging_buffer, 0, size);
         self.queue.submit(Some(encoder.finish()));
 
@@ -44,11 +46,12 @@ impl<C: GpuCurve> GpuContext<C> {
         anyhow::bail!("Failed to read back from GPU buffer")
     }
 
-    /// Reads multiple GPU buffers in a single command submission for efficiency.
+    /// Reads multiple GPU buffers in a single command submission for
+    /// efficiency.
     ///
     /// All copy commands are batched into one encoder, submitted together, and
-    /// then all staging buffers are mapped concurrently. This avoids the overhead
-    /// of per-buffer submission and device polling.
+    /// then all staging buffers are mapped concurrently. This avoids the
+    /// overhead of per-buffer submission and device polling.
     pub async fn read_buffers_batch(
         &self,
         entries: &[(&wgpu::Buffer, wgpu::BufferAddress)],
@@ -58,16 +61,17 @@ impl<C: GpuCurve> GpuContext<C> {
             staging.push(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Batch Staging Read Buffer"),
                 size: *size,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::MAP_READ
+                    | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }));
         }
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        let mut encoder = self.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
                 label: Some("Batch Read Encoder"),
-            });
+            },
+        );
         for (i, (src, size)) in entries.iter().enumerate() {
             encoder.copy_buffer_to_buffer(src, 0, &staging[i], 0, *size);
         }

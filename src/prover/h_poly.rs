@@ -5,18 +5,18 @@
 //! requires FFT-based polynomial arithmetic performed entirely on the GPU.
 //!
 //! CPU pre-computes constant factors (twiddle factors, coset shifts, Z⁻¹) and
-//! uploads them alongside the constraint evaluations. The GPU then runs the full
-//! pipeline in a single command buffer:
+//! uploads them alongside the constraint evaluations. The GPU then runs the
+//! full pipeline in a single command buffer:
 //!
-//!   toMont → iNTT → cosetShift → NTT → pointwise(H=(A·B−C)/Z) → iNTT → fromMont
+//!   toMont → iNTT → cosetShift → NTT → pointwise(H=(A·B−C)/Z) → iNTT →
+//! fromMont
 
 use anyhow::Result;
 use ff::{Field, PrimeField};
 
+use super::marshal_scalars;
 use crate::gpu::curve::GpuCurve;
 use crate::gpu::{GpuContext, HPolyBuffers};
-
-use super::marshal_scalars;
 
 pub(crate) struct HPolyPending {
     pub h_buf: wgpu::Buffer,
@@ -76,16 +76,28 @@ pub(crate) fn submit_h_poly<G: GpuCurve>(
     c_coeffs.resize(n, G::Scalar::ZERO);
 
     // Upload all buffers to VRAM.
-    let a_buf = gpu.create_storage_buffer("A", &marshal_scalars::<G>(&a_coeffs));
-    let b_buf = gpu.create_storage_buffer("B", &marshal_scalars::<G>(&b_coeffs));
-    let c_buf = gpu.create_storage_buffer("C", &marshal_scalars::<G>(&c_coeffs));
+    let a_buf =
+        gpu.create_storage_buffer("A", &marshal_scalars::<G>(&a_coeffs));
+    let b_buf =
+        gpu.create_storage_buffer("B", &marshal_scalars::<G>(&b_coeffs));
+    let c_buf =
+        gpu.create_storage_buffer("C", &marshal_scalars::<G>(&c_coeffs));
     let h_buf = gpu.create_empty_buffer("H", (n * 32) as u64);
 
-    let tw_inv_n_buf = gpu.create_storage_buffer("TwInvN", &marshal_scalars::<G>(&inv_twiddles_n));
-    let tw_fwd_n_buf = gpu.create_storage_buffer("TwFwdN", &marshal_scalars::<G>(&fwd_twiddles_n));
-    let shifts_buf = gpu.create_storage_buffer("Shifts", &marshal_scalars::<G>(&shifts));
-    let inv_shifts_buf = gpu.create_storage_buffer("InvShifts", &marshal_scalars::<G>(&inv_shifts));
-    let z_invs_buf = gpu.create_storage_buffer("ZInvs", &marshal_scalars::<G>(&z_invs));
+    let tw_inv_n_buf = gpu.create_storage_buffer(
+        "TwInvN",
+        &marshal_scalars::<G>(&inv_twiddles_n),
+    );
+    let tw_fwd_n_buf = gpu.create_storage_buffer(
+        "TwFwdN",
+        &marshal_scalars::<G>(&fwd_twiddles_n),
+    );
+    let shifts_buf =
+        gpu.create_storage_buffer("Shifts", &marshal_scalars::<G>(&shifts));
+    let inv_shifts_buf = gpu
+        .create_storage_buffer("InvShifts", &marshal_scalars::<G>(&inv_shifts));
+    let z_invs_buf =
+        gpu.create_storage_buffer("ZInvs", &marshal_scalars::<G>(&z_invs));
 
     // Dispatch the full H pipeline on GPU using a single command buffer.
     gpu.execute_h_pipeline(

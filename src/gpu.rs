@@ -1,11 +1,11 @@
 //! GPU context, compute pipeline management, and kernel dispatch.
 //!
-//! [`GpuContext`] owns the wgpu device/queue and all pre-compiled compute pipelines
-//! needed for MSM, NTT, and polynomial operations. Submodules provide dispatch
-//! methods as `impl GpuContext` blocks:
+//! [`GpuContext`] owns the wgpu device/queue and all pre-compiled compute
+//! pipelines needed for MSM, NTT, and polynomial operations. Submodules provide
+//! dispatch methods as `impl GpuContext` blocks:
 //!
-//! - [`msm`] — MSM 5-kernel Pippenger pipeline (to_montgomery, aggregate, reduce,
-//!   weight, subsum)
+//! - [`msm`] — MSM 5-kernel Pippenger pipeline (to_montgomery, aggregate,
+//!   reduce, weight, subsum)
 //! - [`ntt`] — NTT dispatchers (tile-local and multi-stage global), Montgomery
 //!   conversion, coset shift, pointwise polynomial evaluation
 //! - [`h_poly`] — H-polynomial pipeline (fused NTT+shift → pointwise → iNTT)
@@ -107,7 +107,8 @@ fn pipeline_layout(
     })
 }
 
-/// Creates a compute pipeline with the given layout, shader module, and entry point.
+/// Creates a compute pipeline with the given layout, shader module, and entry
+/// point.
 fn create_pipeline(
     device: &wgpu::Device,
     label: &str,
@@ -233,15 +234,16 @@ impl<C: GpuCurve> GpuContext<C> {
             .context("Failed to find a compatible WebGPU adapter")?;
 
         #[cfg(feature = "profiling")]
-        let required_features =
-            adapter.features() & wgpu_profiler::GpuProfiler::ALL_WGPU_TIMER_FEATURES;
+        let required_features = adapter.features()
+            & wgpu_profiler::GpuProfiler::ALL_WGPU_TIMER_FEATURES;
         #[cfg(not(feature = "profiling"))]
         let required_features = wgpu::Features::empty();
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Groth16 Prover Device"),
-                // Use adapter.limits() directly to support large buffers (>128MB) for WebAssembly
+                // Use adapter.limits() directly to support large buffers
+                // (>128MB) for WebAssembly
                 required_limits: adapter.limits(),
                 required_features,
                 ..Default::default()
@@ -282,28 +284,36 @@ impl<C: GpuCurve> GpuContext<C> {
             "shader: MSM G1 Agg",
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("MSM G1 Agg Shader"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_G1_AGG_SOURCE)),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(
+                    C::MSM_G1_AGG_SOURCE
+                )),
             })
         );
         let msm_g1_subsum_module = timed!(
             "shader: MSM G1 Subsum",
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("MSM G1 Subsum Shader"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_G1_SUBSUM_SOURCE)),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(
+                    C::MSM_G1_SUBSUM_SOURCE
+                )),
             })
         );
         let msm_g2_agg_module = timed!(
             "shader: MSM G2 Agg",
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("MSM G2 Agg Shader"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_G2_AGG_SOURCE)),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(
+                    C::MSM_G2_AGG_SOURCE
+                )),
             })
         );
         let msm_g2_subsum_module = timed!(
             "shader: MSM G2 Subsum",
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("MSM G2 Subsum Shader"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_G2_SUBSUM_SOURCE)),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(
+                    C::MSM_G2_SUBSUM_SOURCE
+                )),
             })
         );
 
@@ -311,7 +321,9 @@ impl<C: GpuCurve> GpuContext<C> {
             "shader: Poly Ops",
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("Poly Ops Shader"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::POLY_OPS_SOURCE)),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(
+                    C::POLY_OPS_SOURCE
+                )),
             })
         );
 
@@ -319,7 +331,9 @@ impl<C: GpuCurve> GpuContext<C> {
             "shader: NTT Fused",
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("NTT Fused Shader"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::NTT_FUSED_SOURCE)),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(
+                    C::NTT_FUSED_SOURCE
+                )),
             })
         );
         #[cfg(feature = "timing")]
@@ -330,19 +344,31 @@ impl<C: GpuCurve> GpuContext<C> {
         let layouts_start = Instant::now();
         use BufKind::{ReadOnly as RO, ReadWrite as RW, Uniform as UF};
 
-        let ntt_bind_group_layout = create_bind_group_layout(&device, "NTT", &[RW, RO]);
-        let ntt_fused_shift_bgl = create_bind_group_layout(&device, "NTT Fused Shift", &[RO]);
+        let ntt_bind_group_layout =
+            create_bind_group_layout(&device, "NTT", &[RW, RO]);
+        let ntt_fused_shift_bgl =
+            create_bind_group_layout(&device, "NTT Fused Shift", &[RO]);
         let ntt_params_bind_group_layout =
             create_bind_group_layout(&device, "NTT Global", &[RW, RO, UF]);
         let coset_shift_bind_group_layout =
             create_bind_group_layout(&device, "Coset Shift", &[RW, RO]);
-        let pointwise_poly_bind_group_layout =
-            create_bind_group_layout(&device, "Pointwise Poly", &[RO, RO, RO, RW, RO]);
-        let pointwise_fused_bind_group_layout =
-            create_bind_group_layout(&device, "Pointwise Fused", &[RO, RO, RO, RO]);
-        let montgomery_bind_group_layout = create_bind_group_layout(&device, "Montgomery", &[RW]);
-        let msm_agg_bind_group_layout =
-            create_bind_group_layout(&device, "MSM Agg", &[RO, RO, RO, RO, RW, RO]);
+        let pointwise_poly_bind_group_layout = create_bind_group_layout(
+            &device,
+            "Pointwise Poly",
+            &[RO, RO, RO, RW, RO],
+        );
+        let pointwise_fused_bind_group_layout = create_bind_group_layout(
+            &device,
+            "Pointwise Fused",
+            &[RO, RO, RO, RO],
+        );
+        let montgomery_bind_group_layout =
+            create_bind_group_layout(&device, "Montgomery", &[RW]);
+        let msm_agg_bind_group_layout = create_bind_group_layout(
+            &device,
+            "MSM Agg",
+            &[RO, RO, RO, RO, RW, RO],
+        );
         let msm_sum_bind_group_layout =
             create_bind_group_layout(&device, "MSM Sum", &[RO, RO, RO, RO, RW]);
         // Weight buckets: [data(rw), bucket_values(read)]
@@ -352,12 +378,19 @@ impl<C: GpuCurve> GpuContext<C> {
             create_bind_group_layout(&device, "MSM Weight G2", &[RW, RO]);
         // Phase1: [agg_buckets(read), window_starts(read), window_counts(read),
         //          partial_sums(rw), subsum_params(uniform)]
-        let msm_subsum_phase1_bind_group_layout =
-            create_bind_group_layout(&device, "MSM Subsum Phase1", &[RO, RO, RO, RW, UF]);
+        let msm_subsum_phase1_bind_group_layout = create_bind_group_layout(
+            &device,
+            "MSM Subsum Phase1",
+            &[RO, RO, RO, RW, UF],
+        );
         // Phase2: [partial_sums(read), window_sums(rw), subsum_params(uniform)]
-        let msm_subsum_phase2_bind_group_layout =
-            create_bind_group_layout(&device, "MSM Subsum Phase2", &[RO, RW, UF]);
-        // Reduce sub-buckets: [input(read), starts(read), counts(read), output(rw)]
+        let msm_subsum_phase2_bind_group_layout = create_bind_group_layout(
+            &device,
+            "MSM Subsum Phase2",
+            &[RO, RW, UF],
+        );
+        // Reduce sub-buckets: [input(read), starts(read), counts(read),
+        // output(rw)]
         let msm_reduce_bind_group_layout =
             create_bind_group_layout(&device, "MSM Reduce", &[RO, RO, RO, RW]);
 
@@ -375,8 +408,10 @@ impl<C: GpuCurve> GpuContext<C> {
         let pipelines_start = Instant::now();
 
         // NTT pipelines
-        let ntt_tile_layout = pipeline_layout(&device, &[&ntt_bind_group_layout]);
-        let ntt_global_layout = pipeline_layout(&device, &[&ntt_params_bind_group_layout]);
+        let ntt_tile_layout =
+            pipeline_layout(&device, &[&ntt_bind_group_layout]);
+        let ntt_global_layout =
+            pipeline_layout(&device, &[&ntt_params_bind_group_layout]);
         let ntt_pipeline = timed!(
             "pipeline: NTT Tile",
             create_pipeline(
@@ -387,8 +422,10 @@ impl<C: GpuCurve> GpuContext<C> {
                 "ntt_tile"
             )
         );
-        let ntt_fused_layout =
-            pipeline_layout(&device, &[&ntt_bind_group_layout, &ntt_fused_shift_bgl]);
+        let ntt_fused_layout = pipeline_layout(
+            &device,
+            &[&ntt_bind_group_layout, &ntt_fused_shift_bgl],
+        );
         let ntt_fused_pipeline = timed!(
             "pipeline: NTT Fused",
             create_pipeline(
@@ -525,9 +562,12 @@ impl<C: GpuCurve> GpuContext<C> {
         );
 
         // Polynomial pipelines
-        let coset_shift_layout = pipeline_layout(&device, &[&coset_shift_bind_group_layout]);
-        let pointwise_layout = pipeline_layout(&device, &[&pointwise_poly_bind_group_layout]);
-        let montgomery_layout = pipeline_layout(&device, &[&montgomery_bind_group_layout]);
+        let coset_shift_layout =
+            pipeline_layout(&device, &[&coset_shift_bind_group_layout]);
+        let pointwise_layout =
+            pipeline_layout(&device, &[&pointwise_poly_bind_group_layout]);
+        let montgomery_layout =
+            pipeline_layout(&device, &[&montgomery_bind_group_layout]);
         let coset_shift_pipeline = timed!(
             "pipeline: Coset Shift",
             create_pipeline(
@@ -570,9 +610,12 @@ impl<C: GpuCurve> GpuContext<C> {
         );
 
         // MSM pipelines
-        let msm_agg_layout = pipeline_layout(&device, &[&msm_agg_bind_group_layout]);
-        let msm_sum_layout = pipeline_layout(&device, &[&msm_sum_bind_group_layout]);
-        let msm_weight_g1_layout = pipeline_layout(&device, &[&msm_weight_g1_bind_group_layout]);
+        let msm_agg_layout =
+            pipeline_layout(&device, &[&msm_agg_bind_group_layout]);
+        let msm_sum_layout =
+            pipeline_layout(&device, &[&msm_sum_bind_group_layout]);
+        let msm_weight_g1_layout =
+            pipeline_layout(&device, &[&msm_weight_g1_bind_group_layout]);
         let msm_subsum_phase1_layout =
             pipeline_layout(&device, &[&msm_subsum_phase1_bind_group_layout]);
         let msm_subsum_phase2_layout =
@@ -669,7 +712,8 @@ impl<C: GpuCurve> GpuContext<C> {
             )
         );
 
-        let msm_weight_g2_layout = pipeline_layout(&device, &[&msm_weight_g2_bind_group_layout]);
+        let msm_weight_g2_layout =
+            pipeline_layout(&device, &[&msm_weight_g2_bind_group_layout]);
         let msm_weight_g2_pipeline = timed!(
             "pipeline: MSM Weight G2",
             create_pipeline(
@@ -701,7 +745,8 @@ impl<C: GpuCurve> GpuContext<C> {
             )
         );
 
-        let msm_reduce_layout = pipeline_layout(&device, &[&msm_reduce_bind_group_layout]);
+        let msm_reduce_layout =
+            pipeline_layout(&device, &[&msm_reduce_bind_group_layout]);
         let msm_reduce_g1_pipeline = timed!(
             "pipeline: MSM Reduce G1",
             create_pipeline(
@@ -822,12 +867,18 @@ impl<C: GpuCurve> GpuContext<C> {
     }
 
     #[cfg(feature = "profiling")]
-    pub fn process_profiler_results(&self) -> Option<Vec<wgpu_profiler::GpuTimerQueryResult>> {
+    pub fn process_profiler_results(
+        &self,
+    ) -> Option<Vec<wgpu_profiler::GpuTimerQueryResult>> {
         let mut profiler = self.profiler.lock().unwrap();
         profiler.process_finished_frame(self.queue.get_timestamp_period())
     }
 
-    pub fn create_storage_buffer(&self, label: &str, data: &[u8]) -> wgpu::Buffer {
+    pub fn create_storage_buffer(
+        &self,
+        label: &str,
+        data: &[u8],
+    ) -> wgpu::Buffer {
         self.device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),

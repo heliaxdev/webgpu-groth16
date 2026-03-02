@@ -49,8 +49,11 @@ impl<G: GpuCurve> GpuConstraintSystem<G> {
     }
 }
 
-impl<G: GpuCurve + Send> bellman::ConstraintSystem<G::Scalar> for GpuConstraintSystem<G> {
+impl<G: GpuCurve + Send> bellman::ConstraintSystem<G::Scalar>
+    for GpuConstraintSystem<G>
+{
     type Root = Self;
+
     fn alloc<F, A, AR>(
         &mut self,
         _annotation: A,
@@ -69,6 +72,7 @@ impl<G: GpuCurve + Send> bellman::ConstraintSystem<G::Scalar> for GpuConstraintS
             self.aux.len() - 1,
         )))
     }
+
     fn alloc_input<F, A, AR>(
         &mut self,
         _annotation: A,
@@ -86,13 +90,25 @@ impl<G: GpuCurve + Send> bellman::ConstraintSystem<G::Scalar> for GpuConstraintS
             self.inputs.len() - 1,
         )))
     }
-    fn enforce<A, AR, LA, LB, LC>(&mut self, _annotation: A, a: LA, b: LB, c: LC)
-    where
+
+    fn enforce<A, AR, LA, LB, LC>(
+        &mut self,
+        _annotation: A,
+        a: LA,
+        b: LB,
+        c: LC,
+    ) where
         A: FnOnce() -> AR,
         AR: Into<String>,
-        LA: FnOnce(bellman::LinearCombination<G::Scalar>) -> bellman::LinearCombination<G::Scalar>,
-        LB: FnOnce(bellman::LinearCombination<G::Scalar>) -> bellman::LinearCombination<G::Scalar>,
-        LC: FnOnce(bellman::LinearCombination<G::Scalar>) -> bellman::LinearCombination<G::Scalar>,
+        LA: FnOnce(
+            bellman::LinearCombination<G::Scalar>,
+        ) -> bellman::LinearCombination<G::Scalar>,
+        LB: FnOnce(
+            bellman::LinearCombination<G::Scalar>,
+        ) -> bellman::LinearCombination<G::Scalar>,
+        LC: FnOnce(
+            bellman::LinearCombination<G::Scalar>,
+        ) -> bellman::LinearCombination<G::Scalar>,
     {
         let a_lc = a(bellman::LinearCombination::zero());
         let b_lc = b(bellman::LinearCombination::zero());
@@ -123,13 +139,16 @@ impl<G: GpuCurve + Send> bellman::ConstraintSystem<G::Scalar> for GpuConstraintS
         self.b_lcs.push(b_vec);
         self.c_lcs.push(lc_to_vec(c_lc));
     }
+
     fn push_namespace<NR, N>(&mut self, _name_fn: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
     {
     }
+
     fn pop_namespace(&mut self) {}
+
     fn get_root(&mut self) -> &mut Self::Root {
         self
     }

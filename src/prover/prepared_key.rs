@@ -24,7 +24,9 @@ pub struct PreparedProvingKey<G: GpuCurve> {
     _marker: std::marker::PhantomData<G>,
 }
 
-pub(crate) fn serialize_g1_bases<G: GpuCurve>(bases: &[G::G1Affine]) -> Vec<u8> {
+pub(crate) fn serialize_g1_bases<G: GpuCurve>(
+    bases: &[G::G1Affine],
+) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(bases.len() * G::G1_GPU_BYTES);
     for base in bases {
         bytes.extend_from_slice(&G::serialize_g1(base));
@@ -32,7 +34,9 @@ pub(crate) fn serialize_g1_bases<G: GpuCurve>(bases: &[G::G1Affine]) -> Vec<u8> 
     bytes
 }
 
-pub(crate) fn serialize_g1_phi_bases<G: GpuCurve>(bases: &[G::G1Affine]) -> Vec<u8> {
+pub(crate) fn serialize_g1_phi_bases<G: GpuCurve>(
+    bases: &[G::G1Affine],
+) -> Vec<u8> {
     debug_assert!(G::HAS_G1_GLV);
     let mut bytes = Vec::with_capacity(bases.len() * G::G1_GPU_BYTES);
     for base in bases {
@@ -44,7 +48,9 @@ pub(crate) fn serialize_g1_phi_bases<G: GpuCurve>(bases: &[G::G1Affine]) -> Vec<
     bytes
 }
 
-pub(crate) fn serialize_g2_bases<G: GpuCurve>(bases: &[G::G2Affine]) -> Vec<u8> {
+pub(crate) fn serialize_g2_bases<G: GpuCurve>(
+    bases: &[G::G2Affine],
+) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(bases.len() * G::G2_GPU_BYTES);
     for base in bases {
         bytes.extend_from_slice(&G::serialize_g2(base));
@@ -70,7 +76,9 @@ pub(crate) fn interleave_glv_bases(
     combined
 }
 
-pub fn prepare_proving_key<E, G>(pk: &bellman::groth16::Parameters<E>) -> PreparedProvingKey<G>
+pub fn prepare_proving_key<E, G>(
+    pk: &bellman::groth16::Parameters<E>,
+) -> PreparedProvingKey<G>
 where
     E: pairing::MultiMillerLoop,
     G: GpuCurve<

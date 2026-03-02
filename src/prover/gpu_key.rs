@@ -4,15 +4,15 @@
 //! already converted to Montgomery form. Reused across multiple proofs
 //! to eliminate per-proof base uploads and Montgomery conversion.
 
+use super::prepared_key::{PreparedProvingKey, interleave_glv_bases};
 use crate::gpu::GpuContext;
 use crate::gpu::curve::GpuCurve;
-
-use super::prepared_key::{PreparedProvingKey, interleave_glv_bases};
 
 /// Pre-uploaded GPU base point buffers for a specific circuit.
 ///
 /// Created once per circuit via [`prepare_gpu_proving_key`], then reused
-/// across all proofs with [`create_proof_with_gpu_key`](super::create_proof_with_gpu_key).
+/// across all proofs with
+/// [`create_proof_with_gpu_key`](super::create_proof_with_gpu_key).
 pub struct GpuProvingKey {
     pub(crate) a_bases_buf: wgpu::Buffer,
     pub(crate) b_g1_bases_buf: wgpu::Buffer,
@@ -21,7 +21,8 @@ pub struct GpuProvingKey {
     pub(crate) b_g2_bases_buf: wgpu::Buffer,
 }
 
-/// Upload proving key bases to the GPU and convert to Montgomery form (one-time cost).
+/// Upload proving key bases to the GPU and convert to Montgomery form (one-time
+/// cost).
 pub fn prepare_gpu_proving_key<G: GpuCurve>(
     ppk: &PreparedProvingKey<G>,
     gpu: &GpuContext<G>,
@@ -69,10 +70,12 @@ pub fn prepare_gpu_proving_key<G: GpuCurve>(
 
     // Upload to GPU
     let a_bases_buf = gpu.create_storage_buffer("gpk_a_bases", &a_combined);
-    let b_g1_bases_buf = gpu.create_storage_buffer("gpk_b1_bases", &b_g1_combined);
+    let b_g1_bases_buf =
+        gpu.create_storage_buffer("gpk_b1_bases", &b_g1_combined);
     let l_bases_buf = gpu.create_storage_buffer("gpk_l_bases", &l_combined);
     let h_bases_buf = gpu.create_storage_buffer("gpk_h_bases", &h_combined);
-    let b_g2_bases_buf = gpu.create_storage_buffer("gpk_b2_bases", &ppk.b_g2_bytes);
+    let b_g2_bases_buf =
+        gpu.create_storage_buffer("gpk_b2_bases", &ppk.b_g2_bytes);
 
     // Convert all bases to Montgomery form on GPU (one-time)
     gpu.convert_to_montgomery(&a_bases_buf, false);

@@ -23,7 +23,8 @@ pub enum G1MsmDecomposition {
     },
 }
 
-pub type GlvWindowDecomposition = (Vec<(u32, bool)>, bool, Vec<(u32, bool)>, bool);
+pub type GlvWindowDecomposition =
+    (Vec<(u32, bool)>, bool, Vec<(u32, bool)>, bool);
 
 /// Abstraction over a pairing-friendly curve for GPU-accelerated proving.
 pub trait GpuCurve: 'static {
@@ -44,7 +45,8 @@ pub trait GpuCurve: 'static {
     /// Size of one G2 point in GPU buffer layout.
     const G2_GPU_BYTES: usize;
 
-    /// Workgroup size for scalar-domain kernels (NTT global, montgomery, shifts).
+    /// Workgroup size for scalar-domain kernels (NTT global, montgomery,
+    /// shifts).
     const SCALAR_WORKGROUP_SIZE: u32;
     /// Elements processed per tile-local NTT workgroup.
     const NTT_TILE_SIZE: u32;
@@ -54,7 +56,8 @@ pub trait GpuCurve: 'static {
     const G1_SUBSUM_CHUNKS_PER_WINDOW: u32;
     /// Phase-1 chunks per window for G2 MSM subsum.
     const G2_SUBSUM_CHUNKS_PER_WINDOW: u32;
-    /// Maximum bucket chunk size used to split large buckets for GPU load balancing.
+    /// Maximum bucket chunk size used to split large buckets for GPU load
+    /// balancing.
     const MSM_MAX_CHUNK_SIZE: u32;
     /// Bit mask used to encode point-sign metadata in packed MSM base indices.
     const MSM_INDEX_SIGN_BIT: u32;
@@ -83,7 +86,10 @@ pub trait GpuCurve: 'static {
 
     fn scalar_to_windows(s: &Self::Scalar, c: usize) -> Vec<u32>;
 
-    fn scalar_to_signed_windows(s: &Self::Scalar, c: usize) -> Vec<(u32, bool)> {
+    fn scalar_to_signed_windows(
+        s: &Self::Scalar,
+        c: usize,
+    ) -> Vec<(u32, bool)> {
         let unsigned = Self::scalar_to_windows(s, c);
         let half = 1u64 << (c - 1);
         let full = 1u64 << c;
@@ -109,7 +115,10 @@ pub trait GpuCurve: 'static {
         result
     }
 
-    fn decompose_g1_msm_scalar(s: &Self::Scalar, c: usize) -> G1MsmDecomposition {
+    fn decompose_g1_msm_scalar(
+        s: &Self::Scalar,
+        c: usize,
+    ) -> G1MsmDecomposition {
         G1MsmDecomposition::Standard {
             windows: Self::scalar_to_signed_windows(s, c),
         }
