@@ -159,8 +159,20 @@ pub trait GpuCurve: 'static {
     const NTT_SOURCE: &'static str;
     /// WGSL source for fused NTT+coset-shift kernel (NTT source + fused entry point).
     const NTT_FUSED_SOURCE: &'static str;
-    /// WGSL source for MSM kernels (Fr + Fp + curve arithmetic + MSM entry points).
-    const MSM_SOURCE: &'static str;
+    /// WGSL source for G1 MSM aggregation/weight/reduce kernels.
+    const MSM_G1_AGG_SOURCE: &'static str;
+    /// WGSL source for G1 MSM subsum kernels.
+    const MSM_G1_SUBSUM_SOURCE: &'static str;
+    /// WGSL source for G2 MSM aggregation/weight/reduce kernels.
+    const MSM_G2_AGG_SOURCE: &'static str;
+    /// WGSL source for G2 MSM subsum kernels.
+    const MSM_G2_SUBSUM_SOURCE: &'static str;
+    #[cfg(test)]
+    /// WGSL source for GPU test-only G1 debug kernels.
+    const TEST_SHADER_G1_SOURCE: &'static str;
+    #[cfg(test)]
+    /// WGSL source for GPU test-only G2 debug kernels.
+    const TEST_SHADER_G2_SOURCE: &'static str;
     /// WGSL source for polynomial-evaluation kernels (Fr + Fp + poly_ops).
     const POLY_OPS_SOURCE: &'static str;
 
@@ -280,7 +292,7 @@ pub trait GpuCurve: 'static {
 ///
 /// Shader source is assembled at compile time by concatenating WGSL includes.
 /// The concatenation order matters — later files reference types/functions from
-/// earlier ones (e.g. `msm.wgsl` depends on `curve.wgsl` depends on `fp.wgsl`).
+/// earlier ones.
 impl GpuCurve for blstrs::Bls12 {
     type Engine = Self;
     type Scalar = <Self::Engine as pairing::Engine>::Fr;
@@ -307,14 +319,70 @@ impl GpuCurve for blstrs::Bls12 {
         include_str!("../shader/bls12_381/ntt_fused.wgsl"),
     );
 
-    const MSM_SOURCE: &'static str = concat!(
+    const MSM_G1_AGG_SOURCE: &'static str = concat!(
         include_str!("../shader/bls12_381/fr.wgsl"),
         "\n",
         include_str!("../shader/bls12_381/fp.wgsl"),
         "\n",
-        include_str!("../shader/bls12_381/curve.wgsl"),
+        include_str!("../shader/bls12_381/curve_g1.wgsl"),
         "\n",
-        include_str!("../shader/bls12_381/msm.wgsl"),
+        include_str!("../shader/bls12_381/msm_g1_agg.wgsl"),
+    );
+
+    const MSM_G1_SUBSUM_SOURCE: &'static str = concat!(
+        include_str!("../shader/bls12_381/fr.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/fp.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/curve_g1.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/msm_g1_subsum.wgsl"),
+    );
+
+    const MSM_G2_AGG_SOURCE: &'static str = concat!(
+        include_str!("../shader/bls12_381/fr.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/fp.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/curve_g2.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/msm_g2_agg.wgsl"),
+    );
+
+    const MSM_G2_SUBSUM_SOURCE: &'static str = concat!(
+        include_str!("../shader/bls12_381/fr.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/fp.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/curve_g2.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/msm_g2_subsum.wgsl"),
+    );
+
+    #[cfg(test)]
+    const TEST_SHADER_G1_SOURCE: &'static str = concat!(
+        include_str!("../shader/bls12_381/fr.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/fp.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/curve_g1.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/msm_g1_subsum.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/msm_test_debug_g1.wgsl"),
+    );
+
+    #[cfg(test)]
+    const TEST_SHADER_G2_SOURCE: &'static str = concat!(
+        include_str!("../shader/bls12_381/fr.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/fp.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/curve_g2.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/msm_g2_subsum.wgsl"),
+        "\n",
+        include_str!("../shader/bls12_381/msm_test_debug_g2.wgsl"),
     );
 
     const POLY_OPS_SOURCE: &'static str = concat!(

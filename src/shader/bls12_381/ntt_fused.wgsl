@@ -127,26 +127,26 @@ fn run_ntt_tile_dit(local_id: vec3<u32>, n: u32) {
 fn run_ntt_tile_dif(local_id: vec3<u32>, n: u32) {
     workgroupBarrier();
     var half_len = n / 2u;
-    loop {
-        if half_len == 0u {
-            break;
+        loop {
+            if half_len == 0u {
+                break;
+            }
+            let len = half_len * 2u;
+            let butterfly_count = n / 2u;
+            if local_id.x < butterfly_count {
+                let k = local_id.x % half_len;
+                let pos = (local_id.x / half_len) * len + k;
+                let twiddle = shared_twiddles[k * (n / len)];
+                let u = shared_data[pos];
+                let v = shared_data[pos + half_len];
+                let sum = add_fr(u, v);
+                let diff = sub_fr(u, v);
+                shared_data[pos] = sum;
+                shared_data[pos + half_len] = mul_montgomery_u256(diff, twiddle);
+            }
+            workgroupBarrier();
+            half_len = half_len >> 1u;
         }
-        let len = half_len * 2u;
-        let butterfly_count = n / 2u;
-        if local_id.x < butterfly_count {
-            let k = local_id.x % half_len;
-            let pos = (local_id.x / half_len) * len + k;
-            let twiddle = shared_twiddles[k * (n / len)];
-            let u = shared_data[pos];
-            let v = shared_data[pos + half_len];
-            let sum = add_fr(u, v);
-            let diff = sub_fr(u, v);
-            shared_data[pos] = sum;
-            shared_data[pos + half_len] = mul_montgomery_u256(diff, twiddle);
-        }
-        workgroupBarrier();
-        half_len = half_len >> 1u;
-    }
 }
 
 fn writeback_tile_with_optional_shift(

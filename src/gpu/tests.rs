@@ -12,6 +12,7 @@ use std::borrow::Cow;
 /// and submits.
 fn dispatch_shader_test(
     gpu: &GpuContext<Bls12>,
+    source: &str,
     entry_point: &str,
     buf_kinds: &[BufKind],
     buffers: &[&wgpu::Buffer],
@@ -20,7 +21,7 @@ fn dispatch_shader_test(
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("test shader"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(<Bls12 as GpuCurve>::MSM_SOURCE)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(source)),
         });
 
     let bgl = create_bind_group_layout(&gpu.device, "test bgl", buf_kinds);
@@ -95,6 +96,7 @@ async fn test_g1_shader_load_store_roundtrip() {
 
     dispatch_shader_test(
         &gpu,
+        <Bls12 as GpuCurve>::TEST_SHADER_G1_SOURCE,
         "roundtrip_g1",
         &[BufKind::ReadOnly, BufKind::ReadWrite],
         &[&in_buf, &out_buf],
@@ -125,6 +127,7 @@ async fn test_g1_shader_coord_only_montgomery_roundtrip() {
 
     dispatch_shader_test(
         &gpu,
+        <Bls12 as GpuCurve>::TEST_SHADER_G1_SOURCE,
         "roundtrip_coords_g1",
         &[BufKind::ReadOnly, BufKind::ReadWrite],
         &[&in_buf, &out_buf],
@@ -192,6 +195,7 @@ async fn test_g1_shader_double_roundtrip() {
 
     dispatch_shader_test(
         &gpu,
+        <Bls12 as GpuCurve>::TEST_SHADER_G1_SOURCE,
         "roundtrip_double_g1",
         &[BufKind::ReadOnly, BufKind::ReadWrite],
         &[&in_buf, &out_buf],
@@ -234,6 +238,7 @@ async fn test_g2_add_complete_roundtrip() {
 
     dispatch_shader_test(
         &gpu,
+        <Bls12 as GpuCurve>::TEST_SHADER_G2_SOURCE,
         "roundtrip_add_g2_complete",
         &[BufKind::ReadOnly, BufKind::ReadOnly, BufKind::ReadWrite],
         &[&a_buf, &b_buf, &out_buf],
@@ -256,6 +261,7 @@ async fn test_g2_add_complete_roundtrip() {
 
     dispatch_shader_test(
         &gpu,
+        <Bls12 as GpuCurve>::TEST_SHADER_G2_SOURCE,
         "roundtrip_add_g2_complete",
         &[BufKind::ReadOnly, BufKind::ReadOnly, BufKind::ReadWrite],
         &[&a_buf, &b_buf_2, &out_buf_2],
@@ -319,6 +325,7 @@ async fn test_g1_workgroup_tree_reduction() {
 
     dispatch_shader_test(
         &gpu,
+        <Bls12 as GpuCurve>::TEST_SHADER_G1_SOURCE,
         "test_workgroup_reduction_g1",
         &[BufKind::ReadOnly, BufKind::ReadWrite],
         &[&in_buf, &out_buf],

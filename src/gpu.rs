@@ -38,7 +38,7 @@ const SCALAR_WORKGROUP_SIZE: u32 = 256;
 const NTT_TILE_SIZE: u32 = 512;
 
 /// Workgroup size for MSM kernels (aggregate, weight, to_montgomery_bases).
-/// Matches `@workgroup_size(64)` in msm.wgsl.
+/// Matches `@workgroup_size(64)` in MSM shaders.
 const MSM_WORKGROUP_SIZE: u32 = 64;
 
 /// G1 subsum uses single-pass parallel shared-memory tree reduction:
@@ -298,11 +298,32 @@ impl<C: GpuCurve> GpuContext<C> {
             })
         );
 
-        let msm_module = timed!(
-            "shader: MSM",
+        let msm_g1_agg_module = timed!(
+            "shader: MSM G1 Agg",
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("MSM Shader"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_SOURCE)),
+                label: Some("MSM G1 Agg Shader"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_G1_AGG_SOURCE)),
+            })
+        );
+        let msm_g1_subsum_module = timed!(
+            "shader: MSM G1 Subsum",
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("MSM G1 Subsum Shader"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_G1_SUBSUM_SOURCE)),
+            })
+        );
+        let msm_g2_agg_module = timed!(
+            "shader: MSM G2 Agg",
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("MSM G2 Agg Shader"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_G2_AGG_SOURCE)),
+            })
+        );
+        let msm_g2_subsum_module = timed!(
+            "shader: MSM G2 Subsum",
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("MSM G2 Subsum Shader"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(C::MSM_G2_SUBSUM_SOURCE)),
             })
         );
 
@@ -583,7 +604,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM Agg G1",
                 &msm_agg_layout,
-                &msm_module,
+                &msm_g1_agg_module,
                 "aggregate_buckets_g1"
             )
         );
@@ -593,7 +614,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM Sum G1",
                 &msm_sum_layout,
-                &msm_module,
+                &msm_g1_subsum_module,
                 "subsum_accumulation_g1"
             )
         );
@@ -603,7 +624,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM Agg G2",
                 &msm_agg_layout,
-                &msm_module,
+                &msm_g2_agg_module,
                 "aggregate_buckets_g2"
             )
         );
@@ -613,7 +634,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM Sum G2",
                 &msm_sum_layout,
-                &msm_module,
+                &msm_g2_subsum_module,
                 "subsum_accumulation_g2"
             )
         );
@@ -623,7 +644,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM To Montgomery G1",
                 &montgomery_layout,
-                &msm_module,
+                &msm_g1_agg_module,
                 "to_montgomery_bases_g1"
             )
         );
@@ -633,7 +654,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM To Montgomery G2",
                 &montgomery_layout,
-                &msm_module,
+                &msm_g2_agg_module,
                 "to_montgomery_bases_g2"
             )
         );
@@ -643,7 +664,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM Weight G1",
                 &msm_weight_g1_layout,
-                &msm_module,
+                &msm_g1_agg_module,
                 "weight_buckets_g1"
             )
         );
@@ -653,7 +674,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM Subsum Phase1 G1",
                 &msm_subsum_phase1_layout,
-                &msm_module,
+                &msm_g1_subsum_module,
                 "subsum_phase1_g1"
             )
         );
@@ -663,7 +684,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM Subsum Phase2 G1",
                 &msm_subsum_phase2_layout,
-                &msm_module,
+                &msm_g1_subsum_module,
                 "subsum_phase2_g1"
             )
         );
@@ -675,7 +696,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM Weight G2",
                 &msm_weight_g2_layout,
-                &msm_module,
+                &msm_g2_agg_module,
                 "weight_buckets_g2"
             )
         );
@@ -685,7 +706,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM Subsum Phase1 G2",
                 &msm_subsum_phase1_layout,
-                &msm_module,
+                &msm_g2_subsum_module,
                 "subsum_phase1_g2"
             )
         );
@@ -695,7 +716,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM Subsum Phase2 G2",
                 &msm_subsum_phase2_layout,
-                &msm_module,
+                &msm_g2_subsum_module,
                 "subsum_phase2_g2"
             )
         );
@@ -707,7 +728,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM Reduce G1",
                 &msm_reduce_layout,
-                &msm_module,
+                &msm_g1_agg_module,
                 "reduce_sub_buckets_g1"
             )
         );
@@ -717,7 +738,7 @@ impl<C: GpuCurve> GpuContext<C> {
                 &device,
                 "MSM Reduce G2",
                 &msm_reduce_layout,
-                &msm_module,
+                &msm_g2_agg_module,
                 "reduce_sub_buckets_g2"
             )
         );
