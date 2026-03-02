@@ -29,16 +29,29 @@ impl Mask {
 
     pub fn push(&mut self, val: bool) {
         let global_insert_pos = self.len;
-        let usize_insert_pos = fast_rem::fast_mod(global_insert_pos, LEN_USIZE);
 
         self.len += 1;
 
-        // make room for the new value
-        if usize_insert_pos == 0 {
-            self.set.push(0);
+        if fast_rem::is_divisible(global_insert_pos, LEN_USIZE) {
+            self.make_room_for_new_value_slow();
         }
 
-        *self.set.last_mut().unwrap() |= (val as usize) << usize_insert_pos;
+        if val {
+            let usize_insert_pos =
+                fast_rem::fast_mod(global_insert_pos, LEN_USIZE);
+
+            self.set_last_index_slow(usize_insert_pos);
+        }
+    }
+
+    #[cold]
+    fn make_room_for_new_value_slow(&mut self) {
+        self.set.push(0);
+    }
+
+    #[cold]
+    fn set_last_index_slow(&mut self, insert_pos: u32) {
+        *self.set.last_mut().unwrap() |= 1 << insert_pos;
     }
 
     pub fn is_set(&self, global_index: usize) -> bool {
@@ -135,6 +148,30 @@ mod fast_rem {
     pub const fn fast_mod(n: u32, d: u32) -> u32 {
         let c = compute_c(d);
         fast_mod_with_c(n, d, c)
+    }
+
+    /// Checks if `n` is divisible by `d` (i.e., `n % d == 0`) using the
+    /// precomputed constant `c`.
+    ///
+    /// Use this in hot loops where `c` has already been calculated.
+    #[inline]
+    pub const fn is_divisible_with_c(n: u32, c: u64) -> bool {
+        let lowbits: u64 = c.wrapping_mul(n as u64);
+        // Using wrapping_sub(1) correctly handles the c - 1 check.
+        lowbits <= c.wrapping_sub(1)
+    }
+
+    /// Checks if `n` is divisible by `d` (i.e., `n % d == 0`) by calculating
+    /// the reciprocal on the fly.
+    ///
+    /// ## Warning
+    ///
+    /// Only use this if `d` is a compile-time constant! If `d` is a runtime
+    /// variable, this will perform a slow hardware division.
+    #[inline]
+    pub const fn is_divisible(n: u32, d: u32) -> bool {
+        let c = compute_c(d);
+        is_divisible_with_c(n, c)
     }
 }
 
