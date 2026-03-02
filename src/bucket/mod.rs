@@ -67,58 +67,55 @@ pub struct BucketData {
 impl BucketData {
     /// Print bucket size distribution statistics for diagnosing workload imbalance.
     /// Only active when the `timing` feature is enabled.
-    pub fn print_distribution_stats(&self, _label: &str) {
-        #[cfg(feature = "timing")]
-        {
-            let label = _label;
-            if self.num_active_buckets == 0 {
-                eprintln!("[bucket-diag] {label}: 0 active buckets");
-                return;
+    #[cfg(feature = "timing")]
+    pub fn print_distribution_stats(&self, label: &str) {
+        if self.num_active_buckets == 0 {
+            eprintln!("[bucket-diag] {label}: 0 active buckets");
+            return;
+        }
+        let mut sizes: Vec<u32> = self.bucket_sizes.clone();
+        sizes.sort();
+        let n = sizes.len();
+        let total: u32 = sizes.iter().sum();
+        let max = *sizes.last().unwrap();
+        let min = *sizes.first().unwrap();
+        let mean = total as f64 / n as f64;
+        let median = sizes[n / 2];
+        let p90 = sizes[(n * 90) / 100];
+        let p95 = sizes[(n * 95) / 100];
+        let p99 = sizes[n.saturating_sub(1).min((n * 99) / 100)];
+
+        let over_64 = sizes.iter().filter(|&&s| s > 64).count();
+        let over_256 = sizes.iter().filter(|&&s| s > 256).count();
+        let over_1024 = sizes.iter().filter(|&&s| s > 1024).count();
+
+        eprintln!(
+            "[bucket-diag] {label}: {n} active buckets, {total} total points, c={}",
+            self.bucket_width
+        );
+        eprintln!("[bucket-diag]   min={min} max={max} mean={mean:.1} median={median}");
+        eprintln!("[bucket-diag]   p90={p90} p95={p95} p99={p99}");
+        eprintln!("[bucket-diag]   >64: {over_64}  >256: {over_256}  >1024: {over_1024}");
+
+        // Per-window summary for windows with large buckets
+        for w in 0..self.num_windows as usize {
+            let start = self.window_starts[w] as usize;
+            let count = self.window_counts[w] as usize;
+            if count == 0 {
+                continue;
             }
-            let mut sizes: Vec<u32> = self.bucket_sizes.clone();
-            sizes.sort();
-            let n = sizes.len();
-            let total: u32 = sizes.iter().sum();
-            let max = *sizes.last().unwrap();
-            let min = *sizes.first().unwrap();
-            let mean = total as f64 / n as f64;
-            let median = sizes[n / 2];
-            let p90 = sizes[(n * 90) / 100];
-            let p95 = sizes[(n * 95) / 100];
-            let p99 = sizes[n.saturating_sub(1).min((n * 99) / 100)];
-
-            let over_64 = sizes.iter().filter(|&&s| s > 64).count();
-            let over_256 = sizes.iter().filter(|&&s| s > 256).count();
-            let over_1024 = sizes.iter().filter(|&&s| s > 1024).count();
-
-            eprintln!(
-                "[bucket-diag] {label}: {n} active buckets, {total} total points, c={}",
-                self.bucket_width
-            );
-            eprintln!("[bucket-diag]   min={min} max={max} mean={mean:.1} median={median}");
-            eprintln!("[bucket-diag]   p90={p90} p95={p95} p99={p99}");
-            eprintln!("[bucket-diag]   >64: {over_64}  >256: {over_256}  >1024: {over_1024}");
-
-            // Per-window summary for windows with large buckets
-            for w in 0..self.num_windows as usize {
-                let start = self.window_starts[w] as usize;
-                let count = self.window_counts[w] as usize;
-                if count == 0 {
-                    continue;
-                }
-                let w_sizes: Vec<u32> = (start..start + count)
-                    .map(|i| self.bucket_sizes[i])
-                    .collect();
-                let w_max = *w_sizes.iter().max().unwrap();
-                let w_total: u32 = w_sizes.iter().sum();
-                // Find the bucket value with max size
-                let max_idx = w_sizes.iter().position(|&s| s == w_max).unwrap();
-                let max_val = self.bucket_values[start + max_idx];
-                if w_max > 32 {
-                    eprintln!(
-                        "[bucket-diag]   window {w}: {count} buckets, max_size={w_max} (val={max_val}), total={w_total}"
-                    );
-                }
+            let w_sizes: Vec<u32> = (start..start + count)
+                .map(|i| self.bucket_sizes[i])
+                .collect();
+            let w_max = *w_sizes.iter().max().unwrap();
+            let w_total: u32 = w_sizes.iter().sum();
+            // Find the bucket value with max size
+            let max_idx = w_sizes.iter().position(|&s| s == w_max).unwrap();
+            let max_val = self.bucket_values[start + max_idx];
+            if w_max > 32 {
+                eprintln!(
+                    "[bucket-diag]   window {w}: {count} buckets, max_size={w_max} (val={max_val}), total={w_total}"
+                );
             }
         }
     }
