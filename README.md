@@ -1,4 +1,4 @@
-# wgpu prover
+# webgpu-groth16
 
 GPU-accelerated [Groth16](https://eprint.iacr.org/2016/260) zero-knowledge proof system
 built on [wgpu](https://github.com/gfx-rs/wgpu), with curve-pluggable abstractions.
