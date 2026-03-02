@@ -2,6 +2,9 @@
 name = "webgpu-groth16"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Groth16 GPU prover aimed primarily at browser environments"
+repository = "https://github.com/heliaxdev/webgpu-groth16"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
