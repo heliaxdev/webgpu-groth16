@@ -11,6 +11,7 @@ use masp_primitives::sapling::{
 use masp_proofs::circuit::sapling::Output as SaplingOutputCircuit;
 use rand_core::OsRng;
 
+use super::density_masks::Mask;
 use super::msm::{fold_window_sums_g1, gpu_msm_g2};
 use super::*;
 use crate::bellman::Circuit;
@@ -407,8 +408,8 @@ fn eval_lc_known_value() {
 fn dense_assignment_all_false() {
     let inputs = vec![Scalar::from(1u64), Scalar::from(2u64)];
     let aux = vec![Scalar::from(3u64), Scalar::from(4u64)];
-    let input_mask = vec![false, false];
-    let aux_mask = vec![false, false];
+    let input_mask = Mask::from_iter([false, false]);
+    let aux_mask = Mask::from_iter([false, false]);
     let result =
         dense_assignment_from_masks(&inputs, &aux, &input_mask, &aux_mask);
     assert!(result.is_empty());
@@ -419,8 +420,8 @@ fn dense_assignment_all_false() {
 fn dense_assignment_all_true() {
     let inputs = vec![Scalar::from(1u64), Scalar::from(2u64)];
     let aux = vec![Scalar::from(3u64), Scalar::from(4u64)];
-    let input_mask = vec![true, true];
-    let aux_mask = vec![true, true];
+    let input_mask = Mask::from_iter([true, true]);
+    let aux_mask = Mask::from_iter([true, true]);
     let result =
         dense_assignment_from_masks(&inputs, &aux, &input_mask, &aux_mask);
     assert_eq!(
@@ -443,8 +444,8 @@ fn dense_assignment_selective() {
         Scalar::from(30u64),
     ];
     let aux = vec![Scalar::from(40u64), Scalar::from(50u64)];
-    let input_mask = vec![false, true, false];
-    let aux_mask = vec![true, false];
+    let input_mask = Mask::from_iter([false, true, false]);
+    let aux_mask = Mask::from_iter([true, false]);
     let result =
         dense_assignment_from_masks(&inputs, &aux, &input_mask, &aux_mask);
     assert_eq!(result, vec![Scalar::from(20u64), Scalar::from(40u64)]);
@@ -458,7 +459,7 @@ fn gpu_constraint_system_initial_state() {
     assert_eq!(cs.inputs[0], Scalar::ONE);
     assert!(cs.aux.is_empty());
     assert_eq!(cs.b_input_density.len(), 1);
-    assert!(!cs.b_input_density[0]);
+    assert!(!cs.b_input_density.is_set(0));
 }
 
 /// DummyCircuit synthesizes correctly and produces the right witness.
@@ -964,7 +965,7 @@ async fn test_ab_msm_match_cpu_for_dummy_circuit() {
 
     let mut a_assignment = cs.inputs.clone();
     for (i, s) in cs.aux.iter().enumerate() {
-        if cs.a_aux_density[i] {
+        if cs.a_aux_density.is_set(i) {
             a_assignment.push(*s);
         }
     }

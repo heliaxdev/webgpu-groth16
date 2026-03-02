@@ -6,6 +6,7 @@
 
 use ff::{Field, PrimeField};
 
+use super::density_masks::Mask;
 use crate::bellman;
 use crate::gpu::curve::GpuCurve;
 
@@ -18,9 +19,9 @@ use crate::gpu::curve::GpuCurve;
 pub(crate) struct GpuConstraintSystem<G: GpuCurve> {
     pub inputs: Vec<G::Scalar>,
     pub aux: Vec<G::Scalar>,
-    pub a_aux_density: Vec<bool>,
-    pub b_input_density: Vec<bool>,
-    pub b_aux_density: Vec<bool>,
+    pub a_aux_density: Mask,
+    pub b_input_density: Mask,
+    pub b_aux_density: Mask,
     pub a_lcs: Vec<Vec<(bellman::Variable, G::Scalar)>>,
     pub b_lcs: Vec<Vec<(bellman::Variable, G::Scalar)>>,
     pub c_lcs: Vec<Vec<(bellman::Variable, G::Scalar)>>,
@@ -38,9 +39,13 @@ impl<G: GpuCurve> GpuConstraintSystem<G> {
         GpuConstraintSystem {
             inputs: vec![G::Scalar::ONE],
             aux: Vec::new(),
-            a_aux_density: Vec::new(),
-            b_input_density: vec![false],
-            b_aux_density: Vec::new(),
+            a_aux_density: Mask::new(),
+            b_input_density: {
+                let mut mask = Mask::new();
+                mask.push(false);
+                mask
+            },
+            b_aux_density: Mask::new(),
             a_lcs: Vec::new(),
             b_lcs: Vec::new(),
             c_lcs: Vec::new(),
@@ -120,7 +125,7 @@ impl<G: GpuCurve + Send> bellman::ConstraintSystem<G::Scalar>
                 continue;
             }
             if let bellman::Index::Aux(i) = var.get_unchecked() {
-                self.a_aux_density[i] = true;
+                self.a_aux_density.set(i, true);
             }
         }
 
@@ -130,8 +135,8 @@ impl<G: GpuCurve + Send> bellman::ConstraintSystem<G::Scalar>
                 continue;
             }
             match var.get_unchecked() {
-                bellman::Index::Input(i) => self.b_input_density[i] = true,
-                bellman::Index::Aux(i) => self.b_aux_density[i] = true,
+                bellman::Index::Input(i) => self.b_input_density.set(i, true),
+                bellman::Index::Aux(i) => self.b_aux_density.set(i, true),
             }
         }
 

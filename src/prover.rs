@@ -12,22 +12,24 @@
 //! 5. CPU-side proof assembly with random blinding factors r, s
 
 mod constraint_system;
+pub(crate) mod density_masks;
 mod gpu_key;
 mod h_poly;
 mod msm;
 mod prepared_key;
 
 use anyhow::Result;
-use constraint_system::GpuConstraintSystem;
 use ff::{Field, PrimeField};
-pub use gpu_key::{GpuProvingKey, prepare_gpu_proving_key};
-pub use h_poly::compute_h_poly;
-use h_poly::{read_h_poly_result, submit_h_poly};
-use msm::{MsmBases, enqueue_msm, readback_msms};
-pub use msm::{gpu_msm_batch, gpu_msm_g1};
-pub use prepared_key::{PreparedProvingKey, prepare_proving_key};
 use rand_core::RngCore;
 
+use self::constraint_system::GpuConstraintSystem;
+use self::density_masks::dense_assignment_from_masks;
+pub use self::gpu_key::{GpuProvingKey, prepare_gpu_proving_key};
+pub use self::h_poly::compute_h_poly;
+use self::h_poly::{read_h_poly_result, submit_h_poly};
+use self::msm::{MsmBases, enqueue_msm, readback_msms};
+pub use self::msm::{gpu_msm_batch, gpu_msm_g1};
+pub use self::prepared_key::{PreparedProvingKey, prepare_proving_key};
 use crate::bellman;
 use crate::bucket::{
     compute_bucket_sorting_with_width, compute_glv_bucket_data,
@@ -42,26 +44,6 @@ fn marshal_scalars<G: GpuCurve>(scalars: &[G::Scalar]) -> Vec<u8> {
         buffer.extend_from_slice(&G::serialize_scalar(s));
     }
     buffer
-}
-
-fn dense_assignment_from_masks<S: PrimeField>(
-    inputs: &[S],
-    aux: &[S],
-    input_mask: &[bool],
-    aux_mask: &[bool],
-) -> Vec<S> {
-    let mut out = Vec::new();
-    for (i, s) in inputs.iter().enumerate() {
-        if i < input_mask.len() && input_mask[i] {
-            out.push(*s);
-        }
-    }
-    for (i, s) in aux.iter().enumerate() {
-        if i < aux_mask.len() && aux_mask[i] {
-            out.push(*s);
-        }
-    }
-    out
 }
 
 fn eval_lc<S: PrimeField>(
@@ -161,7 +143,7 @@ where
     let t_phase = std::time::Instant::now();
     let mut a_assignment = cs.inputs.clone();
     for (i, v) in cs.aux.iter().enumerate() {
-        if cs.a_aux_density[i] {
+        if cs.a_aux_density.is_set(i) {
             a_assignment.push(*v);
         }
     }
