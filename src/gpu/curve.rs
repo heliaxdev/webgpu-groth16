@@ -57,7 +57,7 @@ pub const G2_GPU_BYTES: usize = 6 * FQ_GPU_BYTES;
 ///
 /// Each 13-bit limb is zero-extended to a full `u32` and stored as 4 bytes LE.
 /// The bit-packing walks a sliding 13-bit window across the input bytes.
-pub(crate) fn fq_bytes_to_13bit(bytes_48: &[u8]) -> Vec<u8> {
+pub fn fq_bytes_to_13bit(bytes_48: &[u8]) -> Vec<u8> {
     debug_assert_eq!(bytes_48.len(), 48);
     let mut result = vec![0u8; FQ_GPU_BYTES];
     let mut bit_offset: usize = 0;
@@ -82,7 +82,7 @@ pub(crate) fn fq_bytes_to_13bit(bytes_48: &[u8]) -> Vec<u8> {
 ///
 /// Each 4-byte chunk is read as a u32 LE and masked to 13 bits, then the bits are
 /// scattered back into the packed 384-bit output.
-pub(crate) fn fq_13bit_to_bytes(bytes_120: &[u8]) -> Vec<u8> {
+pub fn fq_13bit_to_bytes(bytes_120: &[u8]) -> Vec<u8> {
     debug_assert_eq!(bytes_120.len(), FQ_GPU_BYTES);
     let mut result = vec![0u8; 48];
     let mut bit_offset: usize = 0;

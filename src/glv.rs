@@ -107,14 +107,12 @@ fn compute_k1(k: &[u64; 4], c1: u64, c2: u128) -> (u128, bool) {
     // c2 * N11 as [u64; 4] (up to 256 bits)
     let prod = mul_u128_u128(c2, (N11_LO as u128) | ((N11_HI as u128) << 64));
 
-    // k - c1 as [u64; 4]
-    let (k_sub, _) = k[0].overflowing_sub(c1);
-    let k_minus_c1 = [
-        k_sub,
-        k[1].wrapping_sub(if k[0] < c1 { 1 } else { 0 }),
-        k[2],
-        k[3],
-    ];
+    // k - c1 as [u64; 4] (with full borrow propagation)
+    let (d0, b0) = k[0].overflowing_sub(c1);
+    let (d1, b1) = k[1].overflowing_sub(b0 as u64);
+    let (d2, b2) = k[2].overflowing_sub(b1 as u64);
+    let d3 = k[3].wrapping_sub(b2 as u64);
+    let k_minus_c1 = [d0, d1, d2, d3];
 
     // result = k_minus_c1 - prod (signed)
     let (diff, borrow) = sub_u256(&k_minus_c1, &prod);

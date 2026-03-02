@@ -1,0 +1,60 @@
+[package]
+name = "webgpu-groth16-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+blstrs = { package = "nam-blstrs", version = "0.7.1-nam.0" }
+ff = "0.13.1"
+group = "0.13"
+
+[dependencies.webgpu-groth16]
+path = ".."
+
+[[bin]]
+name = "fuzz_fq_13bit_roundtrip"
+path = "fuzz_targets/fuzz_fq_13bit_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_glv_decompose"
+path = "fuzz_targets/fuzz_glv_decompose.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_u128_windows"
+path = "fuzz_targets/fuzz_u128_windows.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_serialize_g1_roundtrip"
+path = "fuzz_targets/fuzz_serialize_g1_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_negate_g1_bytes"
+path = "fuzz_targets/fuzz_negate_g1_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bucket_sorting"
+path = "fuzz_targets/fuzz_bucket_sorting.rs"
+test = false
+doc = false
+bench = false
