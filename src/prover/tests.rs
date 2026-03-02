@@ -4,6 +4,9 @@ use ff::Field;
 use group::Group;
 use masp_primitives::asset_type::AssetType;
 use masp_primitives::jubjub;
+use masp_primitives::sapling::Note;
+use masp_primitives::sapling::PaymentAddress;
+use masp_primitives::sapling::Rseed;
 use masp_primitives::sapling::{Diversifier, ProofGenerationKey};
 use masp_proofs::circuit::sapling::Output as SaplingOutputCircuit;
 use rand_core::OsRng;
@@ -183,9 +186,8 @@ fn bench_cpu_msm_100k_like() {
     let _ = acc;
 }
 
-fn sample_sapling_output_circuit() -> SaplingOutputCircuit {
+fn sample_sapling_output_note() -> (PaymentAddress, Note) {
     let asset_type = AssetType::new(b"benchmark-asset").expect("asset type creation failed");
-    let value_commitment = asset_type.value_commitment(42, jubjub::Fr::from(7u64));
 
     let pgk = ProofGenerationKey {
         ak: jubjub::SubgroupPoint::generator(),
@@ -201,12 +203,30 @@ fn sample_sapling_output_circuit() -> SaplingOutputCircuit {
     }
     let payment_address = payment_address.expect("failed to find a valid diversifier");
 
+    (
+        payment_address,
+        Note {
+            asset_type,
+            value: 42,
+            g_d: payment_address.g_d().unwrap(),
+            pk_d: *payment_address.pk_d(),
+            rseed: Rseed::AfterZip212([0xaf; 32]),
+        },
+    )
+}
+
+fn sample_sapling_output_circuit() -> SaplingOutputCircuit {
+    let (pa, note) = sample_sapling_output_note();
+    let value_commitment = note
+        .asset_type
+        .value_commitment(note.value, jubjub::Fr::from(7u64));
+
     SaplingOutputCircuit {
         value_commitment: Some(value_commitment),
-        asset_identifier: asset_type.identifier_bits(),
-        payment_address: Some(payment_address),
+        asset_identifier: note.asset_type.identifier_bits(),
+        payment_address: Some(pa),
         commitment_randomness: Some(jubjub::Fr::from(13u64)),
-        esk: Some(jubjub::Fr::from(17u64)),
+        esk: Some(note.derive_esk().unwrap()),
     }
 }
 
