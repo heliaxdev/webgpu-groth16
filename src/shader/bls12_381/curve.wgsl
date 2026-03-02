@@ -173,8 +173,7 @@ fn add_g1_mixed(p1: PointG1, p2: PointG1) -> PointG1 {
         for (var i = 0u; i < 30u; i = i + 1u) {
             if p1.y.limbs[i] != s2.limbs[i] { s_eq = false; break; }
         }
-        if s_eq { return double_g1(p1); }
-        else { return G1_INFINITY; }
+        if s_eq { return double_g1(p1); } else { return G1_INFINITY; }
     }
 
     // H = U2 - U1 = U2 - X1
@@ -474,8 +473,7 @@ fn add_g2_mixed(p1: PointG2, p2: PointG2) -> PointG2 {
                 break;
             }
         }
-        if s_eq { return double_g2(p1); }
-        else {
+        if s_eq { return double_g2(p1); } else {
             return PointG2(
                 Fq2(U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u)),
                     U384(array<u32,30>(0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u,0u))),
