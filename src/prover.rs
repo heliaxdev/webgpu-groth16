@@ -37,7 +37,7 @@ use constraint_system::GpuConstraintSystem;
 use h_poly::{read_h_poly_result, submit_h_poly};
 use msm::{MsmBases, enqueue_msm, readback_msms};
 
-fn marshal_scalars<G: GpuCurve>(scalars: &[G::Scalar]) -> Vec<u8> {
+pub(crate) fn marshal_scalars<G: GpuCurve>(scalars: &[G::Scalar]) -> Vec<u8> {
     let mut buffer = Vec::with_capacity(scalars.len() * 32);
     for s in scalars {
         buffer.extend_from_slice(&G::serialize_scalar(s));

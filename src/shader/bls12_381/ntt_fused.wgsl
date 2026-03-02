@@ -35,14 +35,18 @@ fn ntt_tile_with_shift(
     let local_idx_1 = local_id.x;
     let local_idx_2 = local_id.x + THREADS_PER_WORKGROUP;
 
-    let rev_idx_1 = reverse_bits(local_idx_1, log2_elements);
-    let rev_idx_2 = reverse_bits(local_idx_2, log2_elements);
+    var load_idx_1 = local_idx_1;
+    var load_idx_2 = local_idx_2;
+    if n_total <= ELEMENTS_PER_TILE {
+        load_idx_1 = reverse_bits(local_idx_1, log2_elements);
+        load_idx_2 = reverse_bits(local_idx_2, log2_elements);
+    }
 
     if local_idx_1 < n {
-        shared_data[rev_idx_1] = data[tile_offset + local_idx_1];
+        shared_data[load_idx_1] = data[tile_offset + local_idx_1];
     }
     if local_idx_2 < n {
-        shared_data[rev_idx_2] = data[tile_offset + local_idx_2];
+        shared_data[load_idx_2] = data[tile_offset + local_idx_2];
     }
 
     workgroupBarrier();
@@ -56,7 +60,7 @@ fn ntt_tile_with_shift(
             let k = local_id.x % half_len;
             let pos = (local_id.x / half_len) * len + k;
 
-            let twiddle_stride = n / len;
+            let twiddle_stride = n_total / len;
             let twiddle = twiddles[k * twiddle_stride];
 
             let u = shared_data[pos];
@@ -71,7 +75,6 @@ fn ntt_tile_with_shift(
         workgroupBarrier();
     }
 
-    // Fused write-back: multiply by shift factor before storing to VRAM.
     if local_idx_1 < n {
         let gi1 = tile_offset + local_idx_1;
         data[gi1] = mul_montgomery_u256(shared_data[local_idx_1], shift_factors[gi1]);

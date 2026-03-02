@@ -1,7 +1,7 @@
 use crate::bellman::Circuit;
 use blstrs::{Bls12, Scalar};
 use ff::Field;
-use group::Group;
+use group::{Curve, Group};
 use masp_primitives::asset_type::AssetType;
 use masp_primitives::jubjub;
 use masp_primitives::sapling::Note;
@@ -1018,5 +1018,162 @@ async fn test_h_component_matches_cpu_when_r_s_zero() {
         Bls12::proj_to_affine_g1(&gpu_h),
         Bls12::proj_to_affine_g1(&cpu_h),
         "h component mismatch"
+    );
+}
+
+#[tokio::test]
+async fn test_gpu_msm_30k_matches_cpu() {
+    let mut rng = OsRng;
+    let n = 30_000;
+
+    // Generate 30k random points and scalars
+    let points: Vec<_> = (0..n)
+        .map(|_| <Bls12 as pairing::Engine>::G1::random(&mut rng).to_affine())
+        .collect();
+    let scalars: Vec<_> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+
+    let gpu_ctx = GpuContext::<Bls12>::new().await.unwrap();
+    let gpu_res = gpu_msm_g1::<Bls12>(&gpu_ctx, &points, &scalars)
+        .await
+        .unwrap();
+
+    let mut cpu_res = <Bls12 as pairing::Engine>::G1::identity();
+    for (p, s) in points.iter().zip(scalars.iter()) {
+        cpu_res += *p * *s;
+    }
+
+    assert_eq!(
+        Bls12::proj_to_affine_g1(&gpu_res),
+        Bls12::proj_to_affine_g1(&cpu_res),
+        "GPU MSM failed at N=30,000"
+    );
+}
+
+#[derive(Clone)]
+struct LargeDummyCircuit<Scalar: PrimeField> {
+    pub x: Option<Scalar>,
+    pub y: Option<Scalar>,
+    pub num_constraints: usize,
+}
+
+impl<Scalar: PrimeField> bellman::Circuit<Scalar> for LargeDummyCircuit<Scalar> {
+    fn synthesize<CS: bellman::ConstraintSystem<Scalar>>(
+        self,
+        cs: &mut CS,
+    ) -> Result<(), bellman::SynthesisError> {
+        let x_val = self.x;
+        let y_val = self.y;
+
+        let y = cs.alloc_input(
+            || "y",
+            || y_val.ok_or(bellman::SynthesisError::AssignmentMissing),
+        )?;
+        let x = cs.alloc(
+            || "x",
+            || x_val.ok_or(bellman::SynthesisError::AssignmentMissing),
+        )?;
+
+        let mut curr = x;
+        let mut curr_val = x_val;
+
+        // Add tens of thousands of constraints: curr * 2 = next
+        for i in 0..self.num_constraints {
+            let next_val = curr_val.map(|v| v + v);
+            let next = cs.alloc(
+                || format!("next_{i}"),
+                || next_val.ok_or(bellman::SynthesisError::AssignmentMissing),
+            )?;
+
+            // Enforce: curr * 2 = next  ==> curr * 2 = next
+            cs.enforce(
+                || format!("c_{i}"),
+                |lc| lc + curr,
+                |lc| lc + CS::one() + CS::one(),
+                |lc| lc + next,
+            );
+
+            curr = next;
+            curr_val = next_val;
+        }
+
+        // Finally tie it to the public input y: curr * 1 = y
+        cs.enforce(|| "tie_y", |lc| lc + curr, |lc| lc + CS::one(), |lc| lc + y);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_gpu_large_circuit_abc_match() {
+    let mut rng = OsRng;
+    let num_constraints = 32700; // Pushes FFT to N=32768
+
+    let setup_circuit = LargeDummyCircuit::<Scalar> {
+        x: None,
+        y: None,
+        num_constraints,
+    };
+    let params =
+        bellman::groth16::generate_random_parameters::<Bls12, _, _>(setup_circuit, &mut rng)
+            .expect("param gen failed");
+
+    let gpu_ctx = GpuContext::<Bls12>::new().await.unwrap();
+    let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
+    let gpu_pk = prepare_gpu_proving_key::<Bls12>(&ppk, &gpu_ctx);
+
+    // If x = 1, multiplying by 2 `num_constraints` times means y = 1 * 2^(num_constraints)
+    let x_value = Scalar::ONE;
+    let mut y_value = x_value;
+    for _ in 0..num_constraints {
+        y_value = y_value + y_value;
+    }
+
+    let circuit = LargeDummyCircuit {
+        x: Some(x_value),
+        y: Some(y_value),
+        num_constraints,
+    };
+
+    // Fix randomness to compare components exactly
+    let r = Scalar::ZERO;
+    let s = Scalar::ZERO;
+
+    let t0 = Instant::now();
+    let gpu_proof = create_proof_with_fixed_randomness::<Bls12, Bls12, _>(
+        circuit.clone(),
+        &params,
+        &ppk,
+        &gpu_ctx,
+        Some(&gpu_pk),
+        r,
+        s,
+    )
+    .await
+    .expect("gpu proof failed");
+    eprintln!("GPU Large Proof took: {:?}", t0.elapsed());
+
+    let cpu_proof =
+        bellman::groth16::create_proof(circuit, &params, r, s).expect("cpu proof failed");
+
+    let gpu_a: blstrs::G1Projective = gpu_proof.a.into();
+    let cpu_a: blstrs::G1Projective = cpu_proof.a.into();
+    let gpu_b: blstrs::G2Projective = gpu_proof.b.into();
+    let cpu_b: blstrs::G2Projective = cpu_proof.b.into();
+    let gpu_c: blstrs::G1Projective = gpu_proof.c.into();
+    let cpu_c: blstrs::G1Projective = cpu_proof.c.into();
+
+    assert_eq!(
+        Bls12::proj_to_affine_g1(&gpu_a),
+        Bls12::proj_to_affine_g1(&cpu_a),
+        "A component mismatch (Density filtering issue?)"
+    );
+    assert_eq!(
+        Bls12::proj_to_affine_g2(&gpu_b),
+        Bls12::proj_to_affine_g2(&cpu_b),
+        "B component mismatch (Density filtering issue?)"
+    );
+    assert_eq!(
+        Bls12::proj_to_affine_g1(&gpu_c),
+        Bls12::proj_to_affine_g1(&cpu_c),
+        "C component mismatch (FFT / H-poly issue!)"
     );
 }

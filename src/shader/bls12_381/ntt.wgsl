@@ -135,14 +135,8 @@ fn ntt_tile(
     let n_total = arrayLength(&twiddles);
     let n = min(ELEMENTS_PER_TILE, n_total - tile_offset);
     if n == 0u { return; }
-
-    // This shader implements a single-tile NTT. Larger domains are not yet
-    // supported by this kernel and are left untouched for out-of-range groups.
     if n > ELEMENTS_PER_TILE { return; }
     
-    // 1. Bit-Reversed Load from Global VRAM to Workgroup Memory
-    // The Cooley-Tukey algorithm yields elements out of order, requiring bit-inversion.
-    // We apply the bit-reversal permutation while loading into shared memory.
     var log2_elements = 0u;
     var m = n;
     while m > 1u {
@@ -153,31 +147,32 @@ fn ntt_tile(
     let local_idx_1 = local_id.x;
     let local_idx_2 = local_id.x + THREADS_PER_WORKGROUP;
 
-    let rev_idx_1 = reverse_bits(local_idx_1, log2_elements);
-    let rev_idx_2 = reverse_bits(local_idx_2, log2_elements);
+    var load_idx_1 = local_idx_1;
+    var load_idx_2 = local_idx_2;
+    if n_total <= ELEMENTS_PER_TILE {
+        load_idx_1 = reverse_bits(local_idx_1, log2_elements);
+        load_idx_2 = reverse_bits(local_idx_2, log2_elements);
+    }
 
     if local_idx_1 < n {
-        shared_data[rev_idx_1] = data[tile_offset + local_idx_1];
+        shared_data[load_idx_1] = data[tile_offset + local_idx_1];
     }
     if local_idx_2 < n {
-        shared_data[rev_idx_2] = data[tile_offset + local_idx_2];
+        shared_data[load_idx_2] = data[tile_offset + local_idx_2];
     }
 
     workgroupBarrier();
     
-    // 2. Cooley-Tukey Radix-2 In-Place Butterfly Iterations
-    // Iterates through log2(N) stages.
     var half_len: u32 = 1u;
     for (var stage: u32 = 0u; stage < log2_elements; stage = stage + 1u) {
         let len = half_len * 2u;
 
         let butterfly_count = n / 2u;
         if local_id.x < butterfly_count {
-            // Each thread handles one butterfly operation.
             let k = local_id.x % half_len;
             let pos = (local_id.x / half_len) * len + k;
 
-            let twiddle_stride = n / len;
+            let twiddle_stride = n_total / len; 
             let twiddle = twiddles[k * twiddle_stride];
 
             let u = shared_data[pos];
@@ -192,7 +187,6 @@ fn ntt_tile(
         workgroupBarrier();
     }
     
-    // 3. Store the processed tile back to Global VRAM
     if local_idx_1 < n {
         data[tile_offset + local_idx_1] = shared_data[local_idx_1];
     }
