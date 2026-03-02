@@ -26,6 +26,18 @@ struct NttParams {
 @group(0) @binding(2)
 var<uniform> params: NttParams;
 
+@group(2) @binding(0)
+var<storage, read> pointwise_a: array<U256>;
+
+@group(2) @binding(1)
+var<storage, read> pointwise_b: array<U256>;
+
+@group(2) @binding(2)
+var<storage, read> pointwise_c: array<U256>;
+
+@group(2) @binding(3)
+var<storage, read> pointwise_z_inv: array<U256>;
+
 // Fast workgroup-shared memory arrays
 var<workgroup> shared_data: array<U256, ELEMENTS_PER_TILE>;
 var<workgroup> shared_twiddles: array<U256, THREADS_PER_WORKGROUP>;
@@ -68,6 +80,15 @@ fn reverse_bits(n: u32, bit_len: u32) -> u32 {
     return reverseBits(n) >> (32u - bit_len);
 }
 
+fn compute_pointwise_h(i: u32) -> U256 {
+    let a = pointwise_a[i];
+    let b = pointwise_b[i];
+    let c = pointwise_c[i];
+    let ab = mul_montgomery_u256(a, b);
+    let ab_c = sub_fr(ab, c);
+    return mul_montgomery_u256(ab_c, pointwise_z_inv[0u]);
+}
+
 @compute @workgroup_size(256)
 fn bitreverse_inplace(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let i = global_id.x;
@@ -82,6 +103,18 @@ fn bitreverse_inplace(@builtin(global_invocation_id) global_id: vec3<u32>) {
         data[i] = data[j];
         data[j] = tmp;
     }
+}
+
+@compute @workgroup_size(256)
+fn bitreverse_fused_pointwise(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let i = global_id.x;
+    let n = params.n;
+    if i >= n {
+        return;
+    }
+
+    let j = reverse_bits(i, params.log_n);
+    data[j] = compute_pointwise_h(i);
 }
 
 @compute @workgroup_size(256)
@@ -110,6 +143,111 @@ fn ntt_global_stage(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     data[pos] = add_fr(u, v_omega);
     data[pos + half_len] = sub_fr(u, v_omega);
+}
+
+@compute @workgroup_size(256)
+fn ntt_global_stage_dif(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let tid = global_id.x;
+    let n = params.n;
+    let half_len = params.half_len;
+    if half_len == 0u {
+        return;
+    }
+
+    let butterflies = n / 2u;
+    if tid >= butterflies {
+        return;
+    }
+
+    let len = half_len * 2u;
+    let k = tid % half_len;
+    let pos = (tid / half_len) * len + k;
+    let twiddle_stride = n / len;
+    let twiddle = twiddles[k * twiddle_stride];
+
+    let u = data[pos];
+    let v = data[pos + half_len];
+    let sum = add_fr(u, v);
+    let diff = sub_fr(u, v);
+
+    data[pos] = sum;
+    data[pos + half_len] = mul_montgomery_u256(diff, twiddle);
+}
+
+@compute @workgroup_size(256)
+fn ntt_global_stage_dif_fused_pointwise(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let tid = global_id.x;
+    let n = params.n;
+    let half_len = params.half_len;
+    if half_len == 0u {
+        return;
+    }
+
+    let butterflies = n / 2u;
+    if tid >= butterflies {
+        return;
+    }
+
+    let len = half_len * 2u;
+    let k = tid % half_len;
+    let pos = (tid / half_len) * len + k;
+    let twiddle_stride = n / len;
+    let twiddle = twiddles[k * twiddle_stride];
+
+    let u = compute_pointwise_h(pos);
+    let v = compute_pointwise_h(pos + half_len);
+    let sum = add_fr(u, v);
+    let diff = sub_fr(u, v);
+
+    data[pos] = sum;
+    data[pos + half_len] = mul_montgomery_u256(diff, twiddle);
+}
+
+@compute @workgroup_size(256)
+fn ntt_global_stage_radix4(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let tid = global_id.x;
+    let n = params.n;
+    let half_len = params.half_len;
+    if half_len == 0u {
+        return;
+    }
+
+    let butterflies = n / 4u;
+    if tid >= butterflies {
+        return;
+    }
+
+    let len4 = half_len * 4u;
+    let k = tid % half_len;
+    let pos = (tid / half_len) * len4 + k;
+
+    let tw1_stride = n / (half_len * 2u);
+    let tw2_stride = n / len4;
+
+    let w1 = twiddles[k * tw1_stride];
+    let w2 = twiddles[k * tw2_stride];
+    let w3 = twiddles[(k + half_len) * tw2_stride];
+
+    let x0 = data[pos];
+    let x1 = data[pos + half_len];
+    let x2 = data[pos + (2u * half_len)];
+    let x3 = data[pos + (3u * half_len)];
+
+    let x1w = mul_montgomery_u256(x1, w1);
+    let x3w = mul_montgomery_u256(x3, w1);
+
+    let a0 = add_fr(x0, x1w);
+    let a1 = sub_fr(x0, x1w);
+    let a2 = add_fr(x2, x3w);
+    let a3 = sub_fr(x2, x3w);
+
+    let a2w = mul_montgomery_u256(a2, w2);
+    let a3w = mul_montgomery_u256(a3, w3);
+
+    data[pos] = add_fr(a0, a2w);
+    data[pos + half_len] = add_fr(a1, a3w);
+    data[pos + (2u * half_len)] = sub_fr(a0, a2w);
+    data[pos + (3u * half_len)] = sub_fr(a1, a3w);
 }
 
 // ============================================================================

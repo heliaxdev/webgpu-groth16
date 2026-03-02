@@ -174,9 +174,34 @@ impl<C: GpuCurve> GpuContext<C> {
             pass.dispatch_workgroups(num_elements.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
         }
 
-        // Butterfly stages
+        // Butterfly stages (radix-4 with optional first radix-2 when needed)
         let mut half_len = 1u32;
         let mut param_updates: Vec<wgpu::Buffer> = Vec::new();
+
+        if (log_n & 1) == 1 {
+            stage_params[1] = half_len;
+            let update_buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("NTT Params Update"),
+                    contents: bytemuck::cast_slice(&stage_params),
+                    usage: wgpu::BufferUsages::COPY_SRC,
+                });
+            encoder.copy_buffer_to_buffer(&update_buf, 0, &params_buf, 0, 16);
+            param_updates.push(update_buf);
+
+            let bg = make_bind_group(&params_buf);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("NTT Global Stage R2 Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.ntt_global_stage_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups((num_elements / 2).div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+
+            half_len = 2;
+        }
+
         while half_len < num_elements {
             stage_params[1] = half_len;
             let update_buf = self
@@ -191,14 +216,14 @@ impl<C: GpuCurve> GpuContext<C> {
 
             let bg = make_bind_group(&params_buf);
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("NTT Global Stage Pass"),
+                label: Some("NTT Global Stage R4 Pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.ntt_global_stage_pipeline);
+            pass.set_pipeline(&self.ntt_global_stage_radix4_pipeline);
             pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups((num_elements / 2).div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+            pass.dispatch_workgroups((num_elements / 4).div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
 
-            half_len <<= 1;
+            half_len <<= 2;
         }
 
         self.queue.submit(Some(encoder.finish()));

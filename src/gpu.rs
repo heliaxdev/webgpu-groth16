@@ -186,8 +186,16 @@ pub struct GpuContext<C> {
     // Polynomial Pipelines
     pub ntt_pipeline: wgpu::ComputePipeline,
     pub ntt_fused_pipeline: wgpu::ComputePipeline,
+    pub ntt_tile_dit_no_bitreverse_pipeline: wgpu::ComputePipeline,
+    pub ntt_tile_dif_pipeline: wgpu::ComputePipeline,
+    pub ntt_tile_dif_fused_pipeline: wgpu::ComputePipeline,
+    pub ntt_tile_fused_pointwise_pipeline: wgpu::ComputePipeline,
     pub ntt_global_stage_pipeline: wgpu::ComputePipeline,
+    pub ntt_global_stage_radix4_pipeline: wgpu::ComputePipeline,
+    pub ntt_global_stage_dif_pipeline: wgpu::ComputePipeline,
+    pub ntt_global_stage_dif_fused_pointwise_pipeline: wgpu::ComputePipeline,
     pub ntt_bitreverse_pipeline: wgpu::ComputePipeline,
+    pub ntt_bitreverse_fused_pointwise_pipeline: wgpu::ComputePipeline,
     pub coset_shift_pipeline: wgpu::ComputePipeline,
     pub pointwise_poly_pipeline: wgpu::ComputePipeline,
     pub to_montgomery_pipeline: wgpu::ComputePipeline,
@@ -215,6 +223,7 @@ pub struct GpuContext<C> {
     pub ntt_params_bind_group_layout: wgpu::BindGroupLayout,
     pub coset_shift_bind_group_layout: wgpu::BindGroupLayout,
     pub pointwise_poly_bind_group_layout: wgpu::BindGroupLayout,
+    pub pointwise_fused_bind_group_layout: wgpu::BindGroupLayout,
     pub montgomery_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_agg_bind_group_layout: wgpu::BindGroupLayout,
     pub msm_sum_bind_group_layout: wgpu::BindGroupLayout,
@@ -328,6 +337,8 @@ impl<C: GpuCurve> GpuContext<C> {
             create_bind_group_layout(&device, "Coset Shift", &[RW, RO]);
         let pointwise_poly_bind_group_layout =
             create_bind_group_layout(&device, "Pointwise Poly", &[RO, RO, RO, RW, RO]);
+        let pointwise_fused_bind_group_layout =
+            create_bind_group_layout(&device, "Pointwise Fused", &[RO, RO, RO, RO]);
         let montgomery_bind_group_layout = create_bind_group_layout(&device, "Montgomery", &[RW]);
         let msm_agg_bind_group_layout =
             create_bind_group_layout(&device, "MSM Agg", &[RO, RO, RO, RO, RW, RO]);
@@ -387,6 +398,54 @@ impl<C: GpuCurve> GpuContext<C> {
                 "ntt_tile_with_shift"
             )
         );
+        let ntt_tile_dif_pipeline = timed!(
+            "pipeline: NTT Tile DIF",
+            create_pipeline(
+                &device,
+                "NTT Tile DIF",
+                &ntt_fused_layout,
+                &ntt_fused_module,
+                "ntt_tile_dif"
+            )
+        );
+        let ntt_tile_dit_no_bitreverse_pipeline = timed!(
+            "pipeline: NTT Tile DIT NoRev",
+            create_pipeline(
+                &device,
+                "NTT Tile DIT NoRev",
+                &ntt_fused_layout,
+                &ntt_fused_module,
+                "ntt_tile_dit_no_bitreverse"
+            )
+        );
+        let ntt_tile_dif_fused_pipeline = timed!(
+            "pipeline: NTT Tile DIF Fused",
+            create_pipeline(
+                &device,
+                "NTT Tile DIF Fused",
+                &ntt_fused_layout,
+                &ntt_fused_module,
+                "ntt_tile_dif_with_shift"
+            )
+        );
+        let ntt_fused_pointwise_layout = pipeline_layout(
+            &device,
+            &[
+                &ntt_bind_group_layout,
+                &ntt_fused_shift_bgl,
+                &pointwise_fused_bind_group_layout,
+            ],
+        );
+        let ntt_tile_fused_pointwise_pipeline = timed!(
+            "pipeline: NTT Tile Fused Pointwise",
+            create_pipeline(
+                &device,
+                "NTT Tile Fused Pointwise",
+                &ntt_fused_pointwise_layout,
+                &ntt_fused_module,
+                "ntt_tile_fused_pointwise"
+            )
+        );
         let ntt_global_stage_pipeline = timed!(
             "pipeline: NTT Global Stage",
             create_pipeline(
@@ -397,6 +456,44 @@ impl<C: GpuCurve> GpuContext<C> {
                 "ntt_global_stage"
             )
         );
+        let ntt_global_stage_radix4_pipeline = timed!(
+            "pipeline: NTT Global R4",
+            create_pipeline(
+                &device,
+                "NTT Global Stage Radix4",
+                &ntt_global_layout,
+                &ntt_module,
+                "ntt_global_stage_radix4"
+            )
+        );
+        let ntt_global_stage_dif_pipeline = timed!(
+            "pipeline: NTT Global DIF",
+            create_pipeline(
+                &device,
+                "NTT Global Stage DIF",
+                &ntt_global_layout,
+                &ntt_module,
+                "ntt_global_stage_dif"
+            )
+        );
+        let ntt_global_stage_dif_fused_layout = pipeline_layout(
+            &device,
+            &[
+                &ntt_params_bind_group_layout,
+                &ntt_fused_shift_bgl,
+                &pointwise_fused_bind_group_layout,
+            ],
+        );
+        let ntt_global_stage_dif_fused_pointwise_pipeline = timed!(
+            "pipeline: NTT Global DIF Fused",
+            create_pipeline(
+                &device,
+                "NTT Global DIF Fused Pointwise",
+                &ntt_global_stage_dif_fused_layout,
+                &ntt_module,
+                "ntt_global_stage_dif_fused_pointwise"
+            )
+        );
         let ntt_bitreverse_pipeline = timed!(
             "pipeline: NTT BitReverse",
             create_pipeline(
@@ -405,6 +502,24 @@ impl<C: GpuCurve> GpuContext<C> {
                 &ntt_global_layout,
                 &ntt_module,
                 "bitreverse_inplace"
+            )
+        );
+        let ntt_bitreverse_fused_layout = pipeline_layout(
+            &device,
+            &[
+                &ntt_params_bind_group_layout,
+                &ntt_fused_shift_bgl,
+                &pointwise_fused_bind_group_layout,
+            ],
+        );
+        let ntt_bitreverse_fused_pointwise_pipeline = timed!(
+            "pipeline: NTT BitReverse Fused",
+            create_pipeline(
+                &device,
+                "NTT BitReverse Fused Pointwise",
+                &ntt_bitreverse_fused_layout,
+                &ntt_module,
+                "bitreverse_fused_pointwise"
             )
         );
 
@@ -647,8 +762,16 @@ impl<C: GpuCurve> GpuContext<C> {
             queue,
             ntt_pipeline,
             ntt_fused_pipeline,
+            ntt_tile_dit_no_bitreverse_pipeline,
+            ntt_tile_dif_pipeline,
+            ntt_tile_dif_fused_pipeline,
+            ntt_tile_fused_pointwise_pipeline,
             ntt_global_stage_pipeline,
+            ntt_global_stage_radix4_pipeline,
+            ntt_global_stage_dif_pipeline,
+            ntt_global_stage_dif_fused_pointwise_pipeline,
             ntt_bitreverse_pipeline,
+            ntt_bitreverse_fused_pointwise_pipeline,
             coset_shift_pipeline,
             pointwise_poly_pipeline,
             to_montgomery_pipeline,
@@ -672,6 +795,7 @@ impl<C: GpuCurve> GpuContext<C> {
             ntt_params_bind_group_layout,
             coset_shift_bind_group_layout,
             pointwise_poly_bind_group_layout,
+            pointwise_fused_bind_group_layout,
             montgomery_bind_group_layout,
             msm_agg_bind_group_layout,
             msm_sum_bind_group_layout,

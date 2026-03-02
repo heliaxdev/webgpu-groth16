@@ -64,9 +64,9 @@ impl<C: GpuCurve> GpuContext<C> {
             })
         };
 
-        let pointwise_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Pointwise Poly BG"),
-            layout: &self.pointwise_poly_bind_group_layout,
+        let pointwise_fused_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Pointwise Fused BG"),
+            layout: &self.pointwise_fused_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -82,10 +82,6 @@ impl<C: GpuCurve> GpuContext<C> {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: bufs.h.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
                     resource: bufs.z_invs.as_entire_binding(),
                 },
             ],
@@ -116,12 +112,26 @@ impl<C: GpuCurve> GpuContext<C> {
             pass.dispatch_workgroups(n.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
         }
 
-        // Helper macro to handle NTT scaling (Tile vs Global) dynamically
         macro_rules! encode_ntt {
-            ($label:expr, $data_buf:expr, $tw_buf:expr, $is_fused:expr, $shifts_buf:expr) => {
+            (
+                $label:expr,
+                $data_buf:expr,
+                $tw_buf:expr,
+                $is_fused_shift:expr,
+                $shifts_buf:expr,
+                $is_h_fused_pointwise:expr
+            ) => {
                 if n <= NTT_TILE_SIZE {
-                    if $is_fused {
-                        let bg = ntt_bg($data_buf, $tw_buf);
+                    let bg = ntt_bg($data_buf, $tw_buf);
+                    if $is_h_fused_pointwise {
+                        let shifts_group1 = fused_shift_bg($shifts_buf.unwrap());
+                        let mut pass = compute_pass!(scope, encoder, concat!($label, "_fused_h"));
+                        pass.set_pipeline(&self.ntt_tile_fused_pointwise_pipeline);
+                        pass.set_bind_group(0, &bg, &[]);
+                        pass.set_bind_group(1, &shifts_group1, &[]);
+                        pass.set_bind_group(2, &pointwise_fused_bg, &[]);
+                        pass.dispatch_workgroups(n.div_ceil(NTT_TILE_SIZE), 1, 1);
+                    } else if $is_fused_shift {
                         let shifts_group1 = fused_shift_bg($shifts_buf.unwrap());
                         let mut pass = compute_pass!(scope, encoder, concat!($label, "_fused"));
                         pass.set_pipeline(&self.ntt_fused_pipeline);
@@ -129,7 +139,6 @@ impl<C: GpuCurve> GpuContext<C> {
                         pass.set_bind_group(1, &shifts_group1, &[]);
                         pass.dispatch_workgroups(n.div_ceil(NTT_TILE_SIZE), 1, 1);
                     } else {
-                        let bg = ntt_bg($data_buf, $tw_buf);
                         let mut pass = compute_pass!(scope, encoder, $label);
                         pass.set_pipeline(&self.ntt_pipeline);
                         pass.set_bind_group(0, &bg, &[]);
@@ -171,7 +180,16 @@ impl<C: GpuCurve> GpuContext<C> {
                         ],
                     });
 
-                    {
+                    if $is_h_fused_pointwise {
+                        let shifts_group1 = fused_shift_bg($shifts_buf.unwrap());
+                        let mut pass =
+                            compute_pass!(scope, encoder, concat!($label, "_bitreverse_fused_h"));
+                        pass.set_pipeline(&self.ntt_bitreverse_fused_pointwise_pipeline);
+                        pass.set_bind_group(0, &bg, &[]);
+                        pass.set_bind_group(1, &shifts_group1, &[]);
+                        pass.set_bind_group(2, &pointwise_fused_bg, &[]);
+                        pass.dispatch_workgroups(n.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+                    } else {
                         let mut pass =
                             compute_pass!(scope, encoder, concat!($label, "_bitreverse"));
                         pass.set_pipeline(&self.ntt_bitreverse_pipeline);
@@ -180,6 +198,26 @@ impl<C: GpuCurve> GpuContext<C> {
                     }
 
                     let mut half_len = 1u32;
+                    if (log_n & 1) == 1 {
+                        stage_params[1] = half_len;
+                        let update_buf =
+                            self.device
+                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some("NTT Params Update"),
+                                    contents: bytemuck::cast_slice(&stage_params),
+                                    usage: wgpu::BufferUsages::COPY_SRC,
+                                });
+                        encoder.copy_buffer_to_buffer(&update_buf, 0, &params_buf, 0, 16);
+                        param_updates.push(update_buf);
+
+                        let mut pass = compute_pass!(scope, encoder, concat!($label, "_stage"));
+                        pass.set_pipeline(&self.ntt_global_stage_pipeline);
+                        pass.set_bind_group(0, &bg, &[]);
+                        pass.dispatch_workgroups((n / 2).div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+
+                        half_len = 2;
+                    }
+
                     while half_len < n {
                         stage_params[1] = half_len;
                         let update_buf =
@@ -192,16 +230,16 @@ impl<C: GpuCurve> GpuContext<C> {
                         encoder.copy_buffer_to_buffer(&update_buf, 0, &params_buf, 0, 16);
                         param_updates.push(update_buf);
 
-                        {
-                            let mut pass = compute_pass!(scope, encoder, concat!($label, "_stage"));
-                            pass.set_pipeline(&self.ntt_global_stage_pipeline);
-                            pass.set_bind_group(0, &bg, &[]);
-                            pass.dispatch_workgroups((n / 2).div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
-                        }
-                        half_len <<= 1;
+                        let mut pass =
+                            compute_pass!(scope, encoder, concat!($label, "_stage_radix4"));
+                        pass.set_pipeline(&self.ntt_global_stage_radix4_pipeline);
+                        pass.set_bind_group(0, &bg, &[]);
+                        pass.dispatch_workgroups((n / 4).div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
+
+                        half_len <<= 2;
                     }
 
-                    if $is_fused {
+                    if $is_fused_shift || $is_h_fused_pointwise {
                         let shift_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some("Coset Shift BG"),
                             layout: &self.coset_shift_bind_group_layout,
@@ -228,9 +266,30 @@ impl<C: GpuCurve> GpuContext<C> {
         }
 
         // 2. Fused iNTT + coset shift on A/B/C
-        encode_ntt!("intt_a", bufs.a, bufs.twiddles_inv, true, Some(bufs.shifts));
-        encode_ntt!("intt_b", bufs.b, bufs.twiddles_inv, true, Some(bufs.shifts));
-        encode_ntt!("intt_c", bufs.c, bufs.twiddles_inv, true, Some(bufs.shifts));
+        encode_ntt!(
+            "intt_a",
+            bufs.a,
+            bufs.twiddles_inv,
+            true,
+            Some(bufs.shifts),
+            false
+        );
+        encode_ntt!(
+            "intt_b",
+            bufs.b,
+            bufs.twiddles_inv,
+            true,
+            Some(bufs.shifts),
+            false
+        );
+        encode_ntt!(
+            "intt_c",
+            bufs.c,
+            bufs.twiddles_inv,
+            true,
+            Some(bufs.shifts),
+            false
+        );
 
         // 3. NTT on A/B/C
         encode_ntt!(
@@ -238,38 +297,34 @@ impl<C: GpuCurve> GpuContext<C> {
             bufs.a,
             bufs.twiddles_fwd,
             false,
-            None::<&wgpu::Buffer>
+            None::<&wgpu::Buffer>,
+            false
         );
         encode_ntt!(
             "ntt_b",
             bufs.b,
             bufs.twiddles_fwd,
             false,
-            None::<&wgpu::Buffer>
+            None::<&wgpu::Buffer>,
+            false
         );
         encode_ntt!(
             "ntt_c",
             bufs.c,
             bufs.twiddles_fwd,
             false,
-            None::<&wgpu::Buffer>
+            None::<&wgpu::Buffer>,
+            false
         );
 
-        // 4. Pointwise H = (A*B-C)/Z
-        {
-            let mut pass = compute_pass!(scope, encoder, "pointwise_poly");
-            pass.set_pipeline(&self.pointwise_poly_pipeline);
-            pass.set_bind_group(0, &pointwise_bg, &[]);
-            pass.dispatch_workgroups(n.div_ceil(SCALAR_WORKGROUP_SIZE), 1, 1);
-        }
-
-        // 5. Fused iNTT + inverse coset shift on H
+        // 4/5. Fused pointwise + iNTT(H) + inverse coset shift
         encode_ntt!(
             "intt_h",
             bufs.h,
             bufs.twiddles_inv,
-            true,
-            Some(bufs.inv_shifts)
+            false,
+            Some(bufs.inv_shifts),
+            true
         );
 
         // 6. From Montgomery on H
