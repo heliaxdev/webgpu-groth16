@@ -73,7 +73,6 @@ impl<S: ff::PrimeField> bellman::Circuit<S> for RepeatedSquaringCircuit<S> {
 // Shared setup: creates GPU context + trusted setup params (cached per bench)
 // ---------------------------------------------------------------------------
 struct BenchSetup {
-    params: bellman::groth16::Parameters<Bls12>,
     ppk: PreparedProvingKey<Bls12>,
     gpu: GpuContext<Bls12>,
     num_squarings: usize,
@@ -99,7 +98,6 @@ fn setup(num_squarings: usize) -> BenchSetup {
         .expect("gpu init failed");
 
     BenchSetup {
-        params,
         ppk,
         gpu,
         num_squarings,
@@ -127,7 +125,10 @@ fn bench_full_proof(c: &mut Criterion) {
                 };
                 let mut rng = OsRng;
                 rt.block_on(prover::create_proof::<Bls12, Bls12, _, _>(
-                    circuit, &bs.params, &bs.ppk, &bs.gpu, &mut rng,
+                    circuit,
+                    prover::ProvingKey::Serialized(&bs.ppk),
+                    &bs.gpu,
+                    &mut rng,
                 ))
                 .expect("proof failed");
             });
@@ -348,7 +349,10 @@ fn bench_sapling_output(c: &mut Criterion) {
             let circuit = sample_sapling_output_circuit();
             let mut rng = OsRng;
             rt.block_on(prover::create_proof::<Bls12, Bls12, _, _>(
-                circuit, &params, &ppk, &gpu, &mut rng,
+                circuit,
+                prover::ProvingKey::Serialized(&ppk),
+                &gpu,
+                &mut rng,
             ))
             .expect("proof failed");
         });

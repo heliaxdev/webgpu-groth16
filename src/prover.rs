@@ -1,7 +1,6 @@
 //! Groth16 proof construction using GPU-accelerated MSM and NTT.
 //!
-//! The main entry points are [`create_proof`] (one-shot) and
-//! [`create_proof_with_gpu_key`] (reuses persistent GPU bases across proofs).
+//! The main entry point is [`create_proof`].
 //!
 //! Proof construction flow:
 //! 1. Circuit synthesis → constraint system (A, B, C linear combinations)
@@ -37,6 +36,15 @@ use crate::bucket::{
 };
 use crate::gpu::GpuContext;
 use crate::gpu::curve::GpuCurve;
+
+/// Proving key required to create a new Groth16 proof with [`create_proof`].
+#[derive(Copy, Clone)]
+pub enum ProvingKey<'key, G: GpuCurve> {
+    /// Use a key that has already been uploaded to the GPU.
+    Uploaded(&'key GpuProvingKey<G>),
+    /// Use a key that has yet to be uploaded to the GPU.
+    Serialized(&'key PreparedProvingKey<G>),
+}
 
 fn marshal_scalars<G: GpuCurve>(scalars: &[G::Scalar]) -> Vec<u8> {
     let mut buffer = Vec::with_capacity(scalars.len() * 32);
@@ -74,10 +82,8 @@ fn eval_lc<S: PrimeField>(
 /// 5. Read back MSM results and assemble the final proof (A, B, C)
 async fn create_proof_with_fixed_randomness<E, G, C>(
     circuit: C,
-    pk: &bellman::groth16::Parameters<E>,
-    ppk: &PreparedProvingKey<G>,
+    pk: ProvingKey<'_, G>,
     gpu: &GpuContext<G>,
-    gpu_pk: Option<&GpuProvingKey>,
     r: G::Scalar,
     s: G::Scalar,
 ) -> Result<bellman::groth16::Proof<E>>
@@ -189,47 +195,49 @@ where
     let a_glv_bytes;
     let b1_glv_bytes;
     let l_glv_bytes;
-
-    if gpu_pk.is_some() {
-        a_bd = compute_glv_bucket_data::<G>(&a_assignment, a_c);
-        b1_bd = compute_glv_bucket_data::<G>(&b_assignment, b1_c);
-        l_bd = compute_glv_bucket_data::<G>(&cs.aux, l_c);
-        b2_bd = compute_bucket_sorting_with_width::<G>(
-            &b_assignment,
-            G::g2_bucket_width(),
-        );
-        a_glv_bytes = Vec::new();
-        b1_glv_bytes = Vec::new();
-        l_glv_bytes = Vec::new();
-    } else {
-        let (a_bytes, a_bd_tmp) = compute_glv_bucket_sorting::<G>(
-            &a_assignment,
-            &ppk.a_bytes,
-            ppk.a_phi_bytes.as_deref().unwrap_or(&[]),
-            a_c,
-        );
-        let (b1_bytes, b1_bd_tmp) = compute_glv_bucket_sorting::<G>(
-            &b_assignment,
-            &ppk.b_g1_bytes,
-            ppk.b_g1_phi_bytes.as_deref().unwrap_or(&[]),
-            b1_c,
-        );
-        let (l_bytes, l_bd_tmp) = compute_glv_bucket_sorting::<G>(
-            &cs.aux,
-            &ppk.l_bytes,
-            ppk.l_phi_bytes.as_deref().unwrap_or(&[]),
-            l_c,
-        );
-        a_bd = a_bd_tmp;
-        b1_bd = b1_bd_tmp;
-        l_bd = l_bd_tmp;
-        b2_bd = compute_bucket_sorting_with_width::<G>(
-            &b_assignment,
-            G::g2_bucket_width(),
-        );
-        a_glv_bytes = a_bytes;
-        b1_glv_bytes = b1_bytes;
-        l_glv_bytes = l_bytes;
+    match pk {
+        ProvingKey::Uploaded(_) => {
+            a_bd = compute_glv_bucket_data::<G>(&a_assignment, a_c);
+            b1_bd = compute_glv_bucket_data::<G>(&b_assignment, b1_c);
+            l_bd = compute_glv_bucket_data::<G>(&cs.aux, l_c);
+            b2_bd = compute_bucket_sorting_with_width::<G>(
+                &b_assignment,
+                G::g2_bucket_width(),
+            );
+            a_glv_bytes = Vec::new();
+            b1_glv_bytes = Vec::new();
+            l_glv_bytes = Vec::new();
+        }
+        ProvingKey::Serialized(ppk) => {
+            let (a_bytes, a_bd_tmp) = compute_glv_bucket_sorting::<G>(
+                &a_assignment,
+                &ppk.a_bytes,
+                ppk.a_phi_bytes.as_deref().unwrap_or(&[]),
+                a_c,
+            );
+            let (b1_bytes, b1_bd_tmp) = compute_glv_bucket_sorting::<G>(
+                &b_assignment,
+                &ppk.b_g1_bytes,
+                ppk.b_g1_phi_bytes.as_deref().unwrap_or(&[]),
+                b1_c,
+            );
+            let (l_bytes, l_bd_tmp) = compute_glv_bucket_sorting::<G>(
+                &cs.aux,
+                &ppk.l_bytes,
+                ppk.l_phi_bytes.as_deref().unwrap_or(&[]),
+                l_c,
+            );
+            a_bd = a_bd_tmp;
+            b1_bd = b1_bd_tmp;
+            l_bd = l_bd_tmp;
+            b2_bd = compute_bucket_sorting_with_width::<G>(
+                &b_assignment,
+                G::g2_bucket_width(),
+            );
+            a_glv_bytes = a_bytes;
+            b1_glv_bytes = b1_bytes;
+            l_glv_bytes = l_bytes;
+        }
     }
 
     #[cfg(feature = "timing")]
@@ -260,64 +268,67 @@ where
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
     let (a_job, b1_job, l_job, b2_job);
-    if let Some(gpk) = gpu_pk {
-        a_job = enqueue_msm::<G>(
-            gpu,
-            "a",
-            MsmBases::Persistent(&gpk.a_bases_buf),
-            a_bd,
-            false,
-        )?;
-        b1_job = enqueue_msm::<G>(
-            gpu,
-            "b1",
-            MsmBases::Persistent(&gpk.b_g1_bases_buf),
-            b1_bd,
-            false,
-        )?;
-        l_job = enqueue_msm::<G>(
-            gpu,
-            "l",
-            MsmBases::Persistent(&gpk.l_bases_buf),
-            l_bd,
-            false,
-        )?;
-        b2_job = enqueue_msm::<G>(
-            gpu,
-            "b2",
-            MsmBases::Persistent(&gpk.b_g2_bases_buf),
-            b2_bd,
-            true,
-        )?;
-    } else {
-        a_job = enqueue_msm::<G>(
-            gpu,
-            "a",
-            MsmBases::Bytes(&a_glv_bytes),
-            a_bd,
-            false,
-        )?;
-        b1_job = enqueue_msm::<G>(
-            gpu,
-            "b1",
-            MsmBases::Bytes(&b1_glv_bytes),
-            b1_bd,
-            false,
-        )?;
-        l_job = enqueue_msm::<G>(
-            gpu,
-            "l",
-            MsmBases::Bytes(&l_glv_bytes),
-            l_bd,
-            false,
-        )?;
-        b2_job = enqueue_msm::<G>(
-            gpu,
-            "b2",
-            MsmBases::Bytes(&ppk.b_g2_bytes),
-            b2_bd,
-            true,
-        )?;
+    match pk {
+        ProvingKey::Uploaded(gpk) => {
+            a_job = enqueue_msm::<G>(
+                gpu,
+                "a",
+                MsmBases::Persistent(&gpk.a_bases_buf),
+                a_bd,
+                false,
+            )?;
+            b1_job = enqueue_msm::<G>(
+                gpu,
+                "b1",
+                MsmBases::Persistent(&gpk.b_g1_bases_buf),
+                b1_bd,
+                false,
+            )?;
+            l_job = enqueue_msm::<G>(
+                gpu,
+                "l",
+                MsmBases::Persistent(&gpk.l_bases_buf),
+                l_bd,
+                false,
+            )?;
+            b2_job = enqueue_msm::<G>(
+                gpu,
+                "b2",
+                MsmBases::Persistent(&gpk.b_g2_bases_buf),
+                b2_bd,
+                true,
+            )?;
+        }
+        ProvingKey::Serialized(ppk) => {
+            a_job = enqueue_msm::<G>(
+                gpu,
+                "a",
+                MsmBases::Bytes(&a_glv_bytes),
+                a_bd,
+                false,
+            )?;
+            b1_job = enqueue_msm::<G>(
+                gpu,
+                "b1",
+                MsmBases::Bytes(&b1_glv_bytes),
+                b1_bd,
+                false,
+            )?;
+            l_job = enqueue_msm::<G>(
+                gpu,
+                "l",
+                MsmBases::Bytes(&l_glv_bytes),
+                l_bd,
+                false,
+            )?;
+            b2_job = enqueue_msm::<G>(
+                gpu,
+                "b2",
+                MsmBases::Bytes(&ppk.b_g2_bytes),
+                b2_bd,
+                true,
+            )?;
+        }
     }
     #[cfg(feature = "timing")]
     eprintln!("[proof] msm enqueue a/b1/l/b2: {:?}", t_phase.elapsed());
@@ -326,58 +337,64 @@ where
     // While CPU computes this, GPU is already processing a/b1/l/b2 MSMs.
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
-    let h_job;
-    let h_c = optimal_glv_c::<G>(pk.h.len());
-    if let Some(gpk) = gpu_pk {
-        let h_bd = compute_glv_bucket_data::<G>(&h_coeffs[..pk.h.len()], h_c);
-        #[cfg(feature = "timing")]
-        {
-            eprintln!(
-                "[proof] h bucket sorting (GLV): {:?} (c={})",
-                t_phase.elapsed(),
-                h_c
-            );
-            h_bd.print_distribution_stats("h_g1_glv");
+    let h_job = match pk {
+        ProvingKey::Uploaded(gpu_pk) => {
+            let h_c = optimal_glv_c::<G>(gpu_pk.h_len);
+            let h_bd =
+                compute_glv_bucket_data::<G>(&h_coeffs[..gpu_pk.h_len], h_c);
+            #[cfg(feature = "timing")]
+            {
+                eprintln!(
+                    "[proof] h bucket sorting (GLV): {:?} (c={})",
+                    t_phase.elapsed(),
+                    h_c
+                );
+                h_bd.print_distribution_stats("h_g1_glv");
+            }
+            #[cfg(feature = "timing")]
+            let t_phase = std::time::Instant::now();
+            let h_job = enqueue_msm::<G>(
+                gpu,
+                "h",
+                MsmBases::Persistent(&gpu_pk.h_bases_buf),
+                h_bd,
+                false,
+            )?;
+            #[cfg(feature = "timing")]
+            eprintln!("[proof] msm enqueue h: {:?}", t_phase.elapsed());
+            h_job
         }
-        #[cfg(feature = "timing")]
-        let t_phase = std::time::Instant::now();
-        h_job = enqueue_msm::<G>(
-            gpu,
-            "h",
-            MsmBases::Persistent(&gpk.h_bases_buf),
-            h_bd,
-            false,
-        )?;
-        #[cfg(feature = "timing")]
-        eprintln!("[proof] msm enqueue h: {:?}", t_phase.elapsed());
-    } else {
-        let (h_glv_bytes, h_bd) = compute_glv_bucket_sorting::<G>(
-            &h_coeffs[..pk.h.len()],
-            &ppk.h_bytes,
-            ppk.h_phi_bytes.as_deref().unwrap_or(&[]),
-            h_c,
-        );
-        #[cfg(feature = "timing")]
-        {
-            eprintln!(
-                "[proof] h bucket sorting (GLV): {:?} (c={})",
-                t_phase.elapsed(),
-                h_c
+        ProvingKey::Serialized(ppk) => {
+            let h_c = optimal_glv_c::<G>(ppk.h_len);
+            let (h_glv_bytes, h_bd) = compute_glv_bucket_sorting::<G>(
+                &h_coeffs[..ppk.h_len],
+                &ppk.h_bytes,
+                ppk.h_phi_bytes.as_deref().unwrap_or(&[]),
+                h_c,
             );
-            h_bd.print_distribution_stats("h_g1_glv");
+            #[cfg(feature = "timing")]
+            {
+                eprintln!(
+                    "[proof] h bucket sorting (GLV): {:?} (c={})",
+                    t_phase.elapsed(),
+                    h_c
+                );
+                h_bd.print_distribution_stats("h_g1_glv");
+            }
+            #[cfg(feature = "timing")]
+            let t_phase = std::time::Instant::now();
+            let h_job = enqueue_msm::<G>(
+                gpu,
+                "h",
+                MsmBases::Bytes(&h_glv_bytes),
+                h_bd,
+                false,
+            )?;
+            #[cfg(feature = "timing")]
+            eprintln!("[proof] msm enqueue h: {:?}", t_phase.elapsed());
+            h_job
         }
-        #[cfg(feature = "timing")]
-        let t_phase = std::time::Instant::now();
-        h_job = enqueue_msm::<G>(
-            gpu,
-            "h",
-            MsmBases::Bytes(&h_glv_bytes),
-            h_bd,
-            false,
-        )?;
-        #[cfg(feature = "timing")]
-        eprintln!("[proof] msm enqueue h: {:?}", t_phase.elapsed());
-    }
+    };
 
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
@@ -396,21 +413,35 @@ where
     #[cfg(feature = "timing")]
     let t_phase = std::time::Instant::now();
 
+    let (alpha_g1, beta_g1, beta_g2, delta_g1, delta_g2) = match pk {
+        ProvingKey::Uploaded(k) => (
+            &k.alpha_g1,
+            &k.beta_g1,
+            &k.beta_g2,
+            &k.delta_g1,
+            &k.delta_g2,
+        ),
+        ProvingKey::Serialized(k) => (
+            &k.alpha_g1,
+            &k.beta_g1,
+            &k.beta_g2,
+            &k.delta_g1,
+            &k.delta_g2,
+        ),
+    };
+
     // A = α + a_msm + r·δ
-    let mut proof_a =
-        G::add_g1_proj(&G::affine_to_proj_g1(&pk.vk.alpha_g1), &a_msm);
-    proof_a = G::add_g1_proj(&proof_a, &G::mul_g1_scalar(&pk.vk.delta_g1, &r));
+    let mut proof_a = G::add_g1_proj(&G::affine_to_proj_g1(alpha_g1), &a_msm);
+    proof_a = G::add_g1_proj(&proof_a, &G::mul_g1_scalar(delta_g1, &r));
 
     // B = β + b_g2_msm + s·δ   (in G2)
-    let mut proof_b =
-        G::add_g2_proj(&G::affine_to_proj_g2(&pk.vk.beta_g2), &b_g2_msm);
-    proof_b = G::add_g2_proj(&proof_b, &G::mul_g2_scalar(&pk.vk.delta_g2, &s));
+    let mut proof_b = G::add_g2_proj(&G::affine_to_proj_g2(beta_g2), &b_g2_msm);
+    proof_b = G::add_g2_proj(&proof_b, &G::mul_g2_scalar(delta_g2, &s));
 
     // C = l_msm + h_msm + s·A + r·(β + b_g1_msm + s·δ_G1) − r·s·δ
     let mut proof_c = G::add_g1_proj(&l_msm, &h_msm);
-    let mut b_g1 =
-        G::add_g1_proj(&G::affine_to_proj_g1(&pk.vk.beta_g1), &b_g1_msm);
-    b_g1 = G::add_g1_proj(&b_g1, &G::mul_g1_scalar(&pk.vk.delta_g1, &s));
+    let mut b_g1 = G::add_g1_proj(&G::affine_to_proj_g1(beta_g1), &b_g1_msm);
+    b_g1 = G::add_g1_proj(&b_g1, &G::mul_g1_scalar(delta_g1, &s));
 
     let c_shift_a = G::mul_g1_proj_scalar(&proof_a, &s);
     proof_c = G::add_g1_proj(&proof_c, &c_shift_a);
@@ -420,7 +451,7 @@ where
 
     let mut rs = r;
     rs *= s;
-    let rs_delta = G::mul_g1_scalar(&pk.vk.delta_g1, &rs);
+    let rs_delta = G::mul_g1_scalar(delta_g1, &rs);
     proof_c = G::sub_g1_proj(&proof_c, &rs_delta);
     #[cfg(feature = "timing")]
     eprintln!("[proof] final assembly: {:?}", t_phase.elapsed());
@@ -432,11 +463,13 @@ where
     })
 }
 
-/// Create a Groth16 proof with random blinding factors.
+/// Create a new Groth16 proof.
+///
+/// Uses a [`GpuProvingKey`] to skip per-proof base uploads and Montgomery
+/// conversion, reusing pre-uploaded GPU buffers across proofs.
 pub async fn create_proof<E, G, C, R>(
     circuit: C,
-    pk: &bellman::groth16::Parameters<E>,
-    ppk: &PreparedProvingKey<G>,
+    pk: ProvingKey<'_, G>,
     gpu: &GpuContext<G>,
     rng: &mut R,
 ) -> Result<bellman::groth16::Proof<E>>
@@ -455,50 +488,8 @@ where
 {
     let r = G::Scalar::random(&mut *rng);
     let s = G::Scalar::random(&mut *rng);
-    create_proof_with_fixed_randomness::<E, G, C>(
-        circuit, pk, ppk, gpu, None, r, s,
-    )
-    .await
-}
 
-/// Create a Groth16 proof using persistent GPU base buffers.
-///
-/// Like [`create_proof`] but uses a [`GpuProvingKey`] to skip per-proof base
-/// uploads and Montgomery conversion, reusing pre-uploaded GPU buffers across
-/// proofs.
-pub async fn create_proof_with_gpu_key<E, G, C, R>(
-    circuit: C,
-    pk: &bellman::groth16::Parameters<E>,
-    ppk: &PreparedProvingKey<G>,
-    gpu: &GpuContext<G>,
-    gpu_pk: &GpuProvingKey,
-    rng: &mut R,
-) -> Result<bellman::groth16::Proof<E>>
-where
-    E: pairing::MultiMillerLoop,
-    C: bellman::Circuit<G::Scalar>,
-    G: GpuCurve<
-            Engine = E,
-            Scalar = E::Fr,
-            G1 = E::G1,
-            G2 = E::G2,
-            G1Affine = E::G1Affine,
-            G2Affine = E::G2Affine,
-        > + Send,
-    R: RngCore,
-{
-    let r = G::Scalar::random(&mut *rng);
-    let s = G::Scalar::random(&mut *rng);
-    create_proof_with_fixed_randomness::<E, G, C>(
-        circuit,
-        pk,
-        ppk,
-        gpu,
-        Some(gpu_pk),
-        r,
-        s,
-    )
-    .await
+    create_proof_with_fixed_randomness::<E, G, C>(circuit, pk, gpu, r, s).await
 }
 
 #[cfg(test)]

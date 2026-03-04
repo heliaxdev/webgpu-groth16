@@ -83,7 +83,10 @@ async fn test_gpu_groth16_prover() {
 
     let ppk = prepare_proving_key::<Bls12, Bls12>(&params);
     let proof = create_proof::<Bls12, Bls12, _, _>(
-        circuit, &params, &ppk, &gpu_ctx, &mut rng,
+        circuit,
+        ProvingKey::Serialized(&ppk),
+        &gpu_ctx,
+        &mut rng,
     )
     .await
     .expect("Failed to generate Groth16 proof on GPU");
@@ -131,8 +134,11 @@ async fn test_gpu_groth16_prover_persistent_key() {
         y: Some(y_value),
     };
 
-    let proof = create_proof_with_gpu_key::<Bls12, Bls12, _, _>(
-        circuit, &params, &ppk, &gpu_ctx, &gpu_pk, &mut rng,
+    let proof = create_proof::<Bls12, Bls12, _, _>(
+        circuit,
+        ProvingKey::Uploaded(&gpu_pk),
+        &gpu_ctx,
+        &mut rng,
     )
     .await
     .expect("Failed to generate Groth16 proof with persistent GPU key");
@@ -341,8 +347,11 @@ async fn bench_gpu_sapling_output() {
     eprintln!("[diag] gpu_pk upload+montgomery: {:?}", t.elapsed());
 
     let t0 = Instant::now();
-    let proof = create_proof_with_gpu_key::<Bls12, Bls12, _, _>(
-        circuit, &params, &ppk, &gpu_ctx, &gpu_pk, &mut rng,
+    let proof = create_proof::<Bls12, Bls12, _, _>(
+        circuit,
+        ProvingKey::Uploaded(&gpu_pk),
+        &gpu_ctx,
+        &mut rng,
     )
     .await
     .expect("gpu sapling output proof failed");
@@ -838,10 +847,8 @@ async fn test_proof_abc_match_cpu_reference() {
             x: Some(x_value),
             y: Some(y_value),
         },
-        &params,
-        &ppk,
+        ProvingKey::Serialized(&ppk),
         &gpu_ctx,
-        None,
         r,
         s,
     )
@@ -1227,10 +1234,8 @@ async fn test_gpu_large_circuit_abc_match() {
     let t0 = Instant::now();
     let gpu_proof = create_proof_with_fixed_randomness::<Bls12, Bls12, _>(
         circuit.clone(),
-        &params,
-        &ppk,
+        ProvingKey::Uploaded(&gpu_pk),
         &gpu_ctx,
-        Some(&gpu_pk),
         r,
         s,
     )

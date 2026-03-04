@@ -30,11 +30,11 @@ pub type GlvWindowDecomposition =
 pub trait GpuCurve: 'static {
     type Engine: pairing::Engine;
 
-    type Scalar: PrimeField + PrimeFieldBits;
-    type G1: Group<Scalar = Self::Scalar>;
-    type G2: Group<Scalar = Self::Scalar>;
-    type G1Affine;
-    type G2Affine;
+    type Scalar: PrimeField + PrimeFieldBits + Copy;
+    type G1: Group<Scalar = Self::Scalar> + Copy;
+    type G2: Group<Scalar = Self::Scalar> + Copy;
+    type G1Affine: Copy;
+    type G2Affine: Copy;
 
     /// Size of one Fq element in GPU buffer layout.
     const FQ_GPU_BYTES: usize;
@@ -162,13 +162,9 @@ pub trait GpuCurve: 'static {
 
     fn bucket_width() -> usize;
 
-    fn g2_bucket_width() -> usize {
-        8
-    }
+    fn g2_bucket_width() -> usize;
 
-    fn glv_bucket_width() -> usize {
-        13
-    }
+    fn glv_bucket_width() -> usize;
 
     fn root_of_unity(n: usize) -> Self::Scalar;
 

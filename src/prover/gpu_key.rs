@@ -10,10 +10,14 @@ use crate::gpu::curve::GpuCurve;
 
 /// Pre-uploaded GPU base point buffers for a specific circuit.
 ///
-/// Created once per circuit via [`prepare_gpu_proving_key`], then reused
-/// across all proofs with
-/// [`create_proof_with_gpu_key`](super::create_proof_with_gpu_key).
-pub struct GpuProvingKey {
+/// Created once per circuit via [`prepare_gpu_proving_key`].
+pub struct GpuProvingKey<G: GpuCurve> {
+    pub(crate) h_len: usize,
+    pub(crate) alpha_g1: G::G1Affine,
+    pub(crate) beta_g1: G::G1Affine,
+    pub(crate) beta_g2: G::G2Affine,
+    pub(crate) delta_g1: G::G1Affine,
+    pub(crate) delta_g2: G::G2Affine,
     pub(crate) a_bases_buf: wgpu::Buffer,
     pub(crate) b_g1_bases_buf: wgpu::Buffer,
     pub(crate) l_bases_buf: wgpu::Buffer,
@@ -26,7 +30,7 @@ pub struct GpuProvingKey {
 pub fn prepare_gpu_proving_key<G: GpuCurve>(
     ppk: &PreparedProvingKey<G>,
     gpu: &GpuContext<G>,
-) -> GpuProvingKey {
+) -> GpuProvingKey<G> {
     let a_combined;
     let b_g1_combined;
     let l_combined;
@@ -89,6 +93,12 @@ pub fn prepare_gpu_proving_key<G: GpuCurve>(
     let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
 
     GpuProvingKey {
+        h_len: ppk.h_len,
+        alpha_g1: ppk.alpha_g1,
+        beta_g1: ppk.beta_g1,
+        beta_g2: ppk.beta_g2,
+        delta_g1: ppk.delta_g1,
+        delta_g2: ppk.delta_g2,
         a_bases_buf,
         b_g1_bases_buf,
         l_bases_buf,

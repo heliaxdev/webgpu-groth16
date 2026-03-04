@@ -12,6 +12,12 @@ use crate::gpu::curve::GpuCurve;
 /// Includes GLV endomorphism bases φ(P) for G1 sets, pre-computed once to
 /// amortize the endomorphism cost across proofs.
 pub struct PreparedProvingKey<G: GpuCurve> {
+    pub h_len: usize,
+    pub alpha_g1: G::G1Affine,
+    pub beta_g1: G::G1Affine,
+    pub beta_g2: G::G2Affine,
+    pub delta_g1: G::G1Affine,
+    pub delta_g2: G::G2Affine,
     pub a_bytes: Vec<u8>,
     pub a_phi_bytes: Option<Vec<u8>>,
     pub b_g1_bytes: Vec<u8>,
@@ -21,7 +27,6 @@ pub struct PreparedProvingKey<G: GpuCurve> {
     pub h_bytes: Vec<u8>,
     pub h_phi_bytes: Option<Vec<u8>>,
     pub b_g2_bytes: Vec<u8>,
-    _marker: std::marker::PhantomData<G>,
 }
 
 pub(crate) fn serialize_g1_bases<G: GpuCurve>(
@@ -112,6 +117,12 @@ where
     };
 
     PreparedProvingKey {
+        h_len: pk.h.len(),
+        alpha_g1: pk.vk.alpha_g1,
+        beta_g1: pk.vk.beta_g1,
+        beta_g2: pk.vk.beta_g2,
+        delta_g1: pk.vk.delta_g1,
+        delta_g2: pk.vk.delta_g2,
         a_bytes: serialize_g1_bases::<G>(&pk.a),
         a_phi_bytes: a_phi,
         b_g1_bytes: serialize_g1_bases::<G>(&pk.b_g1),
@@ -121,6 +132,5 @@ where
         h_bytes: serialize_g1_bases::<G>(&pk.h),
         h_phi_bytes: h_phi,
         b_g2_bytes: serialize_g2_bases::<G>(&pk.b_g2),
-        _marker: std::marker::PhantomData,
     }
 }

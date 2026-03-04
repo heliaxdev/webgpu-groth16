@@ -902,7 +902,7 @@ mod tests {
 
         // -φ(P)
         let phi_bytes = endomorphism_g1_bytes(&g_bytes);
-        let mut neg_phi = phi_bytes.clone();
+        let mut neg_phi = phi_bytes;
         negate_g1_bytes(&mut neg_phi);
 
         // They should be equal (endomorphism is a group homomorphism)

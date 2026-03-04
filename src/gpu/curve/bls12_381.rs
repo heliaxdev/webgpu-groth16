@@ -361,6 +361,14 @@ impl GpuCurve for blstrs::Bls12 {
         13
     }
 
+    fn g2_bucket_width() -> usize {
+        8
+    }
+
+    fn glv_bucket_width() -> usize {
+        13
+    }
+
     fn g1_msm_bucket_width(n: usize) -> usize {
         if n < 256 {
             return 13;

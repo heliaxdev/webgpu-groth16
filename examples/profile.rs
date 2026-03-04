@@ -119,7 +119,10 @@ fn main() {
             num_squarings,
         };
         rt.block_on(prover::create_proof::<Bls12, Bls12, _, _>(
-            circuit, &params, &ppk, &gpu, &mut rng,
+            circuit,
+            prover::ProvingKey::Serialized(&ppk),
+            &gpu,
+            &mut rng,
         ))
         .expect("warmup proof failed");
 
@@ -146,7 +149,10 @@ fn main() {
         };
         let _proof = rt
             .block_on(prover::create_proof::<Bls12, Bls12, _, _>(
-                circuit, &params, &ppk, &gpu, &mut rng,
+                circuit,
+                prover::ProvingKey::Serialized(&ppk),
+                &gpu,
+                &mut rng,
             ))
             .expect("proof failed");
 
